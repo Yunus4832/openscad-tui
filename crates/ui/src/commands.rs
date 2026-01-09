@@ -51,6 +51,9 @@ pub fn cmd_insert(
         .get_module(module_name)
         .ok_or_else(|| CommandError::InvalidCommand(format!("Unknown module: {}", module_name)))?;
     
+    // Get module source information (library name and file)
+    let (source_lib_name, source_lib_file) = app.library.get_module_source(module_name);
+    
     // Parse parameters
     let args = if let Some(param_str) = params {
         parse_arguments(param_str, &module_def)?
@@ -71,8 +74,16 @@ pub fn cmd_insert(
             return Err(CommandError::NoChildrenSelected);
         }
         
-        // Create container module
-        let container = ModuleNode::new_container(node_id.clone(), module_name.to_string(), args);
+        // Create container module with source library info
+        let mut container = ModuleNode::new_container(node_id.clone(), module_name.to_string(), args);
+        container.source_library = source_lib_name.clone();
+        
+        // If this module comes from a third-party library, add include statement
+        if let Some(ref lib_file) = source_lib_file {
+            if !app.ast.includes.contains(lib_file) {
+                app.ast.includes.push(lib_file.clone());
+            }
+        }
         
         // Find the parent of the first selected node
         let first_selected = app.selected_nodes.first().cloned();
@@ -128,8 +139,16 @@ pub fn cmd_insert(
         
         Ok(node_id)
     } else {
-        // For leaf modules, create as before
-        let module = ModuleNode::new_leaf(node_id.clone(), module_name.to_string(), args);
+        // For leaf modules, create with source library info
+        let mut module = ModuleNode::new_leaf(node_id.clone(), module_name.to_string(), args);
+        module.source_library = source_lib_name;
+        
+        // If this module comes from a third-party library, add include statement
+        if let Some(ref lib_file) = source_lib_file {
+            if !app.ast.includes.contains(lib_file) {
+                app.ast.includes.push(lib_file.clone());
+            }
+        }
         
         // Determine insertion point based on current selection
         let selected = app.tree_state.borrow().selected().last().cloned();

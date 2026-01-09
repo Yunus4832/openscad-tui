@@ -356,6 +356,25 @@ impl LibraryManager {
             .or_else(|| self.get_module_from_libraries(name))
     }
     
+    /// Get module source information
+    /// Returns (library_name, library_file) for third-party modules
+    /// Returns (None, None) for built-in modules
+    pub fn get_module_source(&self, name: &str) -> (Option<String>, Option<String>) {
+        // Check if it's a built-in module
+        if self.builtin_modules.contains_key(name) {
+            return (None, None);
+        }
+        
+        // Check in loaded libraries
+        for lib in self.libraries.values() {
+            if lib.modules.iter().any(|m| m.name == name) {
+                return (Some(lib.name.clone()), Some(lib.file.clone()));
+            }
+        }
+        
+        (None, None)
+    }
+    
     /// Get module from loaded libraries
     fn get_module_from_libraries(&self, name: &str) -> Option<ModuleDef> {
         for lib in self.libraries.values() {

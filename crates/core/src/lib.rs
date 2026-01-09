@@ -256,6 +256,9 @@ pub struct ModuleNode {
     
     /// Metadata for display
     pub display_name: Option<String>,
+    
+    /// Source library (None = built-in, Some = third-party library name)
+    pub source_library: Option<String>,
 }
 
 impl ModuleNode {
@@ -267,6 +270,7 @@ impl ModuleNode {
             args,
             children: Vec::new(),
             display_name: None,
+            source_library: None,
         }
     }
     
@@ -278,6 +282,7 @@ impl ModuleNode {
             args,
             children: Vec::new(),
             display_name: None,
+            source_library: None,
         }
     }
     
