@@ -466,31 +466,137 @@ pub fn cmd_translate(
 }
 
 // Helper function to parse arguments
-fn parse_arguments(param_str: &str, module_def: &ModuleDef) -> CommandResult<Vec<Argument>> {
+/// Parse arguments from a string, respecting nested structures (lists, etc.)
+/// 
+/// Handles complex parameters like:
+/// - Simple values: 10, 1.5, "text", true
+/// - Lists: [10, 20, 30] or [1.5, 2.5, 3.5]
+/// - Named parameters: size=[10,10,10], center=true
+/// - Mixed: 10, [20,30], center=true
+fn parse_arguments(param_str: &str, _module_def: &ModuleDef) -> CommandResult<Vec<Argument>> {
     let mut args = Vec::new();
     
     if param_str.trim().is_empty() {
         return Ok(args);
     }
     
-    let parts: Vec<&str> = param_str.split(',').collect();
+    // Split parameters while respecting brackets and quotes
+    let parts = split_parameters(param_str)?;
     
-    for (i, param_def) in module_def.parameters.iter().enumerate() {
-        if i >= parts.len() {
-            break;
+    for (i, part) in parts.iter().enumerate() {
+        let part = part.trim();
+        
+        // Check if this is a named parameter (contains '=')
+        if let Some(eq_pos) = part.find('=') {
+            let name = part[..eq_pos].trim();
+            let value_str = part[eq_pos + 1..].trim();
+            
+            let value = Expr::parse(value_str)
+                .map_err(|e| CommandError::ParameterError(format!(
+                    "Invalid parameter value for '{}': {} - {}",
+                    name, value_str, e
+                )))?;
+            
+            args.push(Argument::Named {
+                name: name.to_string(),
+                value,
+            });
+        } else {
+            // Positional parameter
+            let value = Expr::parse(part)
+                .map_err(|e| CommandError::ParameterError(format!(
+                    "Invalid parameter at position {}: {} - {}",
+                    i, part, e
+                )))?;
+            
+            args.push(Argument::Positional(value));
         }
-        
-        let value_str = parts[i].trim();
-        let value = Expr::parse(value_str)
-            .map_err(|e| CommandError::ParameterError(e.to_string()))?;
-        
-        args.push(Argument::Named {
-            name: param_def.name.clone(),
-            value,
-        });
     }
     
     Ok(args)
+}
+
+/// Split parameters respecting brackets and quotes
+/// This function splits by commas but ignores commas inside brackets or quotes
+/// 
+/// Examples:
+/// "10, 20, 30" → ["10", "20", "30"]
+/// "[10, 20], 30" → ["[10, 20]", "30"]
+/// "size=[10,20,30], center=true" → ["size=[10,20,30]", "center=true"]
+fn split_parameters(input: &str) -> CommandResult<Vec<String>> {
+    let mut params = Vec::new();
+    let mut current = String::new();
+    let mut bracket_depth = 0;
+    let mut paren_depth = 0;
+    let mut in_quotes = false;
+    let mut escape_next = false;
+    
+    for ch in input.chars() {
+        if escape_next {
+            current.push(ch);
+            escape_next = false;
+            continue;
+        }
+        
+        match ch {
+            '\\' if in_quotes => {
+                escape_next = true;
+                current.push(ch);
+            }
+            '"' => {
+                in_quotes = !in_quotes;
+                current.push(ch);
+            }
+            '[' if !in_quotes => {
+                bracket_depth += 1;
+                current.push(ch);
+            }
+            ']' if !in_quotes && bracket_depth > 0 => {
+                bracket_depth -= 1;
+                current.push(ch);
+            }
+            '(' if !in_quotes => {
+                paren_depth += 1;
+                current.push(ch);
+            }
+            ')' if !in_quotes && paren_depth > 0 => {
+                paren_depth -= 1;
+                current.push(ch);
+            }
+            ',' if !in_quotes && bracket_depth == 0 && paren_depth == 0 => {
+                // This comma is a parameter separator
+                if !current.trim().is_empty() {
+                    params.push(current.trim().to_string());
+                }
+                current.clear();
+            }
+            _ => current.push(ch),
+        }
+    }
+    
+    // Add the last parameter
+    if !current.trim().is_empty() {
+        params.push(current.trim().to_string());
+    }
+    
+    // Validate bracket/quote balance
+    if in_quotes {
+        return Err(CommandError::ParameterError(
+            "Unclosed quoted string in parameters".to_string(),
+        ));
+    }
+    if bracket_depth != 0 {
+        return Err(CommandError::ParameterError(
+            "Mismatched brackets in parameters".to_string(),
+        ));
+    }
+    if paren_depth != 0 {
+        return Err(CommandError::ParameterError(
+            "Mismatched parentheses in parameters".to_string(),
+        ));
+    }
+    
+    Ok(params)
 }
 
 /// Save AST to YAML file
