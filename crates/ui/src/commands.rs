@@ -599,27 +599,27 @@ fn split_parameters(input: &str) -> CommandResult<Vec<String>> {
     Ok(params)
 }
 
-/// Save AST to YAML file
+/// Save AST to JSON file
 pub fn cmd_write(app: &crate::app::App, filename: &str) -> CommandResult<()> {
-    // Ensure filename ends with .yaml
-    let filepath = if !filename.ends_with(".yaml") && !filename.ends_with(".yml") {
-        format!("{}.yaml", filename)
+    // Ensure filename ends with .json
+    let filepath = if !filename.ends_with(".json") {
+        format!("{}.json", filename)
     } else {
         filename.to_string()
     };
     
-    // Serialize AST to YAML
-    let yaml = serde_yaml::to_string(&app.ast)
+    // Serialize AST to JSON
+    let json = serde_json::to_string_pretty(&app.ast)
         .map_err(|e| CommandError::Custom(format!("Failed to serialize AST: {}", e)))?;
     
     // Write to file
-    fs::write(&filepath, yaml)
+    fs::write(&filepath, json)
         .map_err(|e| CommandError::Custom(format!("Failed to write file '{}': {}", filepath, e)))?;
     
     Ok(())
 }
 
-/// Load AST from YAML file
+/// Load AST from JSON file
 pub fn cmd_load(app: &mut crate::app::App, filename: &str) -> CommandResult<()> {
     // Check file exists
     if !Path::new(filename).exists() {
@@ -630,9 +630,9 @@ pub fn cmd_load(app: &mut crate::app::App, filename: &str) -> CommandResult<()> 
     let content = fs::read_to_string(filename)
         .map_err(|e| CommandError::Custom(format!("Failed to read file '{}': {}", filename, e)))?;
     
-    // Deserialize from YAML
-    let ast = serde_yaml::from_str(&content)
-        .map_err(|e| CommandError::Custom(format!("Failed to parse YAML: {}", e)))?;
+    // Deserialize from JSON
+    let ast = serde_json::from_str(&content)
+        .map_err(|e| CommandError::Custom(format!("Failed to parse JSON: {}", e)))?;
     
     // Replace AST
     app.ast = ast;

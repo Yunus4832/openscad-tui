@@ -88,18 +88,18 @@ fn handle_normal_input(key: KeyEvent, app: &mut App) {
             }
         }
         
-        // w - write (save to YAML)
+        // w - write (save to JSON)
         KeyCode::Char('w') => {
             app.input_mode = InputMode::Command;
             app.input_buffer = "write ".to_string();
-            app.set_info("Save to YAML file - enter filename");
+            app.set_info("Save to JSON file - enter filename");
         }
         
-        // e - edit (load from YAML)
+        // e - edit (load from JSON)
         KeyCode::Char('e') => {
             app.input_mode = InputMode::Command;
             app.input_buffer = "edit ".to_string();
-            app.set_info("Load from YAML file - enter filename");
+            app.set_info("Load from JSON file - enter filename");
         }
         
         // : - enter command mode
@@ -470,10 +470,10 @@ fn execute_command(app: &mut App) {
             app.set_error("Replace command not implemented yet");
         }
         
-        // write/save - w <filename>.yaml
+        // write/save - w <filename>.json
         Some(&"write") | Some(&"save") | Some(&"w") => {
             if parts.len() < 2 {
-                app.set_error("Usage: write <filename>.yaml");
+                app.set_error("Usage: write <filename>.json");
                 return;
             }
             let filename = parts[1];
@@ -483,10 +483,10 @@ fn execute_command(app: &mut App) {
             }
         }
         
-        // edit - edit <filename>.yaml
+        // edit - edit <filename>.json
         Some(&"edit") | Some(&"e") => {
             if parts.len() < 2 {
-                app.set_error("Usage: edit <filename>.yaml");
+                app.set_error("Usage: edit <filename>.json");
                 return;
             }
             let filename = parts[1];

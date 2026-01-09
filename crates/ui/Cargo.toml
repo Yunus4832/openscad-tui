@@ -10,6 +10,7 @@ ratatui.workspace = true
 crossterm.workspace = true
 serde.workspace = true
 serde_yaml.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 unicode-width.workspace = true
 tui-tree-widget.workspace = true
