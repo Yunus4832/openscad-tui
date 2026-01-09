@@ -16,6 +16,7 @@ pub enum CommandError {
     ParameterError(String),
     
     #[error("No node selected")]
+    #[allow(dead_code)]
     NoNodeSelected,
     
     #[error("No children selected")]
@@ -104,6 +105,7 @@ pub fn cmd_boolean_op(
 }
 
 /// Select command
+#[allow(dead_code)]
 pub fn cmd_select(app: &mut crate::app::App, node_id: &str) -> CommandResult<()> {
     if app.ast.find_node_by_id(node_id).is_none() {
         return Err(CommandError::InvalidCommand(format!("Node not found: {}", node_id)));
@@ -117,17 +119,20 @@ pub fn cmd_select(app: &mut crate::app::App, node_id: &str) -> CommandResult<()>
 }
 
 /// Deselect command
+#[allow(dead_code)]
 pub fn cmd_deselect(app: &mut crate::app::App, node_id: &str) -> CommandResult<()> {
     app.selected_nodes.retain(|id| id != node_id);
     Ok(())
 }
 
 /// Clear selection
+#[allow(dead_code)]
 pub fn cmd_clear_selection(app: &mut crate::app::App) {
     app.selected_nodes.clear();
 }
 
 /// Translate command
+#[allow(dead_code)]
 pub fn cmd_translate(
     app: &mut crate::app::App,
     node_id: &str,
@@ -194,6 +199,7 @@ fn parse_arguments(param_str: &str, module_def: &ModuleDef) -> CommandResult<Vec
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[allow(unused_imports)]
     use crate::app::App;
     
     #[test]

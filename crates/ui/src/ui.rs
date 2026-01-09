@@ -22,7 +22,7 @@ pub fn draw(f: &mut Frame, app: &App) {
             ]
             .as_ref(),
         )
-        .split(f.size());
+        .split(f.area());
 
     // 上部内容区：左侧树形图，右侧预览
     let content_chunks = Layout::default()

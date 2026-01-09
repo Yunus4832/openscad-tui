@@ -13,8 +13,8 @@ pub fn handle_key(key: KeyEvent, app: &mut App) {
         InputMode::Command => handle_command_input(key, app),
         InputMode::InsertEnterParams => handle_insert_params_input(key, app),
         InputMode::ReplaceSelectModule => handle_replace_module_input(key, app),
-        // Other modes are now unused - we're command-line focused
-        InputMode::Normal | InputMode::InsertSelectModule => handle_command_input(key, app),
+        // Legacy modes - fallback to command input
+        _ => handle_command_input(key, app),
     }
 }
 

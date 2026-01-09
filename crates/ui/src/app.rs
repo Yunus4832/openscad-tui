@@ -7,6 +7,7 @@ use std::cell::RefCell;
 use tui_tree_widget::TreeState;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[allow(dead_code)]
 pub enum InputMode {
     /// Command mode - all input is command-based
     Command,
@@ -28,13 +29,16 @@ pub struct App {
     
     // UI state - Tree navigation (using RefCell for interior mutability)
     pub tree_state: RefCell<TreeState<String>>,
+    #[allow(dead_code)]
     pub tree_cursor: usize,
+    #[allow(dead_code)]
     pub expanded_nodes: std::collections::HashSet<String>,
     
     // UI state - Input and display
     pub input_buffer: String,
     pub input_mode: InputMode,
     /// For insert mode: whether to insert after (true) or before (false)
+    #[allow(dead_code)]
     pub insert_after: bool,
     /// For insert mode: the selected module name
     pub insert_module_name: Option<String>,
@@ -64,6 +68,7 @@ impl App {
         }
     }
     
+    #[allow(dead_code)]
     pub fn toggle_command_mode(&mut self) {
         // Legacy method - no longer used, kept for compatibility
         // All input is now command-based
@@ -105,6 +110,7 @@ impl App {
         self.error_message = None;
     }
     
+    #[allow(dead_code)]
     pub fn clear_input(&mut self) {
         self.input_buffer.clear();
     }
