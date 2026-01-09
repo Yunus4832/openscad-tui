@@ -312,7 +312,7 @@ impl ModuleNode {
     pub fn to_scad(&self, indent: usize) -> String {
         let indent_str = " ".repeat(indent);
         let args_str = if self.args.is_empty() {
-            String::new()
+            "()".to_string()
         } else {
             let args = self.args.iter()
                 .map(|a| match a {
