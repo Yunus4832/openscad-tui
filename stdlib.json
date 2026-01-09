@@ -1,0 +1,195 @@
+{
+  "name": "StandardLibrary",
+  "description": "OpenSCAD Standard Library Definitions",
+  "file": "stdlib.scad",
+  "version": "1.0",
+  "modules": [
+    {
+      "name": "cube",
+      "description": "Creates a cube",
+      "accepts_children": false,
+      "parameters": [
+        {
+          "name": "size",
+          "param_type": "list",
+          "default": "[1, 1, 1]",
+          "description": "Cube dimensions [x, y, z] or single value"
+        },
+        {
+          "name": "center",
+          "param_type": "boolean",
+          "default": "false",
+          "description": "Center the cube at origin"
+        }
+      ]
+    },
+    {
+      "name": "sphere",
+      "description": "Creates a sphere",
+      "accepts_children": false,
+      "parameters": [
+        {
+          "name": "r",
+          "param_type": "float",
+          "default": "1",
+          "description": "Radius of the sphere"
+        },
+        {
+          "name": "$fn",
+          "param_type": "integer",
+          "description": "Number of fragments for rendering quality"
+        }
+      ]
+    },
+    {
+      "name": "cylinder",
+      "description": "Creates a cylinder",
+      "accepts_children": false,
+      "parameters": [
+        {
+          "name": "h",
+          "param_type": "float",
+          "default": "1",
+          "description": "Height of the cylinder"
+        },
+        {
+          "name": "r",
+          "param_type": "float",
+          "default": "1",
+          "description": "Radius of the cylinder"
+        },
+        {
+          "name": "center",
+          "param_type": "boolean",
+          "default": "false",
+          "description": "Center the cylinder at origin"
+        }
+      ]
+    },
+    {
+      "name": "square",
+      "description": "Creates a 2D square",
+      "accepts_children": false,
+      "parameters": [
+        {
+          "name": "size",
+          "param_type": "list",
+          "default": "[1, 1]",
+          "description": "Square dimensions [x, y] or single value"
+        },
+        {
+          "name": "center",
+          "param_type": "boolean",
+          "default": "false",
+          "description": "Center the square at origin"
+        }
+      ]
+    },
+    {
+      "name": "circle",
+      "description": "Creates a 2D circle",
+      "accepts_children": false,
+      "parameters": [
+        {
+          "name": "r",
+          "param_type": "float",
+          "default": "1",
+          "description": "Radius of the circle"
+        }
+      ]
+    },
+    {
+      "name": "translate",
+      "description": "Translates children by a vector",
+      "accepts_children": true,
+      "parameters": [
+        {
+          "name": "v",
+          "param_type": "list",
+          "default": "[0, 0, 0]",
+          "description": "Translation vector [x, y, z]"
+        }
+      ]
+    },
+    {
+      "name": "rotate",
+      "description": "Rotates children",
+      "accepts_children": true,
+      "parameters": [
+        {
+          "name": "a",
+          "param_type": "list",
+          "default": "[0, 0, 0]",
+          "description": "Rotation angles [x, y, z] in degrees"
+        },
+        {
+          "name": "v",
+          "param_type": "list",
+          "description": "Rotation axis (optional)"
+        }
+      ]
+    },
+    {
+      "name": "scale",
+      "description": "Scales children",
+      "accepts_children": true,
+      "parameters": [
+        {
+          "name": "v",
+          "param_type": "list",
+          "default": "[1, 1, 1]",
+          "description": "Scale factors [x, y, z]"
+        }
+      ]
+    },
+    {
+      "name": "mirror",
+      "description": "Mirrors children across a plane",
+      "accepts_children": true,
+      "parameters": [
+        {
+          "name": "v",
+          "param_type": "list",
+          "default": "[0, 0, 1]",
+          "description": "Mirror plane normal vector"
+        }
+      ]
+    },
+    {
+      "name": "union",
+      "description": "Union of children",
+      "accepts_children": true,
+      "parameters": []
+    },
+    {
+      "name": "difference",
+      "description": "Difference (first child minus others)",
+      "accepts_children": true,
+      "parameters": []
+    },
+    {
+      "name": "intersection",
+      "description": "Intersection of children",
+      "accepts_children": true,
+      "parameters": []
+    },
+    {
+      "name": "hull",
+      "description": "Convex hull of children",
+      "accepts_children": true,
+      "parameters": []
+    },
+    {
+      "name": "minkowski",
+      "description": "Minkowski sum of children",
+      "accepts_children": true,
+      "parameters": []
+    },
+    {
+      "name": "render",
+      "description": "Force rendering of children",
+      "accepts_children": true,
+      "parameters": []
+    }
+  ]
+}

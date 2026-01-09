@@ -13,8 +13,8 @@ pub enum LibraryError {
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),
     
-    #[error("YAML parsing error: {0}")]
-    YamlError(#[from] serde_yaml::Error),
+    #[error("JSON parsing error: {0}")]
+    JsonError(#[from] serde_json::Error),
     
     #[error("Library not found: {0}")]
     LibraryNotFound(String),
@@ -370,10 +370,10 @@ impl LibraryManager {
         modules
     }
     
-    /// Load a library from a YAML file
+    /// Load a library from a JSON file
     pub fn load_library(&mut self, path: &Path) -> Result<()> {
         let contents = fs::read_to_string(path)?;
-        let lib_def: LibraryDef = serde_yaml::from_str(&contents)?;
+        let lib_def: LibraryDef = serde_json::from_str(&contents)?;
         
         self.libraries.insert(lib_def.name.clone(), lib_def);
         Ok(())

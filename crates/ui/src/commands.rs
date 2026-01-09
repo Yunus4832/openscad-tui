@@ -663,6 +663,25 @@ pub fn cmd_export(app: &crate::app::App, filename: &str) -> CommandResult<()> {
     Ok(())
 }
 
+/// Load a library from a JSON file
+/// This command loads third-party module libraries into the LibraryManager
+/// Libraries should be in JSON format with the same schema as stdlib.json
+pub fn cmd_load_library(app: &mut crate::app::App, filename: &str) -> CommandResult<()> {
+    use std::path::Path;
+    
+    // Check if file exists
+    let path = Path::new(filename);
+    if !path.exists() {
+        return Err(CommandError::Custom(format!("Library file '{}' not found", filename)));
+    }
+    
+    // Load library
+    app.library.load_library(path)
+        .map_err(|e| CommandError::Custom(format!("Failed to load library: {}", e)))?;
+    
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

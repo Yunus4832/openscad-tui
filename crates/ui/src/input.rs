@@ -102,6 +102,13 @@ fn handle_normal_input(key: KeyEvent, app: &mut App) {
             app.set_info("Load from JSON file - enter filename");
         }
         
+        // L - library (load library JSON)
+        KeyCode::Char('L') => {
+            app.input_mode = InputMode::Command;
+            app.input_buffer = "library ".to_string();
+            app.set_info("Load library from JSON file - enter filename");
+        }
+        
         // : - enter command mode
         KeyCode::Char(':') => {
             app.input_mode = InputMode::Command;
@@ -505,6 +512,19 @@ fn execute_command(app: &mut App) {
             let filename = parts[1];
             match commands::cmd_export(app, filename) {
                 Ok(_) => app.set_info(&format!("✓ Exported to {}", filename)),
+                Err(e) => app.set_error(&e.to_string()),
+            }
+        }
+        
+        // library - library <filename>.json
+        Some(&"library") => {
+            if parts.len() < 2 {
+                app.set_error("Usage: library <filename>.json");
+                return;
+            }
+            let filename = parts[1];
+            match commands::cmd_load_library(app, filename) {
+                Ok(_) => app.set_info(&format!("✓ Loaded library from {}", filename)),
                 Err(e) => app.set_error(&e.to_string()),
             }
         }
