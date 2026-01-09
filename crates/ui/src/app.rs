@@ -94,6 +94,30 @@ impl App {
         }
     }
     
+    /// Restore tree state to a valid position
+    /// Called after AST modifications to ensure navigation isn't lost
+    pub fn restore_tree_selection(&mut self) {
+        let current_selection = self.tree_state.borrow().selected().last().cloned();
+        
+        // Check if current selection still exists in AST
+        if let Some(ref node_id) = current_selection {
+            if self.ast.find_node_by_id(node_id).is_some() {
+                // Current selection is still valid, keep it
+                return;
+            }
+        }
+        
+        // Current selection is invalid or empty, select first module
+        if !self.ast.modules.is_empty() {
+            if let Some(first_module) = self.ast.modules.first() {
+                self.tree_state.borrow_mut().select(vec![first_module.id.clone()]);
+            }
+        } else {
+            // No modules at all, clear selection
+            self.tree_state.borrow_mut().select(vec![]);
+        }
+    }
+    
     #[allow(dead_code)]
     pub fn toggle_command_mode(&mut self) {
         // Legacy method - no longer used, kept for compatibility
@@ -112,6 +136,7 @@ impl App {
         if let Some(prev) = self.undo_stack.pop_back() {
             self.redo_stack.push_back(self.ast.clone());
             self.ast = prev;
+            self.restore_tree_selection();
             self.clear_error();
         } else {
             self.set_error("Nothing to undo");
@@ -122,6 +147,7 @@ impl App {
         if let Some(next) = self.redo_stack.pop_back() {
             self.undo_stack.push_back(self.ast.clone());
             self.ast = next;
+            self.restore_tree_selection();
             self.clear_error();
         } else {
             self.set_error("Nothing to redo");

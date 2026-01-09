@@ -112,6 +112,9 @@ pub fn cmd_insert(
         // Clear selection after moving nodes
         app.selected_nodes.clear();
         
+        // Restore tree state to a valid position
+        app.restore_tree_selection();
+        
         Ok(node_id)
     } else {
         // For leaf modules, create as before
@@ -127,6 +130,9 @@ pub fn cmd_insert(
             // No selection, insert at root level
             app.ast.add_module(module)?;
         }
+        
+        // Restore tree state to a valid position
+        app.restore_tree_selection();
         
         Ok(node_id)
     }
@@ -243,6 +249,10 @@ pub fn cmd_delete(app: &mut crate::app::App, node_id: &str) -> CommandResult<()>
     if tree_state.selected() == &[node_id.to_string()] {
         tree_state.select(vec![]);
     }
+    drop(tree_state); // Explicitly drop the borrow
+    
+    // Restore tree state to a valid position
+    app.restore_tree_selection();
     
     Ok(())
 }
@@ -302,6 +312,9 @@ pub fn cmd_boolean_op(
             container_mut.children.push(node);
         }
     }
+    
+    // Restore tree state to a valid position
+    app.restore_tree_selection();
     
     Ok(op_id)
 }
