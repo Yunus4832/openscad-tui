@@ -1,0 +1,21 @@
+[package]
+name = "openscad-ui"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+ratatui.workspace = true
+crossterm.workspace = true
+serde.workspace = true
+serde_yaml.workspace = true
+thiserror.workspace = true
+unicode-width.workspace = true
+tui-tree-widget.workspace = true
+openscad-core = { path = "../core" }
+openscad-library = { path = "../library" }
+
+[[bin]]
+name = "openscad-tui"
+path = "src/main.rs"

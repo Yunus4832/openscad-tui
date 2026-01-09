@@ -1,0 +1,19 @@
+[workspace]
+members = ["crates/core", "crates/library", "crates/ui"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["OpenSCAD TUI Contributors"]
+license = "MIT"
+
+[workspace.dependencies]
+ratatui = "0.29"
+crossterm = "0.29"
+serde = { version = "1.0", features = ["derive"] }
+serde_yaml = "0.9"
+unicode-width = "0.2"
+tui-tree-widget = "0.23"
+clap = { version = "4.4", features = ["derive"] }
+thiserror = "1.0"
