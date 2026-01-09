@@ -8,16 +8,15 @@ use tui_tree_widget::TreeState;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum InputMode {
-    /// Normal navigation mode
-    Normal,
-    /// Command mode (: prefix)
+    /// Command mode - all input is command-based
     Command,
-    /// Insert mode (i/a keys) - selecting module
-    InsertSelectModule,
-    /// Insert mode - entering parameters
+    /// Multi-stage insert - entering parameters for insert command
     InsertEnterParams,
-    /// Replace mode - selecting replacement module
+    /// Multi-stage replace - selecting replacement module
     ReplaceSelectModule,
+    /// Legacy modes (no longer used, kept for compatibility)
+    Normal,
+    InsertSelectModule,
 }
 
 pub struct App {
@@ -56,7 +55,7 @@ impl App {
             tree_cursor: 0,
             expanded_nodes: std::collections::HashSet::new(),
             input_buffer: String::new(),
-            input_mode: InputMode::Normal,
+            input_mode: InputMode::Command,
             insert_after: true,
             insert_module_name: None,
             preview_offset: 0,
@@ -66,27 +65,8 @@ impl App {
     }
     
     pub fn toggle_command_mode(&mut self) {
-        self.input_mode = if self.input_mode == InputMode::Command {
-            InputMode::Normal
-        } else {
-            InputMode::Command
-        };
-        if self.input_mode == InputMode::Normal {
-            self.input_buffer.clear();
-        }
-    }
-    
-    pub fn enter_insert_mode(&mut self, after: bool) {
-        self.input_mode = InputMode::InsertSelectModule;
-        self.insert_after = after;
-        self.input_buffer.clear();
-        self.insert_module_name = None;
-    }
-    
-    pub fn exit_insert_mode(&mut self) {
-        self.input_mode = InputMode::Normal;
-        self.input_buffer.clear();
-        self.insert_module_name = None;
+        // Legacy method - no longer used, kept for compatibility
+        // All input is now command-based
     }
     
     pub fn push_undo(&mut self) {

@@ -134,58 +134,50 @@ fn build_flat_tree_recursive(
 fn draw_input(f: &mut Frame, app: &App, area: Rect) {
     use crate::app::InputMode;
     
-    let block = if app.input_mode == InputMode::Command {
-        Block::default()
-            .title(" 🔧 Command Mode ")
-            .borders(Borders::ALL)
-            .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
-    } else if app.input_mode == InputMode::InsertSelectModule {
-        Block::default()
-            .title(" 📝 Insert - Select Module ")
-            .borders(Borders::ALL)
-            .style(Style::default().fg(Color::Cyan))
-    } else if app.input_mode == InputMode::InsertEnterParams {
-        Block::default()
-            .title(" 📝 Insert - Enter Parameters ")
-            .borders(Borders::ALL)
-            .style(Style::default().fg(Color::Cyan))
-    } else {
-        Block::default()
-            .title(" ⌨️  Input ")
-            .borders(Borders::ALL)
-            .style(Style::default().fg(Color::Green))
-    };
-
-    let text = match app.input_mode {
-        InputMode::Command => format!(":{}", app.input_buffer),
-        InputMode::InsertSelectModule => {
-            format!("Search module: {}", app.input_buffer)
+    let title: String;
+    let prompt: String;
+    let style_fg: Color;
+    
+    match app.input_mode {
+        InputMode::Command => {
+            title = " ⌨️  Command ".to_string();
+            prompt = "Enter command (type 'help' for commands): ".to_string();
+            style_fg = Color::Green;
         },
         InputMode::InsertEnterParams => {
-            format!("Parameters for {}: {}", 
-                app.insert_module_name.as_deref().unwrap_or("?"),
-                app.input_buffer)
+            title = " 📝 Insert Parameters ".to_string();
+            prompt = format!("Parameters for '{}': ", app.insert_module_name.as_deref().unwrap_or("?"));
+            style_fg = Color::Cyan;
         },
-        _ => app.input_buffer.clone(),
+        InputMode::ReplaceSelectModule => {
+            title = " 🔄 Replace Module ".to_string();
+            prompt = "Enter replacement module name: ".to_string();
+            style_fg = Color::Yellow;
+        },
+        _ => {
+            title = " ⌨️  Command ".to_string();
+            prompt = "Enter command: ".to_string();
+            style_fg = Color::Green;
+        },
     };
     
-    // 显示错误信息或输入
+    let block = Block::default()
+        .title(title.clone())
+        .borders(Borders::ALL)
+        .style(Style::default().fg(style_fg));
+
     let display_text = if let Some(ref error) = app.error_message {
-        format!("❌ {}", error)
+        format!("{}\n> {}", error, app.input_buffer)
     } else {
-        text
+        format!("{}\n> {}", prompt, app.input_buffer)
     };
 
     let paragraph = Paragraph::new(display_text)
         .block(block)
         .style(if app.error_message.is_some() {
             Style::default().fg(Color::Red)
-        } else if matches!(app.input_mode, InputMode::Command) {
-            Style::default().fg(Color::Yellow)
-        } else if matches!(app.input_mode, InputMode::InsertSelectModule | InputMode::InsertEnterParams) {
-            Style::default().fg(Color::Cyan)
         } else {
-            Style::default().fg(Color::White)
+            Style::default().fg(style_fg)
         });
 
     f.render_widget(paragraph, area);
