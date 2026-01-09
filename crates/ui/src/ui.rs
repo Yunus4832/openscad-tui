@@ -116,11 +116,23 @@ fn build_tree_item(
 }
 
 fn draw_input(f: &mut Frame, app: &App, area: Rect) {
-    let block = if app.command_mode {
+    use crate::app::InputMode;
+    
+    let block = if app.input_mode == InputMode::Command {
         Block::default()
             .title(" 🔧 Command Mode ")
             .borders(Borders::ALL)
             .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+    } else if app.input_mode == InputMode::InsertSelectModule {
+        Block::default()
+            .title(" 📝 Insert - Select Module ")
+            .borders(Borders::ALL)
+            .style(Style::default().fg(Color::Cyan))
+    } else if app.input_mode == InputMode::InsertEnterParams {
+        Block::default()
+            .title(" 📝 Insert - Enter Parameters ")
+            .borders(Borders::ALL)
+            .style(Style::default().fg(Color::Cyan))
     } else {
         Block::default()
             .title(" ⌨️  Input ")
@@ -128,10 +140,17 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
             .style(Style::default().fg(Color::Green))
     };
 
-    let text = if app.command_mode {
-        format!(":{}", app.input_buffer)
-    } else {
-        app.input_buffer.clone()
+    let text = match app.input_mode {
+        InputMode::Command => format!(":{}", app.input_buffer),
+        InputMode::InsertSelectModule => {
+            format!("Search module: {}", app.input_buffer)
+        },
+        InputMode::InsertEnterParams => {
+            format!("Parameters for {}: {}", 
+                app.insert_module_name.as_deref().unwrap_or("?"),
+                app.input_buffer)
+        },
+        _ => app.input_buffer.clone(),
     };
     
     // 显示错误信息或输入
@@ -145,8 +164,10 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
         .block(block)
         .style(if app.error_message.is_some() {
             Style::default().fg(Color::Red)
-        } else if app.command_mode {
+        } else if matches!(app.input_mode, InputMode::Command) {
             Style::default().fg(Color::Yellow)
+        } else if matches!(app.input_mode, InputMode::InsertSelectModule | InputMode::InsertEnterParams) {
+            Style::default().fg(Color::Cyan)
         } else {
             Style::default().fg(Color::White)
         });

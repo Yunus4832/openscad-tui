@@ -1,14 +1,16 @@
-//! Input handling module - Vim-like keybindings for OpenSCAD TUI
+//! Input handling module - Vim-like keybindings with multi-stage interactions
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use crate::app::App;
+use crate::app::{App, InputMode};
 use crate::commands;
 
 pub fn handle_key(key: KeyEvent, app: &mut App) {
-    if app.command_mode {
-        handle_command_input(key, app);
-    } else {
-        handle_normal_input(key, app);
+    match app.input_mode {
+        InputMode::Normal => handle_normal_input(key, app),
+        InputMode::Command => handle_command_input(key, app),
+        InputMode::InsertSelectModule => handle_insert_select_module_input(key, app),
+        InputMode::InsertEnterParams => handle_insert_params_input(key, app),
+        InputMode::ReplaceSelectModule => handle_replace_select_module_input(key, app),
     }
 }
 
@@ -50,18 +52,18 @@ fn handle_normal_input(key: KeyEvent, app: &mut App) {
         }
         
         // Insert command: i (after), a (before)
+        // These enter InsertSelectModule mode where user can search/select modules
         KeyCode::Char('i') => {
-            app.set_error("Insert mode: Enter module name or :insert <name>");
-            // TODO: Start insert dialog/command mode
+            app.enter_insert_mode(true);  // true = insert after
+            app.set_error("Insert after - Type module name to search:");
         }
         KeyCode::Char('a') => {
-            app.set_error("Insert before mode: Enter module name or :insert <name>");
-            // TODO: Start insert before dialog/command mode
+            app.enter_insert_mode(false);  // false = insert before
+            app.set_error("Insert before - Type module name to search:");
         }
         
         // Select mode with 'v' - toggle visual selection
         KeyCode::Char('v') => {
-            // Get the LEAF node (last element of path) and mark it as selected
             let selected = {
                 app.tree_state.borrow().selected().last().cloned()
             };
@@ -78,23 +80,7 @@ fn handle_normal_input(key: KeyEvent, app: &mut App) {
         }
         
         // Delete commands: dd or D
-        KeyCode::Char('d') => {
-            // Check if the next key will be 'd' (for 'd' handler to complete 'dd')
-            // For now, treat single 'd' as delete
-            let node_id = {
-                app.tree_state.borrow().selected().last().cloned()
-            };
-            if let Some(node_id) = node_id {
-                app.push_undo();
-                if let Err(e) = commands::cmd_delete(app, &node_id) {
-                    app.set_error(&e.to_string());
-                }
-            } else {
-                app.set_error("No node selected");
-            }
-        }
-        KeyCode::Char('D') => {
-            // Capital D - delete
+        KeyCode::Char('d') | KeyCode::Char('D') => {
             let node_id = {
                 app.tree_state.borrow().selected().last().cloned()
             };
@@ -111,26 +97,19 @@ fn handle_normal_input(key: KeyEvent, app: &mut App) {
         // Remove command: x (delete node, move children to parent)
         KeyCode::Char('x') => {
             app.set_error("Remove command not implemented yet");
-            // TODO: Implement remove (delete node, move children up)
         }
         
         // Yank (copy): y
         KeyCode::Char('y') => {
-            let selected = {
+            let _selected = {
                 app.tree_state.borrow().selected().last().cloned()
             };
-            if let Some(_node_id) = selected {
-                app.set_error("Yank command not implemented yet");
-                // TODO: Implement yank (copy node to clipboard)
-            } else {
-                app.set_error("No node selected");
-            }
+            app.set_error("Yank command not implemented yet");
         }
         
         // Paste: p (paste below)
         KeyCode::Char('p') => {
             app.set_error("Paste command not implemented yet");
-            // TODO: Implement paste
         }
         
         // Undo with 'u'
@@ -145,10 +124,9 @@ fn handle_normal_input(key: KeyEvent, app: &mut App) {
             app.clear_error();
         }
         
-        // Replace command: r
+        // Replace command: R
         KeyCode::Char('R') => {
             app.set_error("Replace command not implemented yet");
-            // TODO: Implement replace
         }
         
         // Toggle command mode with ':'
@@ -164,14 +142,12 @@ fn handle_normal_input(key: KeyEvent, app: &mut App) {
         
         // Write (save as YAML): w
         KeyCode::Char('w') => {
-            app.set_error("Write command: :write <filename>.yaml");
-            // TODO: Implement write
+            app.set_error("Usage: :write <filename>.yaml");
         }
         
         // Edit (load YAML): e
         KeyCode::Char('e') => {
-            app.set_error("Edit command: :edit <filename>.yaml");
-            // TODO: Implement edit
+            app.set_error("Usage: :edit <filename>.yaml");
         }
         
         // Quit with 'q'
@@ -179,11 +155,8 @@ fn handle_normal_input(key: KeyEvent, app: &mut App) {
             app.should_quit = true;
         }
         
-        // Quit with Ctrl+C or Ctrl+Q
+        // Quit with Ctrl+C
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.should_quit = true;
-        }
-        KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             app.should_quit = true;
         }
         
@@ -213,8 +186,103 @@ fn handle_command_input(key: KeyEvent, app: &mut App) {
     }
 }
 
+/// Handle input while selecting a module in insert mode
+fn handle_insert_select_module_input(key: KeyEvent, app: &mut App) {
+    match key.code {
+        KeyCode::Char(c) => {
+            app.input_buffer.push(c);
+            // Display filtered modules as user types
+        }
+        KeyCode::Backspace => {
+            app.input_buffer.pop();
+        }
+        KeyCode::Enter => {
+            // User confirmed module selection
+            let module_name = app.input_buffer.trim().to_string();
+            if module_name.is_empty() {
+                app.set_error("Module name cannot be empty");
+                return;
+            }
+            
+            app.insert_module_name = Some(module_name.clone());
+            // For now, insert directly (would check for params if needed)
+            app.push_undo();
+            if let Err(e) = commands::cmd_insert(app, &module_name, None, None) {
+                app.set_error(&e.to_string());
+                app.exit_insert_mode();
+            } else {
+                app.clear_error();
+                app.exit_insert_mode();
+            }
+        }
+        KeyCode::Esc => {
+            app.exit_insert_mode();
+            app.set_error("Insert cancelled");
+        }
+        KeyCode::Tab => {
+            // Tab for autocomplete
+            app.input_buffer.push('\t');
+        }
+        _ => {}
+    }
+}
+
+/// Handle input while entering parameters for insert mode
+fn handle_insert_params_input(key: KeyEvent, app: &mut App) {
+    match key.code {
+        KeyCode::Char(c) => {
+            app.input_buffer.push(c);
+        }
+        KeyCode::Backspace => {
+            app.input_buffer.pop();
+        }
+        KeyCode::Enter => {
+            // Parse and insert with parameters
+            let params = app.input_buffer.trim().to_string();
+            let module_name = app.insert_module_name.clone();
+            if let Some(ref name) = module_name {
+                app.push_undo();
+                if let Err(e) = commands::cmd_insert(app, name, None, Some(&params)) {
+                    app.set_error(&e.to_string());
+                } else {
+                    app.clear_error();
+                    app.exit_insert_mode();
+                }
+            }
+        }
+        KeyCode::Esc => {
+            app.exit_insert_mode();
+            app.set_error("Parameter input cancelled");
+        }
+        _ => {}
+    }
+}
+
+/// Handle input while selecting a module for replace mode
+fn handle_replace_select_module_input(key: KeyEvent, app: &mut App) {
+    match key.code {
+        KeyCode::Char(c) => {
+            app.input_buffer.push(c);
+        }
+        KeyCode::Backspace => {
+            app.input_buffer.pop();
+        }
+        KeyCode::Enter => {
+            let _module_name = app.input_buffer.trim().to_string();
+            app.set_error("Replace command not implemented yet");
+            app.input_mode = InputMode::Normal;
+            app.input_buffer.clear();
+        }
+        KeyCode::Esc => {
+            app.input_mode = InputMode::Normal;
+            app.input_buffer.clear();
+            app.set_error("Replace cancelled");
+        }
+        _ => {}
+    }
+}
+
 fn execute_command(app: &mut App) {
-    // Copy the string to avoid long-lived borrows
     let cmd = app.input_buffer.trim().to_string();
     app.input_buffer.clear();
     app.toggle_command_mode();
@@ -245,7 +313,6 @@ fn execute_command(app: &mut App) {
         }
 
         Some(&"delete") => {
-            // Get the LEAF node (last element of path)
             let node_id = {
                 app.tree_state.borrow().selected().last().cloned()
             };
@@ -264,9 +331,7 @@ fn execute_command(app: &mut App) {
                 app.set_error("No nodes selected for boolean operation");
                 return;
             }
-            let nodes = {
-                app.selected_nodes.clone()
-            };
+            let nodes = app.selected_nodes.clone();
             let op_name = parts[0].to_string();
             app.push_undo();
             match commands::cmd_boolean_op(app, &op_name, &nodes) {
@@ -285,7 +350,6 @@ fn execute_command(app: &mut App) {
             }
             let filename = parts[1];
             app.set_error(&format!("Write to {} not implemented yet", filename));
-            // TODO: Implement write_to_yaml
         }
 
         Some(&"load") => {
@@ -295,7 +359,6 @@ fn execute_command(app: &mut App) {
             }
             let filename = parts[1];
             app.set_error(&format!("Load from {} not implemented yet", filename));
-            // TODO: Implement load_from_yaml
         }
 
         Some(&"export") => {
@@ -305,7 +368,6 @@ fn execute_command(app: &mut App) {
             }
             let filename = parts[1];
             app.set_error(&format!("Export to {} not implemented yet", filename));
-            // TODO: Implement export_scad
         }
 
         Some(&"edit") => {
@@ -315,22 +377,18 @@ fn execute_command(app: &mut App) {
             }
             let filename = parts[1];
             app.set_error(&format!("Edit {} not implemented yet", filename));
-            // TODO: Implement load_from_yaml
         }
 
         Some(&"yank") => {
             app.set_error("Yank command not implemented yet");
-            // TODO: Implement yank (copy)
         }
 
         Some(&"paste") => {
             app.set_error("Paste command not implemented yet");
-            // TODO: Implement paste
         }
 
         Some(&"remove") => {
             app.set_error("Remove command not implemented yet");
-            // TODO: Implement remove (delete node, move children up)
         }
 
         Some(&"replace") => {
@@ -339,46 +397,24 @@ fn execute_command(app: &mut App) {
                 return;
             }
             app.set_error("Replace command not implemented yet");
-            // TODO: Implement replace
         }
 
         Some(&"help") => {
-            let help_text = "OpenSCAD TUI - Keybindings and Commands\n\
+            let help_text = "OpenSCAD TUI - Keybindings\n\
                 \n\
-                Normal mode keybindings:\n\
+                Normal mode:\n\
                   j/k - navigate down/up\n\
-                  h/l - collapse/expand node\n\
-                  v - select/deselect node (visual mode)\n\
-                  i - insert after (insert mode)\n\
-                  a - insert before (insert mode)\n\
-                  dd/D - delete node\n\
-                  x - remove node (move children up)\n\
-                  y - yank (copy)\n\
-                  p - paste\n\
-                  r - redo\n\
+                  h/l - collapse/expand\n\
+                  v - select node\n\
+                  i - insert after\n\
+                  a - insert before\n\
+                  dd/D - delete\n\
                   u - undo\n\
-                  R - replace\n\
-                  w - write to YAML\n\
-                  e - edit from YAML\n\
-                  : - enter command mode\n\
+                  r - redo\n\
+                  : - command mode\n\
                   q - quit\n\
-                  Ctrl+C/Q - quit\n\
                 \n\
-                Command mode (prefix with :):\n\
-                  insert <name> [params] - insert module\n\
-                  delete - delete selected node\n\
-                  union - union selected nodes\n\
-                  difference - difference operation\n\
-                  intersection - intersection operation\n\
-                  write <file>.yaml - save state\n\
-                  load <file>.scad - load library\n\
-                  edit <file>.yaml - load and edit\n\
-                  export <file>.scad - export OpenSCAD\n\
-                  yank - copy selected\n\
-                  paste - paste\n\
-                  remove - remove node\n\
-                  replace <name> - replace node\n\
-                  help - show this help";
+                Commands: insert, delete, union, export";
             app.set_error(help_text);
         }
 
