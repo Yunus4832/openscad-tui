@@ -67,7 +67,7 @@ fn draw_tree(f: &mut Frame, app: &App, area: Rect) {
                         .bg(Color::DarkGray)
                         .add_modifier(Modifier::BOLD),
                 )
-                .highlight_symbol("📍 ");
+                .highlight_symbol("→ ");
 
             // Render stateful tree using RefCell's borrow_mut
             f.render_stateful_widget(tree_widget, area, &mut app.tree_state.borrow_mut());
@@ -98,12 +98,12 @@ fn build_tree_item(
     selected: &[String],
 ) -> TreeItem<'static, String> {
     let marker = if selected.contains(&module.id) {
-        "✓ "
+        "✓"
     } else {
-        "  "
+        " "
     };
 
-    let text = format!("{}{}", marker, module.get_display_name());
+    let text = format!("{} {}", marker, module.get_display_name());
     let id = module.id.clone();
 
     let children: Vec<TreeItem<String>> = module
