@@ -97,8 +97,9 @@ special_bolt(diameter=5);
 The `StandardLibrary` (loaded from `stdlib.json`) is **special**:
 - It's either embedded in the binary or loaded from user config
 - Modules have `source_library = None`
-- No include statements are generated
+- **No include statements are generated** (even though StandardLibrary is in AST.libraries)
 - Built-in modules are assumed to be available in all OpenSCAD installations
+- The library is treated as built-in, not a third-party library
 
 #### Third-party Libraries
 
