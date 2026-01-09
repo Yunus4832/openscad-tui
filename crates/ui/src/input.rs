@@ -21,6 +21,14 @@ pub fn handle_key(key: KeyEvent, app: &mut App) {
 /// Handle input in command mode - all input goes through the command line
 fn handle_command_input(key: KeyEvent, app: &mut App) {
     match key.code {
+        // Ctrl+C or Ctrl+D to quit (check modifiers first, before general Char)
+        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.should_quit = true;
+        }
+        KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.should_quit = true;
+        }
+        
         // Regular character input
         KeyCode::Char(c) => {
             app.input_buffer.push(c);
@@ -40,14 +48,6 @@ fn handle_command_input(key: KeyEvent, app: &mut App) {
         KeyCode::Tab => {
             // TODO: Implement command/module autocomplete
             app.input_buffer.push('\t');
-        }
-        
-        // Ctrl+C or Ctrl+D to quit
-        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.should_quit = true;
-        }
-        KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.should_quit = true;
         }
         
         // Esc to clear input buffer
