@@ -88,6 +88,20 @@ fn handle_normal_input(key: KeyEvent, app: &mut App) {
             }
         }
         
+        // w - write (save to YAML)
+        KeyCode::Char('w') => {
+            app.input_mode = InputMode::Command;
+            app.input_buffer = "write ".to_string();
+            app.set_info("Save to YAML file - enter filename");
+        }
+        
+        // e - edit (load from YAML)
+        KeyCode::Char('e') => {
+            app.input_mode = InputMode::Command;
+            app.input_buffer = "edit ".to_string();
+            app.set_info("Load from YAML file - enter filename");
+        }
+        
         // : - enter command mode
         KeyCode::Char(':') => {
             app.input_mode = InputMode::Command;
@@ -449,17 +463,10 @@ fn execute_command(app: &mut App) {
                 return;
             }
             let filename = parts[1];
-            app.set_error(&format!("Write to {} not implemented yet", filename));
-        }
-        
-        // load - load <filename>.scad
-        Some(&"load") => {
-            if parts.len() < 2 {
-                app.set_error("Usage: load <filename>.scad");
-                return;
+            match commands::cmd_write(app, filename) {
+                Ok(_) => app.set_info(&format!("✓ Saved to {}", filename)),
+                Err(e) => app.set_error(&e.to_string()),
             }
-            let filename = parts[1];
-            app.set_error(&format!("Load from {} not implemented yet", filename));
         }
         
         // edit - edit <filename>.yaml
@@ -469,7 +476,10 @@ fn execute_command(app: &mut App) {
                 return;
             }
             let filename = parts[1];
-            app.set_error(&format!("Edit {} not implemented yet", filename));
+            match commands::cmd_load(app, filename) {
+                Ok(_) => app.set_info(&format!("✓ Loaded from {}", filename)),
+                Err(e) => app.set_error(&e.to_string()),
+            }
         }
         
         // export - export <filename>.scad
@@ -479,7 +489,10 @@ fn execute_command(app: &mut App) {
                 return;
             }
             let filename = parts[1];
-            app.set_error(&format!("Export to {} not implemented yet", filename));
+            match commands::cmd_export(app, filename) {
+                Ok(_) => app.set_info(&format!("✓ Exported to {}", filename)),
+                Err(e) => app.set_error(&e.to_string()),
+            }
         }
         
         // help - ?

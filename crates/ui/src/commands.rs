@@ -3,6 +3,8 @@
 use openscad_core::{ModuleNode, Argument, Expr, AstError};
 use openscad_library::ModuleDef;
 use thiserror::Error;
+use std::fs;
+use std::path::Path;
 
 #[derive(Error, Debug)]
 pub enum CommandError {
@@ -21,6 +23,9 @@ pub enum CommandError {
     
     #[error("No children selected")]
     NoChildrenSelected,
+    
+    #[error("{0}")]
+    Custom(String),
 }
 
 pub type CommandResult<T> = std::result::Result<T, CommandError>;
@@ -486,6 +491,70 @@ fn parse_arguments(param_str: &str, module_def: &ModuleDef) -> CommandResult<Vec
     }
     
     Ok(args)
+}
+
+/// Save AST to YAML file
+pub fn cmd_write(app: &crate::app::App, filename: &str) -> CommandResult<()> {
+    // Ensure filename ends with .yaml
+    let filepath = if !filename.ends_with(".yaml") && !filename.ends_with(".yml") {
+        format!("{}.yaml", filename)
+    } else {
+        filename.to_string()
+    };
+    
+    // Serialize AST to YAML
+    let yaml = serde_yaml::to_string(&app.ast)
+        .map_err(|e| CommandError::Custom(format!("Failed to serialize AST: {}", e)))?;
+    
+    // Write to file
+    fs::write(&filepath, yaml)
+        .map_err(|e| CommandError::Custom(format!("Failed to write file '{}': {}", filepath, e)))?;
+    
+    Ok(())
+}
+
+/// Load AST from YAML file
+pub fn cmd_load(app: &mut crate::app::App, filename: &str) -> CommandResult<()> {
+    // Check file exists
+    if !Path::new(filename).exists() {
+        return Err(CommandError::Custom(format!("File '{}' not found", filename)));
+    }
+    
+    // Read file
+    let content = fs::read_to_string(filename)
+        .map_err(|e| CommandError::Custom(format!("Failed to read file '{}': {}", filename, e)))?;
+    
+    // Deserialize from YAML
+    let ast = serde_yaml::from_str(&content)
+        .map_err(|e| CommandError::Custom(format!("Failed to parse YAML: {}", e)))?;
+    
+    // Replace AST
+    app.ast = ast;
+    
+    // Reset navigation state
+    app.selected_nodes.clear();
+    app.tree_state.borrow_mut().select(Vec::new());
+    
+    Ok(())
+}
+
+/// Export AST to OpenSCAD code file
+pub fn cmd_export(app: &crate::app::App, filename: &str) -> CommandResult<()> {
+    // Ensure filename ends with .scad
+    let filepath = if !filename.ends_with(".scad") {
+        format!("{}.scad", filename)
+    } else {
+        filename.to_string()
+    };
+    
+    // Generate OpenSCAD code
+    let code = app.ast.to_scad();
+    
+    // Write to file
+    fs::write(&filepath, code)
+        .map_err(|e| CommandError::Custom(format!("Failed to write file '{}': {}", filepath, e)))?;
+    
+    Ok(())
 }
 
 #[cfg(test)]

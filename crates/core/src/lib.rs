@@ -232,8 +232,7 @@ impl UnaryOp {
         }
     }
 }
-
-/// Function/Module argument
+/// Function and module arguments
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum Argument {
     Positional(Expr),
