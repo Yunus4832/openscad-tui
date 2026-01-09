@@ -112,8 +112,8 @@ pub fn cmd_insert(
         // Clear selection after moving nodes
         app.selected_nodes.clear();
         
-        // Restore tree state to a valid position
-        app.restore_tree_selection();
+        // Select the newly created container module for continued operations
+        app.tree_state.borrow_mut().select(vec![node_id.clone()]);
         
         Ok(node_id)
     } else {
@@ -131,8 +131,8 @@ pub fn cmd_insert(
             app.ast.add_module(module)?;
         }
         
-        // Restore tree state to a valid position
-        app.restore_tree_selection();
+        // Select the newly inserted module for continued operations
+        app.tree_state.borrow_mut().select(vec![node_id.clone()]);
         
         Ok(node_id)
     }
@@ -313,8 +313,8 @@ pub fn cmd_boolean_op(
         }
     }
     
-    // Restore tree state to a valid position
-    app.restore_tree_selection();
+    // Select the newly created container module for continued operations
+    app.tree_state.borrow_mut().select(vec![op_id.clone()]);
     
     Ok(op_id)
 }
