@@ -113,7 +113,13 @@ pub fn cmd_insert(
         app.selected_nodes.clear();
         
         // Select the newly created container module for continued operations
-        app.tree_state.borrow_mut().select(vec![node_id.clone()]);
+        // Use the full path to ensure proper navigation in nested trees
+        if let Some(path) = app.find_node_path(&node_id) {
+            app.tree_state.borrow_mut().select(path);
+        } else {
+            // Fallback: just select by ID if path not found
+            app.tree_state.borrow_mut().select(vec![node_id.clone()]);
+        }
         
         Ok(node_id)
     } else {
@@ -132,7 +138,13 @@ pub fn cmd_insert(
         }
         
         // Select the newly inserted module for continued operations
-        app.tree_state.borrow_mut().select(vec![node_id.clone()]);
+        // Use the full path to ensure proper navigation in nested trees
+        if let Some(path) = app.find_node_path(&node_id) {
+            app.tree_state.borrow_mut().select(path);
+        } else {
+            // Fallback: just select by ID if path not found
+            app.tree_state.borrow_mut().select(vec![node_id.clone()]);
+        }
         
         Ok(node_id)
     }
@@ -314,7 +326,13 @@ pub fn cmd_boolean_op(
     }
     
     // Select the newly created container module for continued operations
-    app.tree_state.borrow_mut().select(vec![op_id.clone()]);
+    // Use the full path to ensure proper navigation in nested trees
+    if let Some(path) = app.find_node_path(&op_id) {
+        app.tree_state.borrow_mut().select(path);
+    } else {
+        // Fallback: just select by ID if path not found
+        app.tree_state.borrow_mut().select(vec![op_id.clone()]);
+    }
     
     Ok(op_id)
 }

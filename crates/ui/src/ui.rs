@@ -143,11 +143,6 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
             prompt = "Enter replacement module name: ".to_string();
             style_fg = Color::Yellow;
         },
-        _ => {
-            title = " 📍 Normal Mode ".to_string();
-            prompt = "i=insert  j=next  k=prev  h=collapse  l=expand  v=select  d=delete  :=command  q=quit".to_string();
-            style_fg = Color::Yellow;
-        },
     };
     
     let block = Block::default()

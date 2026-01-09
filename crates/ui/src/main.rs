@@ -64,6 +64,8 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Result<(
         if crossterm::event::poll(std::time::Duration::from_millis(250))? {
             if let Event::Key(key) = event::read()? {
                 handle_key(key, &mut app);
+                // Validate tree state after each command to ensure path is still valid
+                app.validate_tree_state();
             }
         }
     }

@@ -17,7 +17,6 @@ pub enum InputMode {
     ReplaceSelectModule,
     /// Legacy modes (no longer used, kept for compatibility)
     Normal,
-    InsertSelectModule,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -118,10 +117,81 @@ impl App {
         }
     }
     
+    /// Validate and rebuild tree state path
+    /// TreeState stores a path vector. When tree structure changes, this path may become invalid.
+    /// This method ensures the path is still valid or rebuilds it.
+    pub fn validate_tree_state(&mut self) {
+        // Extract current path within a scope to properly drop the borrow
+        let current_path = self.tree_state.borrow().selected().to_vec();
+        
+        if current_path.is_empty() {
+            // No selection, try to select first module
+            if !self.ast.modules.is_empty() {
+                if let Some(first_module) = self.ast.modules.first() {
+                    self.tree_state.borrow_mut().select(vec![first_module.id.clone()]);
+                }
+            }
+            return;
+        }
+        
+        // Check if the last node in the path still exists
+        if let Some(last_node_id) = current_path.last() {
+            if self.ast.find_node_by_id(last_node_id).is_some() {
+                // The selected node still exists, keep the path as is
+                return;
+            }
+        }
+        
+        // Last node in path doesn't exist, try to select the last valid node in the path
+        for i in (0..current_path.len()).rev() {
+            if self.ast.find_node_by_id(&current_path[i]).is_some() {
+                self.tree_state.borrow_mut().select(vec![current_path[i].clone()]);
+                return;
+            }
+        }
+        
+        // No valid node in path, select first module
+        if !self.ast.modules.is_empty() {
+            if let Some(first_module) = self.ast.modules.first() {
+                self.tree_state.borrow_mut().select(vec![first_module.id.clone()]);
+            }
+        } else {
+            self.tree_state.borrow_mut().select(vec![]);
+        }
+    }
+    
     #[allow(dead_code)]
     pub fn toggle_command_mode(&mut self) {
         // Legacy method - no longer used, kept for compatibility
         // All input is now command-based
+    }
+    
+    /// Find the path to a node (from root to the node)
+    /// Returns a vector of node IDs representing the path from root to target node
+    pub fn find_node_path(&self, target_id: &str) -> Option<Vec<String>> {
+        self.find_node_path_recursive(&self.ast.modules, target_id, &mut Vec::new())
+    }
+    
+    fn find_node_path_recursive(
+        &self,
+        modules: &[openscad_core::ModuleNode],
+        target_id: &str,
+        current_path: &mut Vec<String>,
+    ) -> Option<Vec<String>> {
+        for module in modules {
+            current_path.push(module.id.clone());
+            
+            if module.id == target_id {
+                return Some(current_path.clone());
+            }
+            
+            if let Some(path) = self.find_node_path_recursive(&module.children, target_id, current_path) {
+                return Some(path);
+            }
+            
+            current_path.pop();
+        }
+        None
     }
     
     pub fn push_undo(&mut self) {

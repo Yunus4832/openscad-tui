@@ -13,19 +13,17 @@ pub fn handle_key(key: KeyEvent, app: &mut App) {
         InputMode::Command => handle_command_input(key, app),
         InputMode::InsertEnterParams => handle_insert_params_input(key, app),
         InputMode::ReplaceSelectModule => handle_replace_module_input(key, app),
-        // Fallback to command input
-        _ => handle_command_input(key, app),
     }
 }
 
 /// Normal mode: Quick keybindings
 fn handle_normal_input(key: KeyEvent, app: &mut App) {
     match key.code {
-        // i - insert module (enters insert mode)
+        // i - insert module (mapped to :insert command)
         KeyCode::Char('i') => {
             app.input_mode = InputMode::Command;
-            app.input_buffer.clear();
-            app.set_info("Enter module name to insert (e.g., 'cube', 'sphere'):");
+            app.input_buffer = "insert ".to_string();
+            app.set_info("Insert mode - enter module name (type 'help' for available modules)");
         }
         
         // Navigation: j (next), k (prev), h (back/collapse), l (forward/expand)
@@ -146,6 +144,7 @@ fn handle_command_input(key: KeyEvent, app: &mut App) {
     }
 }
 
+/// Handle module name input for insert command
 /// Handle parameter input for insert command (multi-stage)
 fn handle_insert_params_input(key: KeyEvent, app: &mut App) {
     match key.code {
@@ -166,7 +165,7 @@ fn handle_insert_params_input(key: KeyEvent, app: &mut App) {
                             "'{}' requires child modules. Select modules with 'v' first",
                             module_name
                         ));
-                        app.input_mode = InputMode::Command;
+                        app.input_mode = InputMode::Normal;
                         app.input_buffer.clear();
                         app.insert_module_name = None;
                         return;
@@ -181,12 +180,12 @@ fn handle_insert_params_input(key: KeyEvent, app: &mut App) {
                     app.set_info(&format!("Inserted: {}", module_name));
                 }
             }
-            app.input_mode = InputMode::Command;
+            app.input_mode = InputMode::Normal;
             app.input_buffer.clear();
             app.insert_module_name = None;
         }
         KeyCode::Esc => {
-            app.input_mode = InputMode::Command;
+            app.input_mode = InputMode::Normal;
             app.input_buffer.clear();
             app.insert_module_name = None;
             app.set_info("Insert cancelled");
