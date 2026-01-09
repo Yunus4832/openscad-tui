@@ -123,9 +123,14 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
     let style_fg: Color;
     
     match app.input_mode {
+        InputMode::Normal => {
+            title = " 📍 Normal Mode ".to_string();
+            prompt = "i=insert  j=next  k=prev  h=collapse  l=expand  v=select  d=delete  u=undo  r=redo  :=command  q=quit".to_string();
+            style_fg = Color::Yellow;
+        },
         InputMode::Command => {
-            title = " ⌨️  Command ".to_string();
-            prompt = "Enter command (type 'help' for commands): ".to_string();
+            title = " ⌨️  Command Mode ".to_string();
+            prompt = "Enter command (type help for commands, Esc to exit):".to_string();
             style_fg = Color::Green;
         },
         InputMode::InsertEnterParams => {
@@ -139,26 +144,37 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
             style_fg = Color::Yellow;
         },
         _ => {
-            title = " ⌨️  Command ".to_string();
-            prompt = "Enter command: ".to_string();
-            style_fg = Color::Green;
+            title = " 📍 Normal Mode ".to_string();
+            prompt = "i=insert  j=next  k=prev  h=collapse  l=expand  v=select  d=delete  :=command  q=quit".to_string();
+            style_fg = Color::Yellow;
         },
     };
     
     let block = Block::default()
-        .title(title.clone())
+        .title(title)
         .borders(Borders::ALL)
         .style(Style::default().fg(style_fg));
 
-    let display_text = if let Some(ref error) = app.error_message {
-        format!("{}\n> {}", error, app.input_buffer)
+    // Display prompt and input buffer with echo in Command mode
+    let display_text = if app.input_mode == InputMode::Command || app.input_mode == InputMode::InsertEnterParams {
+        // In Command/Insert modes, show prompt and echo user input
+        if let Some(ref error) = app.error_message {
+            format!("{}\n> {}", error, app.input_buffer)
+        } else {
+            format!("{}\n> {}", prompt, app.input_buffer)
+        }
     } else {
-        format!("{}\n> {}", prompt, app.input_buffer)
+        // In Normal mode, just show the help text and error if any
+        if let Some(ref error) = app.error_message {
+            format!("{}\n{}", prompt, error)
+        } else {
+            prompt
+        }
     };
 
     let paragraph = Paragraph::new(display_text)
         .block(block)
-        .style(if app.error_message.is_some() {
+        .style(if app.error_message.is_some() && app.input_mode != InputMode::Normal {
             Style::default().fg(Color::Red)
         } else {
             Style::default().fg(style_fg)
@@ -217,8 +233,6 @@ fn draw_preview(f: &mut Frame, app: &App, area: Rect) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn test_tree_state_initialization() {
         let app = crate::app::App::new();

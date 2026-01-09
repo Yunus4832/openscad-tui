@@ -59,7 +59,7 @@ impl App {
             tree_cursor: 0,
             expanded_nodes: std::collections::HashSet::new(),
             input_buffer: String::new(),
-            input_mode: InputMode::Command,
+            input_mode: InputMode::Normal,
             insert_after: true,
             insert_module_name: None,
             preview_offset: 0,

@@ -1,8 +1,7 @@
-//! Input handling module - Command-line focused interface
+//! Input handling module - Two modes: Normal and Command
 //!
-//! All operations are commands. Focus is always on the command line at the bottom.
-//! The tree is just a visual representation of the current AST state.
-//! Navigation and selection are also expressed as commands.
+//! Normal mode: Quick keybindings for common operations (i/j/k/h/l/v)
+//! Command mode: Free text input for complex commands with parameter input
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crate::app::{App, InputMode};
@@ -10,26 +9,118 @@ use crate::commands;
 
 pub fn handle_key(key: KeyEvent, app: &mut App) {
     match app.input_mode {
+        InputMode::Normal => handle_normal_input(key, app),
         InputMode::Command => handle_command_input(key, app),
         InputMode::InsertEnterParams => handle_insert_params_input(key, app),
         InputMode::ReplaceSelectModule => handle_replace_module_input(key, app),
-        // Legacy modes - fallback to command input
+        // Fallback to command input
         _ => handle_command_input(key, app),
     }
 }
 
-/// Handle input in command mode - all input goes through the command line
-fn handle_command_input(key: KeyEvent, app: &mut App) {
+/// Normal mode: Quick keybindings
+fn handle_normal_input(key: KeyEvent, app: &mut App) {
     match key.code {
-        // Ctrl+C or Ctrl+D to quit (check modifiers first, before general Char)
-        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.should_quit = true;
+        // i - insert module (enters Command mode)
+        KeyCode::Char('i') => {
+            app.input_mode = InputMode::Command;
+            app.input_buffer.clear();
+            app.set_error("Enter command (i <module_name>):");
         }
-        KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+        
+        // Navigation: j (next), k (prev), h (back/collapse), l (forward/expand)
+        KeyCode::Char('j') | KeyCode::Down => {
+            app.tree_state.borrow_mut().key_down();
+            app.clear_error();
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            app.tree_state.borrow_mut().key_up();
+            app.clear_error();
+        }
+        KeyCode::Char('h') | KeyCode::Left => {
+            app.tree_state.borrow_mut().key_left();
+            app.clear_error();
+        }
+        KeyCode::Char('l') | KeyCode::Right => {
+            app.tree_state.borrow_mut().key_right();
+            app.clear_error();
+        }
+        
+        // v - select/toggle node
+        KeyCode::Char('v') => {
+            let selected = { app.tree_state.borrow().selected().last().cloned() };
+            if let Some(node_id) = selected {
+                if app.selected_nodes.contains(&node_id) {
+                    app.selected_nodes.retain(|n| n != &node_id);
+                    app.set_error(&format!("Deselected: {}", node_id));
+                } else {
+                    app.selected_nodes.push(node_id.clone());
+                    app.set_error(&format!("Selected: {}", node_id));
+                }
+            } else {
+                app.set_error("No node at cursor");
+            }
+        }
+        
+        // u - undo
+        KeyCode::Char('u') => {
+            app.undo();
+            app.set_error("Undo");
+        }
+        
+        // r - redo
+        KeyCode::Char('r') => {
+            app.redo();
+            app.set_error("Redo");
+        }
+        
+        // d - delete node
+        KeyCode::Char('d') => {
+            let selected = { app.tree_state.borrow().selected().last().cloned() };
+            if let Some(node_id) = selected {
+                app.push_undo();
+                if let Err(e) = commands::cmd_delete(app, &node_id) {
+                    app.set_error(&e.to_string());
+                } else {
+                    app.set_error(&format!("Deleted: {}", node_id));
+                }
+            } else {
+                app.set_error("No node to delete");
+            }
+        }
+        
+        // : - enter command mode
+        KeyCode::Char(':') => {
+            app.input_mode = InputMode::Command;
+            app.input_buffer.clear();
+            app.set_error("Command mode (type help for commands, Esc to exit):");
+        }
+        
+        // q - quit
+        KeyCode::Char('q') => {
             app.should_quit = true;
         }
         
-        // Regular character input
+        // Ctrl+C to quit
+        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.should_quit = true;
+        }
+        
+        _ => {}
+    }
+}
+
+/// Handle input in command mode - text input with echo
+fn handle_command_input(key: KeyEvent, app: &mut App) {
+    match key.code {
+        // Esc to return to Normal mode
+        KeyCode::Esc => {
+            app.input_mode = InputMode::Normal;
+            app.input_buffer.clear();
+            app.clear_error();
+        }
+        
+        // Regular character input - with echo
         KeyCode::Char(c) => {
             app.input_buffer.push(c);
         }
@@ -48,12 +139,6 @@ fn handle_command_input(key: KeyEvent, app: &mut App) {
         KeyCode::Tab => {
             // TODO: Implement command/module autocomplete
             app.input_buffer.push('\t');
-        }
-        
-        // Esc to clear input buffer
-        KeyCode::Esc => {
-            app.input_buffer.clear();
-            app.clear_error();
         }
         
         _ => {}
@@ -395,5 +480,10 @@ fn execute_command(app: &mut App) {
             app.set_error(&format!("Unknown command: '{}'. Type 'help' for commands.", 
                 parts.get(0).unwrap_or(&"")));
         }
+    }
+    
+    // Return to Normal mode if we're in Command mode
+    if app.input_mode == InputMode::Command {
+        app.input_mode = InputMode::Normal;
     }
 }
