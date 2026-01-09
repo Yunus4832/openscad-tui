@@ -368,6 +368,10 @@ impl LibraryManager {
         // Check in loaded libraries
         for lib in self.libraries.values() {
             if lib.modules.iter().any(|m| m.name == name) {
+                // StandardLibrary is special - it's built-in, don't generate include for it
+                if lib.name == "StandardLibrary" {
+                    return (None, None);
+                }
                 return (Some(lib.name.clone()), Some(lib.file.clone()));
             }
         }
