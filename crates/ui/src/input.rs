@@ -109,6 +109,20 @@ fn handle_normal_input(key: KeyEvent, app: &mut App) {
             app.set_info("Command mode - type 'help' for available commands");
         }
         
+        // Enter - toggle expand/collapse node
+        KeyCode::Enter => {
+            let selected = { app.tree_state.borrow().selected().last().cloned() };
+            if let Some(node_id) = selected {
+                // Toggle the expand/collapse state using key_right
+                // which automatically handles the toggle logic
+                app.tree_state.borrow_mut().key_right();
+                app.set_info(&format!("⟳ Toggled node: {}", node_id));
+                app.update_navigation_status();
+            } else {
+                app.set_error("No node at cursor");
+            }
+        }
+        
         // q - quit
         KeyCode::Char('q') => {
             app.should_quit = true;

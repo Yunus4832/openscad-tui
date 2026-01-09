@@ -125,7 +125,7 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
     match app.input_mode {
         InputMode::Normal => {
             title = " 📍 Normal Mode ".to_string();
-            prompt = "i=insert  j/k=nav  h/l=collapse/expand  v=select  d=delete  u=undo  r=redo  w=write  e=edit  :=cmd  q=quit".to_string();
+            prompt = "i=insert  j/k=nav  h/l=collapse/expand  v=select  d=delete  u=undo  r=redo  Enter=toggle  w=write  e=edit  :=cmd  q=quit".to_string();
             style_fg = Color::Yellow;
         },
         InputMode::Command => {
