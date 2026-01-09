@@ -26,8 +26,15 @@ pub enum CommandError {
 pub type CommandResult<T> = std::result::Result<T, CommandError>;
 
 /// Insert command
-/// Insert a new module at the same level as the currently selected node.
-/// If no node is selected, insert at root level.
+/// Insert a new module in the tree.
+/// 
+/// For modules that accept children (accepts_children: true):
+///   - If child nodes are selected, create the module and move selected nodes as children
+///   - If no child nodes are selected, return NoChildrenSelected error
+/// 
+/// For leaf modules (accepts_children: false):
+///   - Insert after the currently selected node if there is one
+///   - If no node is selected, insert at root level
 pub fn cmd_insert(
     app: &mut crate::app::App,
     module_name: &str,
@@ -46,18 +53,184 @@ pub fn cmd_insert(
         Vec::new()
     };
     
-    // Create module node
+    // Create module node ID
     let node_id = format!("{}_{}", module_name, std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_millis());
     
-    let module = ModuleNode::new_leaf(node_id.clone(), module_name.to_string(), args);
+    // Check if this module accepts children
+    if module_def.accepts_children {
+        // For container modules, we need selected child nodes
+        if app.selected_nodes.is_empty() {
+            return Err(CommandError::NoChildrenSelected);
+        }
+        
+        // Create container module
+        let container = ModuleNode::new_container(node_id.clone(), module_name.to_string(), args);
+        
+        // Find the parent of the first selected node
+        let first_selected = app.selected_nodes.first().cloned();
+        let parent_id = if let Some(ref first_id) = first_selected {
+            find_node_parent(&app.ast.modules, first_id)
+        } else {
+            None
+        };
+        
+        // Insert the container BEFORE deleting the selected nodes
+        // This way we can still find the position of the first selected node
+        if let Some(parent_id_val) = &parent_id {
+            insert_child_before(&mut app.ast.modules, parent_id_val, &first_selected.clone().unwrap(), container.clone())?;
+        } else {
+            // First selected node was at root level, so we need to find its position
+            if let Some(pos) = app.ast.modules.iter().position(|m| m.id == first_selected.clone().unwrap()) {
+                app.ast.modules.insert(pos, container.clone());
+            } else {
+                // Fallback: just add at root
+                app.ast.add_module(container.clone())?;
+            }
+        }
+        
+        // Collect nodes to move before modifying the tree
+        let nodes_to_move: Vec<ModuleNode> = app.selected_nodes.clone()
+            .iter()
+            .filter_map(|node_id_to_move| app.ast.find_node_by_id(node_id_to_move).cloned())
+            .collect();
+        
+        // Delete the selected nodes from the tree
+        for node_id_to_move in &app.selected_nodes.clone() {
+            app.ast.delete_node(node_id_to_move)?;
+        }
+        
+        // Add collected nodes to the container
+        if let Some(container_mut) = app.ast.find_node_mut(&node_id) {
+            for node in nodes_to_move {
+                container_mut.children.push(node);
+            }
+        }
+        
+        // Clear selection after moving nodes
+        app.selected_nodes.clear();
+        
+        Ok(node_id)
+    } else {
+        // For leaf modules, create as before
+        let module = ModuleNode::new_leaf(node_id.clone(), module_name.to_string(), args);
+        
+        // Determine insertion point based on current selection
+        let selected = app.tree_state.borrow().selected().last().cloned();
+        
+        if let Some(selected_id) = selected {
+            // Find the selected node and insert after it
+            insert_after_node(&mut app.ast.modules, &selected_id, module)?;
+        } else {
+            // No selection, insert at root level
+            app.ast.add_module(module)?;
+        }
+        
+        Ok(node_id)
+    }
+}
+
+/// Helper function to insert a node after a specific target node
+/// This function searches for the target node and inserts the new module immediately after it
+/// at the same level in the tree hierarchy.
+/// 
+/// Returns Ok if the target was found and insertion was successful.
+/// Returns Err if the target node ID was not found anywhere in the tree.
+fn insert_after_node(
+    modules: &mut Vec<ModuleNode>,
+    target_id: &str,
+    new_module: ModuleNode,
+) -> CommandResult<()> {
+    // First, check if the target is at this level
+    for i in 0..modules.len() {
+        if modules[i].id == target_id {
+            // Found the target at this level, insert after it
+            modules.insert(i + 1, new_module);
+            return Ok(());
+        }
+    }
     
-    // Insert at root level (same level as the selected node)
-    app.ast.add_module(module)?;
+    // Target not at this level, search in children recursively
+    for module in modules {
+        if let Ok(()) = insert_after_node(&mut module.children, target_id, new_module.clone()) {
+            return Ok(());
+        }
+    }
     
-    Ok(node_id)
+    // Target node not found in any branch
+    Err(CommandError::InvalidCommand(format!(
+        "Target node not found: {}",
+        target_id
+    )))
+}
+
+/// Find the parent ID of a node
+/// Returns the ID of the parent node, or None if the node is at root level
+fn find_node_parent(modules: &[ModuleNode], target_id: &str) -> Option<String> {
+    find_node_parent_recursive(modules, target_id)
+}
+
+fn find_node_parent_recursive(modules: &[ModuleNode], target_id: &str) -> Option<String> {
+    for module in modules {
+        // Check if target is a direct child of this module
+        if module.children.iter().any(|child| child.id == target_id) {
+            return Some(module.id.clone());
+        }
+        // Recursively search in children
+        if let Some(parent) = find_node_parent_recursive(&module.children, target_id) {
+            return Some(parent);
+        }
+    }
+    None
+}
+
+/// Insert a child node before a specific sibling node
+/// Finds the parent and inserts the new module before the sibling
+fn insert_child_before(
+    modules: &mut [ModuleNode],
+    parent_id: &str,
+    before_node_id: &str,
+    new_child: ModuleNode,
+) -> CommandResult<()> {
+    insert_child_before_recursive(modules, parent_id, before_node_id, new_child)
+}
+
+fn insert_child_before_recursive(
+    modules: &mut [ModuleNode],
+    parent_id: &str,
+    before_node_id: &str,
+    new_child: ModuleNode,
+) -> CommandResult<()> {
+    for module in modules {
+        if module.id == parent_id {
+            // Found the parent, now find the position of the sibling
+            if let Some(pos) = module.children.iter().position(|child| child.id == before_node_id) {
+                module.children.insert(pos, new_child);
+                return Ok(());
+            } else {
+                return Err(CommandError::InvalidCommand(format!(
+                    "Sibling node not found: {}",
+                    before_node_id
+                )));
+            }
+        }
+        // Recursively search in children
+        match insert_child_before_recursive(
+            &mut module.children,
+            parent_id,
+            before_node_id,
+            new_child.clone(),
+        ) {
+            Ok(()) => return Ok(()),
+            Err(_) => continue, // Try next module
+        }
+    }
+    Err(CommandError::InvalidCommand(format!(
+        "Parent node not found: {}",
+        parent_id
+    )))
 }
 
 /// Delete command
@@ -90,17 +263,46 @@ pub fn cmd_boolean_op(
         .unwrap()
         .as_millis());
     
-    let mut container = ModuleNode::new_container(op_id.clone(), operation.to_string(), Vec::new());
+    let container = ModuleNode::new_container(op_id.clone(), operation.to_string(), Vec::new());
     
-    // Move selected nodes into container
-    for node_id in node_ids {
-        if let Some(node) = app.ast.find_node_by_id(node_id).cloned() {
-            container.children.push(node);
-            app.ast.delete_node(node_id)?;
+    // Find the parent of the first selected node
+    let first_selected = node_ids.first().cloned();
+    let parent_id = if let Some(ref first_id) = first_selected {
+        find_node_parent(&app.ast.modules, first_id)
+    } else {
+        None
+    };
+    
+    // Insert the container BEFORE deleting the selected nodes
+    if let Some(parent_id_val) = &parent_id {
+        insert_child_before(&mut app.ast.modules, parent_id_val, &first_selected.clone().unwrap(), container.clone())?;
+    } else {
+        // First selected node was at root level
+        if let Some(pos) = app.ast.modules.iter().position(|m| m.id == first_selected.clone().unwrap()) {
+            app.ast.modules.insert(pos, container.clone());
+        } else {
+            app.ast.add_module(container.clone())?;
         }
     }
     
-    app.ast.add_module(container)?;
+    // Collect nodes to move before modifying the tree
+    let nodes_to_move: Vec<ModuleNode> = node_ids
+        .iter()
+        .filter_map(|node_id| app.ast.find_node_by_id(node_id).cloned())
+        .collect();
+    
+    // Delete the selected nodes from the tree
+    for node_id in node_ids {
+        app.ast.delete_node(node_id)?;
+    }
+    
+    // Add collected nodes to the container
+    if let Some(container_mut) = app.ast.find_node_mut(&op_id) {
+        for node in nodes_to_move {
+            container_mut.children.push(node);
+        }
+    }
+    
     Ok(op_id)
 }
 
@@ -129,6 +331,65 @@ pub fn cmd_deselect(app: &mut crate::app::App, node_id: &str) -> CommandResult<(
 #[allow(dead_code)]
 pub fn cmd_clear_selection(app: &mut crate::app::App) {
     app.selected_nodes.clear();
+}
+
+/// Navigation commands
+/// Move cursor down (next)
+#[allow(dead_code)]
+pub fn cmd_next(app: &mut crate::app::App) -> CommandResult<()> {
+    app.tree_state.borrow_mut().key_down();
+    app.update_navigation_status();
+    Ok(())
+}
+
+/// Move cursor up (previous)
+#[allow(dead_code)]
+pub fn cmd_prev(app: &mut crate::app::App) -> CommandResult<()> {
+    app.tree_state.borrow_mut().key_up();
+    app.update_navigation_status();
+    Ok(())
+}
+
+/// Collapse node (move left)
+#[allow(dead_code)]
+pub fn cmd_collapse(app: &mut crate::app::App) -> CommandResult<()> {
+    app.tree_state.borrow_mut().key_left();
+    app.update_navigation_status();
+    Ok(())
+}
+
+/// Expand node (move right)
+#[allow(dead_code)]
+pub fn cmd_expand(app: &mut crate::app::App) -> CommandResult<()> {
+    app.tree_state.borrow_mut().key_right();
+    app.update_navigation_status();
+    Ok(())
+}
+
+/// Select/toggle current node
+#[allow(dead_code)]
+pub fn cmd_select_toggle(app: &mut crate::app::App) -> CommandResult<()> {
+    let selected = app.tree_state.borrow().selected().last().cloned();
+    if let Some(node_id) = selected {
+        if app.selected_nodes.contains(&node_id) {
+            app.selected_nodes.retain(|n| n != &node_id);
+            app.set_info(&format!("◯ Deselected: {}", node_id));
+        } else {
+            app.selected_nodes.push(node_id.clone());
+            app.set_info(&format!("✓ Selected: {}", node_id));
+        }
+        Ok(())
+    } else {
+        Err(CommandError::NoNodeSelected)
+    }
+}
+
+/// Clear all selections
+#[allow(dead_code)]
+pub fn cmd_deselect_all(app: &mut crate::app::App) -> CommandResult<()> {
+    app.selected_nodes.clear();
+    app.set_info("All nodes deselected");
+    Ok(())
 }
 
 /// Translate command

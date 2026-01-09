@@ -20,6 +20,17 @@ pub enum InputMode {
     InsertSelectModule,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[allow(dead_code)]
+pub enum MessageType {
+    /// Information message (normal operation feedback)
+    Info,
+    /// Error message (something went wrong)
+    Error,
+    /// Warning message (potential issue)
+    Warning,
+}
+
 pub struct App {
     pub ast: AstRoot,
     pub library: LibraryManager,
@@ -44,12 +55,13 @@ pub struct App {
     pub insert_module_name: Option<String>,
     pub preview_offset: usize,
     pub should_quit: bool,
-    pub error_message: Option<String>,
+    pub message: Option<String>,
+    pub message_type: MessageType,
 }
 
 impl App {
     pub fn new() -> Self {
-        Self {
+        let mut app = Self {
             ast: AstRoot::new(),
             library: LibraryManager::new(),
             selected_nodes: Vec::new(),
@@ -64,7 +76,21 @@ impl App {
             insert_module_name: None,
             preview_offset: 0,
             should_quit: false,
-            error_message: None,
+            message: None,
+            message_type: MessageType::Info,
+        };
+        
+        // Initialize tree state: select the first module if it exists
+        app.init_tree_selection();
+        app
+    }
+    
+    /// Initialize tree state with first item selected if available
+    pub fn init_tree_selection(&mut self) {
+        if !self.ast.modules.is_empty() {
+            if let Some(first_module) = self.ast.modules.first() {
+                self.tree_state.borrow_mut().select(vec![first_module.id.clone()]);
+            }
         }
     }
     
@@ -103,16 +129,71 @@ impl App {
     }
     
     pub fn set_error(&mut self, msg: &str) {
-        self.error_message = Some(msg.to_string());
+        self.message = Some(msg.to_string());
+        self.message_type = MessageType::Error;
+    }
+    
+    /// Set an info message
+    pub fn set_info(&mut self, msg: &str) {
+        self.message = Some(msg.to_string());
+        self.message_type = MessageType::Info;
+    }
+    
+    /// Set a warning message
+    #[allow(dead_code)]
+    pub fn set_warning(&mut self, msg: &str) {
+        self.message = Some(msg.to_string());
+        self.message_type = MessageType::Warning;
+    }
+    
+    /// Clear the current message
+    pub fn clear_message(&mut self) {
+        self.message = None;
+        self.message_type = MessageType::Info;
     }
     
     pub fn clear_error(&mut self) {
-        self.error_message = None;
+        self.clear_message();
     }
     
     #[allow(dead_code)]
     pub fn clear_input(&mut self) {
         self.input_buffer.clear();
+    }
+    
+    /// Update navigation status message based on current tree selection
+    pub fn update_navigation_status(&mut self) {
+        let selected = self.tree_state.borrow().selected().last().cloned();
+        if let Some(node_id) = selected {
+            // Find the module name from the node ID
+            let module_name = self.find_module_name(&node_id)
+                .unwrap_or_else(|| node_id.clone());
+            self.set_info(&format!("→ {}", module_name));
+        } else {
+            self.clear_message();
+        }
+    }
+    
+    /// Find module display name by node ID
+    fn find_module_name(&self, node_id: &str) -> Option<String> {
+        self.find_module_name_recursive(&self.ast.modules, node_id)
+    }
+    
+    /// Recursively find module name in the AST
+    fn find_module_name_recursive(
+        &self,
+        modules: &[openscad_core::ModuleNode],
+        node_id: &str,
+    ) -> Option<String> {
+        for module in modules {
+            if module.id == node_id {
+                return Some(module.get_display_name());
+            }
+            if let Some(name) = self.find_module_name_recursive(&module.children, node_id) {
+                return Some(name);
+            }
+        }
+        None
     }
 }
 

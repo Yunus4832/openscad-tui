@@ -21,29 +21,29 @@ pub fn handle_key(key: KeyEvent, app: &mut App) {
 /// Normal mode: Quick keybindings
 fn handle_normal_input(key: KeyEvent, app: &mut App) {
     match key.code {
-        // i - insert module (enters Command mode)
+        // i - insert module (enters insert mode)
         KeyCode::Char('i') => {
             app.input_mode = InputMode::Command;
             app.input_buffer.clear();
-            app.set_error("Enter command (i <module_name>):");
+            app.set_info("Enter module name to insert (e.g., 'cube', 'sphere'):");
         }
         
         // Navigation: j (next), k (prev), h (back/collapse), l (forward/expand)
         KeyCode::Char('j') | KeyCode::Down => {
             app.tree_state.borrow_mut().key_down();
-            app.clear_error();
+            app.update_navigation_status();
         }
         KeyCode::Char('k') | KeyCode::Up => {
             app.tree_state.borrow_mut().key_up();
-            app.clear_error();
+            app.update_navigation_status();
         }
         KeyCode::Char('h') | KeyCode::Left => {
             app.tree_state.borrow_mut().key_left();
-            app.clear_error();
+            app.update_navigation_status();
         }
         KeyCode::Char('l') | KeyCode::Right => {
             app.tree_state.borrow_mut().key_right();
-            app.clear_error();
+            app.update_navigation_status();
         }
         
         // v - select/toggle node
@@ -52,10 +52,10 @@ fn handle_normal_input(key: KeyEvent, app: &mut App) {
             if let Some(node_id) = selected {
                 if app.selected_nodes.contains(&node_id) {
                     app.selected_nodes.retain(|n| n != &node_id);
-                    app.set_error(&format!("Deselected: {}", node_id));
+                    app.set_info(&format!("◯ Deselected: {}", node_id));
                 } else {
                     app.selected_nodes.push(node_id.clone());
-                    app.set_error(&format!("Selected: {}", node_id));
+                    app.set_info(&format!("✓ Selected: {}", node_id));
                 }
             } else {
                 app.set_error("No node at cursor");
@@ -65,13 +65,13 @@ fn handle_normal_input(key: KeyEvent, app: &mut App) {
         // u - undo
         KeyCode::Char('u') => {
             app.undo();
-            app.set_error("Undo");
+            app.set_info("⟲ Undo");
         }
         
         // r - redo
         KeyCode::Char('r') => {
             app.redo();
-            app.set_error("Redo");
+            app.set_info("⟳ Redo");
         }
         
         // d - delete node
@@ -82,7 +82,8 @@ fn handle_normal_input(key: KeyEvent, app: &mut App) {
                 if let Err(e) = commands::cmd_delete(app, &node_id) {
                     app.set_error(&e.to_string());
                 } else {
-                    app.set_error(&format!("Deleted: {}", node_id));
+                    app.set_info(&format!("🗑 Deleted: {}", node_id));
+                    app.update_navigation_status();
                 }
             } else {
                 app.set_error("No node to delete");
@@ -93,7 +94,7 @@ fn handle_normal_input(key: KeyEvent, app: &mut App) {
         KeyCode::Char(':') => {
             app.input_mode = InputMode::Command;
             app.input_buffer.clear();
-            app.set_error("Command mode (type help for commands, Esc to exit):");
+            app.set_info("Command mode - type 'help' for available commands");
         }
         
         // q - quit
@@ -158,23 +159,37 @@ fn handle_insert_params_input(key: KeyEvent, app: &mut App) {
             // User finished entering parameters
             let params = app.input_buffer.trim().to_string();
             if let Some(ref module_name) = app.insert_module_name.clone() {
+                // Check if module accepts children and we have selections
+                if let Some(module_def) = app.library.get_module(module_name) {
+                    if module_def.accepts_children && app.selected_nodes.is_empty() {
+                        app.set_error(&format!(
+                            "'{}' requires child modules. Select modules with 'v' first",
+                            module_name
+                        ));
+                        app.input_mode = InputMode::Command;
+                        app.input_buffer.clear();
+                        app.insert_module_name = None;
+                        return;
+                    }
+                }
+                
                 app.push_undo();
                 if let Err(e) = commands::cmd_insert(app, module_name, None, Some(&params)) {
                     app.set_error(&e.to_string());
                 } else {
-                    app.clear_error();
+                    app.update_navigation_status();
+                    app.set_info(&format!("Inserted: {}", module_name));
                 }
             }
             app.input_mode = InputMode::Command;
             app.input_buffer.clear();
             app.insert_module_name = None;
-            app.set_error("Insert complete. Next command:");
         }
         KeyCode::Esc => {
             app.input_mode = InputMode::Command;
             app.input_buffer.clear();
             app.insert_module_name = None;
-            app.set_error("Insert cancelled");
+            app.set_info("Insert cancelled");
         }
         _ => {}
     }
@@ -198,7 +213,7 @@ fn handle_replace_module_input(key: KeyEvent, app: &mut App) {
         KeyCode::Esc => {
             app.input_mode = InputMode::Command;
             app.input_buffer.clear();
-            app.set_error("Replace cancelled");
+            app.set_info("Replace cancelled");
         }
         _ => {}
     }
@@ -223,54 +238,47 @@ fn execute_command(app: &mut App) {
             app.should_quit = true;
         }
         
-        // j/k - navigate down/up
-        Some(&"j") | Some(&"down") => {
-            app.tree_state.borrow_mut().key_down();
-            app.clear_error();
+        // j/k/down/up - navigate down/up
+        Some(&"j") | Some(&"next") | Some(&"down") => {
+            if let Err(e) = commands::cmd_next(app) {
+                app.set_error(&e.to_string());
+            }
         }
-        Some(&"k") | Some(&"up") => {
-            app.tree_state.borrow_mut().key_up();
-            app.clear_error();
+        Some(&"k") | Some(&"prev") | Some(&"up") => {
+            if let Err(e) = commands::cmd_prev(app) {
+                app.set_error(&e.to_string());
+            }
         }
         
         // h/l - collapse/expand
-        Some(&"h") | Some(&"left") => {
-            app.tree_state.borrow_mut().key_left();
-            app.clear_error();
+        Some(&"h") | Some(&"collapse") | Some(&"left") => {
+            if let Err(e) = commands::cmd_collapse(app) {
+                app.set_error(&e.to_string());
+            }
         }
-        Some(&"l") | Some(&"right") => {
-            app.tree_state.borrow_mut().key_right();
-            app.clear_error();
+        Some(&"l") | Some(&"expand") | Some(&"right") => {
+            if let Err(e) = commands::cmd_expand(app) {
+                app.set_error(&e.to_string());
+            }
         }
         
         // v - select/toggle node
         Some(&"v") | Some(&"select") => {
-            let selected = {
-                app.tree_state.borrow().selected().last().cloned()
-            };
-            if let Some(node_id) = selected {
-                if app.selected_nodes.contains(&node_id) {
-                    app.selected_nodes.retain(|n| n != &node_id);
-                    app.set_error(&format!("Deselected: {}", node_id));
-                } else {
-                    app.selected_nodes.push(node_id.clone());
-                    app.set_error(&format!("Selected: {}", node_id));
-                }
-            } else {
-                app.set_error("No node selected");
+            if let Err(e) = commands::cmd_select_toggle(app) {
+                app.set_error(&e.to_string());
             }
         }
         
         // u - undo
         Some(&"u") | Some(&"undo") => {
             app.undo();
-            app.clear_error();
+            app.set_info("⟲ Undo");
         }
         
-        // r - redo (or replace)
+        // r - redo
         Some(&"r") | Some(&"redo") => {
             app.redo();
-            app.clear_error();
+            app.set_info("⟳ Redo");
         }
         
         // === Full commands ===
@@ -283,6 +291,19 @@ fn execute_command(app: &mut App) {
                 return;
             }
             let module_name = parts[1];
+            
+            // Check if this module is valid and accepts children
+            if let Some(module_def) = app.library.get_module(module_name) {
+                if module_def.accepts_children && app.selected_nodes.is_empty() {
+                    // This module requires child nodes but none are selected
+                    app.set_error(&format!(
+                        "'{}' requires child modules. Select modules with 'v' first",
+                        module_name
+                    ));
+                    return;
+                }
+            }
+            
             let params = if parts.len() > 2 {
                 Some(parts[2..].join(" "))
             } else {
@@ -293,22 +314,22 @@ fn execute_command(app: &mut App) {
             if params.is_none() {
                 app.insert_module_name = Some(module_name.to_string());
                 app.input_mode = InputMode::InsertEnterParams;
-                app.set_error(&format!("Enter parameters for '{}' (or press Enter to skip):", module_name));
+                app.set_info(&format!("Enter parameters for '{}' (or press Enter to skip):", module_name));
                 return;
             }
             
             app.push_undo();
             match commands::cmd_insert(app, module_name, None, params.as_deref()) {
                 Ok(_) => {
-                    app.clear_error();
-                    app.set_error(&format!("Inserted: {}", module_name));
+                    app.update_navigation_status();
+                    app.set_info(&format!("Inserted: {}", module_name));
                 }
                 Err(e) => app.set_error(&e.to_string()),
             }
         }
         
         // delete [node_id]
-        // Shorthand: d [node_id]
+        // Shorthand: d [node_id] or dd or D
         Some(&"delete") | Some(&"d") | Some(&"dd") | Some(&"D") => {
             let node_id = if parts.len() > 1 {
                 parts[1].to_string()
@@ -328,7 +349,8 @@ fn execute_command(app: &mut App) {
             if let Err(e) = commands::cmd_delete(app, &node_id) {
                 app.set_error(&e.to_string());
             } else {
-                app.set_error(&format!("Deleted: {}", node_id));
+                app.set_info(&format!("🗑 Deleted: {}", node_id));
+                app.update_navigation_status();
             }
         }
         
@@ -343,7 +365,7 @@ fn execute_command(app: &mut App) {
             match commands::cmd_boolean_op(app, "union", &nodes) {
                 Ok(_) => {
                     app.selected_nodes.clear();
-                    app.set_error("Union operation completed");
+                    app.set_info("✓ Union operation completed");
                 }
                 Err(e) => app.set_error(&e.to_string()),
             }
@@ -359,7 +381,7 @@ fn execute_command(app: &mut App) {
             match commands::cmd_boolean_op(app, "difference", &nodes) {
                 Ok(_) => {
                     app.selected_nodes.clear();
-                    app.set_error("Difference operation completed");
+                    app.set_info("✓ Difference operation completed");
                 }
                 Err(e) => app.set_error(&e.to_string()),
             }
@@ -375,13 +397,20 @@ fn execute_command(app: &mut App) {
             match commands::cmd_boolean_op(app, "intersection", &nodes) {
                 Ok(_) => {
                     app.selected_nodes.clear();
-                    app.set_error("Intersection operation completed");
+                    app.set_info("✓ Intersection operation completed");
                 }
                 Err(e) => app.set_error(&e.to_string()),
             }
         }
         
-        // yank/copy - y <node_id>
+        // deselect-all or clear-selection
+        Some(&"deselect-all") | Some(&"deselect_all") | Some(&"clear-selection") => {
+            if let Err(e) = commands::cmd_deselect_all(app) {
+                app.set_error(&e.to_string());
+            }
+        }
+        
+        // yank/copy - y [node_id]
         Some(&"yank") | Some(&"y") => {
             app.set_error("Yank command not implemented yet");
         }
@@ -391,7 +420,7 @@ fn execute_command(app: &mut App) {
             app.set_error("Paste command not implemented yet");
         }
         
-        // remove - x <node_id>
+        // remove - x [node_id]
         Some(&"remove") | Some(&"x") => {
             app.set_error("Remove command not implemented yet");
         }

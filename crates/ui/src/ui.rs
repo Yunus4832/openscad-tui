@@ -18,7 +18,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         .constraints(
             [
                 Constraint::Min(15),
-                Constraint::Length(3),
+                Constraint::Length(5),
             ]
             .as_ref(),
         )
@@ -155,30 +155,49 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
         .borders(Borders::ALL)
         .style(Style::default().fg(style_fg));
 
-    // Display prompt and input buffer with echo in Command mode
-    let display_text = if app.input_mode == InputMode::Command || app.input_mode == InputMode::InsertEnterParams {
-        // In Command/Insert modes, show prompt and echo user input
-        if let Some(ref error) = app.error_message {
-            format!("{}\n> {}", error, app.input_buffer)
-        } else {
-            format!("{}\n> {}", prompt, app.input_buffer)
-        }
-    } else {
-        // In Normal mode, just show the help text and error if any
-        if let Some(ref error) = app.error_message {
-            format!("{}\n{}", prompt, error)
-        } else {
-            prompt
-        }
-    };
-
-    let paragraph = Paragraph::new(display_text)
-        .block(block)
-        .style(if app.error_message.is_some() && app.input_mode != InputMode::Normal {
-            Style::default().fg(Color::Red)
-        } else {
+    // Create line-by-line content with proper styling
+    let mut lines: Vec<Line> = Vec::new();
+    
+    // Add prompt line
+    lines.push(Line::from(vec![
+        Span::styled(
+            prompt.clone(),
             Style::default().fg(style_fg)
-        });
+        ),
+    ]));
+    
+    // Add input line (only in command/param modes)
+    if app.input_mode == InputMode::Command || app.input_mode == InputMode::InsertEnterParams {
+        lines.push(Line::from(vec![
+            Span::styled(
+                "> ",
+                Style::default().fg(style_fg).add_modifier(Modifier::BOLD)
+            ),
+            Span::styled(
+                app.input_buffer.clone(),
+                Style::default().fg(Color::White)
+            ),
+        ]));
+    }
+    
+    // Add error line if there's a message
+    if let Some(ref msg) = app.message {
+        let msg_color = match app.message_type {
+            crate::app::MessageType::Error => Color::Red,
+            crate::app::MessageType::Warning => Color::Yellow,
+            crate::app::MessageType::Info => Color::Green,
+        };
+        lines.push(Line::from(vec![
+            Span::styled(
+                msg.clone(),
+                Style::default().fg(msg_color)
+            ),
+        ]));
+    }
+
+    let paragraph = Paragraph::new(lines)
+        .block(block)
+        .style(Style::default().fg(style_fg));
 
     f.render_widget(paragraph, area);
 }
@@ -233,10 +252,21 @@ fn draw_preview(f: &mut Frame, app: &App, area: Rect) {
 
 #[cfg(test)]
 mod tests {
+    use crate::app::App;
+
     #[test]
-    fn test_tree_state_initialization() {
-        let app = crate::app::App::new();
-        // TreeState starts empty
+    fn test_tree_state_with_empty_ast() {
+        let app = App::new();
+        // TreeState should be empty when AST has no modules
         assert!(app.tree_state.borrow().selected().is_empty());
+    }
+
+    #[test]
+    fn test_navigation_status_update() {
+        let mut app = App::new();
+        // Test that update_navigation_status works without panicking
+        app.update_navigation_status();
+        // When there's no selection, message should be None
+        assert!(app.message.is_none());
     }
 }
