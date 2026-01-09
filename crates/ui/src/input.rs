@@ -292,9 +292,12 @@ fn execute_command(app: &mut App) {
             }
             let module_name = parts[1];
             
-            // Check if this module is valid and accepts children
-            if let Some(module_def) = app.library.get_module(module_name) {
-                if module_def.accepts_children && app.selected_nodes.is_empty() {
+            // Get module definition to check parameters and children requirements
+            let module_def = app.library.get_module(module_name);
+            
+            // Check if this module accepts children
+            if let Some(ref mdef) = module_def {
+                if mdef.accepts_children && app.selected_nodes.is_empty() {
                     // This module requires child nodes but none are selected
                     app.set_error(&format!(
                         "'{}' requires child modules. Select modules with 'v' first",
@@ -310,16 +313,22 @@ fn execute_command(app: &mut App) {
                 None
             };
             
-            // If no params provided, ask for them in next stage
-            if params.is_none() {
+            // Check if module has parameters
+            let module_has_params = module_def.as_ref().map_or(false, |mdef| !mdef.parameters.is_empty());
+            
+            // If params not provided and module has parameters, ask for them in next stage
+            if params.is_none() && module_has_params {
                 app.insert_module_name = Some(module_name.to_string());
                 app.input_mode = InputMode::InsertEnterParams;
                 app.set_info(&format!("Enter parameters for '{}' (or press Enter to skip):", module_name));
                 return;
             }
             
+            // If no params provided and module has no parameters, use empty params
+            let final_params = params.or_else(|| Some(String::new()));
+            
             app.push_undo();
-            match commands::cmd_insert(app, module_name, None, params.as_deref()) {
+            match commands::cmd_insert(app, module_name, None, final_params.as_deref()) {
                 Ok(_) => {
                     app.update_navigation_status();
                     app.set_info(&format!("Inserted: {}", module_name));
