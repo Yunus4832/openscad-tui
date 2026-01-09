@@ -110,16 +110,25 @@ pub struct LibraryManager {
 
 impl LibraryManager {
     /// Create a new library manager with built-in modules
+    /// Create a new library manager
+    /// 
+    /// Standard library modules are NOT loaded here.
+    /// They are loaded later by load_stdlib_with_config() which:
+    /// 1. Tries to load from user config dir (~/.config/openscad-tui/stdlib.json)
+    /// 2. Falls back to embedded stdlib.json if user config doesn't exist
     pub fn new() -> Self {
-        let mut manager = Self {
+        Self {
             builtin_modules: HashMap::new(),
             libraries: HashMap::new(),
-        };
-        manager.init_builtin_modules();
-        manager
+        }
     }
     
     /// Initialize built-in OpenSCAD modules
+    /// 
+    /// DEPRECATED: This is no longer called during initialization.
+    /// Standard library is loaded from stdlib.json instead via load_stdlib_with_config().
+    /// Kept for reference and potential future use.
+    #[allow(dead_code)]
     fn init_builtin_modules(&mut self) {
         // 3D Primitives
         self.add_builtin_module(ModuleDef {
@@ -332,6 +341,9 @@ impl LibraryManager {
     }
     
     /// Add a built-in module
+    /// 
+    /// DEPRECATED: Kept for reference only, use load_library_from_string() instead.
+    #[allow(dead_code)]
     fn add_builtin_module(&mut self, module: ModuleDef) {
         self.builtin_modules.insert(module.name.clone(), module);
     }
@@ -370,6 +382,13 @@ impl LibraryManager {
         modules
     }
     
+    /// Load a library from a JSON string
+    pub fn load_library_from_string(&mut self, json_str: &str) -> Result<()> {
+        let lib_def: LibraryDef = serde_json::from_str(json_str)?;
+        self.libraries.insert(lib_def.name.clone(), lib_def);
+        Ok(())
+    }
+    
     /// Load a library from a JSON file
     pub fn load_library(&mut self, path: &Path) -> Result<()> {
         let contents = fs::read_to_string(path)?;
@@ -377,6 +396,33 @@ impl LibraryManager {
         
         self.libraries.insert(lib_def.name.clone(), lib_def);
         Ok(())
+    }
+    
+    /// Get standard library config path (~/.config/openscad-tui/stdlib.json on Linux/Mac, etc.)
+    pub fn get_stdlib_config_path() -> Option<std::path::PathBuf> {
+        dirs::config_dir().map(|config_dir| {
+            config_dir.join("openscad-tui").join("stdlib.json")
+        })
+    }
+    
+    /// Try to load stdlib from user config directory, fallback to embedded version
+    pub fn load_stdlib_with_config(&mut self) -> Result<()> {
+        // Try to load from user config directory
+        if let Some(config_path) = Self::get_stdlib_config_path() {
+            if config_path.exists() {
+                match self.load_library(&config_path) {
+                    Ok(()) => return Ok(()),
+                    Err(e) => {
+                        // If user config exists but fails to load, log error but continue
+                        eprintln!("Warning: Failed to load stdlib from {:?}: {}", config_path, e);
+                    }
+                }
+            }
+        }
+        
+        // Fallback to embedded stdlib.json
+        const EMBEDDED_STDLIB: &str = include_str!("../../../stdlib.json");
+        self.load_library_from_string(EMBEDDED_STDLIB)
     }
     
     /// Get a library by name

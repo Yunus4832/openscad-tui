@@ -79,6 +79,11 @@ impl App {
             message_type: MessageType::Info,
         };
         
+        // Load standard library (from config dir if exists, otherwise use embedded)
+        if let Err(e) = app.library.load_stdlib_with_config() {
+            eprintln!("Failed to load standard library: {}", e);
+        }
+        
         // Initialize tree state: select the first module if it exists
         app.init_tree_selection();
         app
