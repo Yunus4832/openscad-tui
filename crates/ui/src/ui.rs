@@ -44,9 +44,9 @@ pub fn draw(f: &mut Frame, app: &App) {
 
 fn draw_tree(f: &mut Frame, app: &App, area: Rect) {
     let title = if app.selected_nodes.is_empty() {
-        " 📁 Tree ".to_string()
+        " Tree ".to_string()
     } else {
-        format!(" 📁 Tree ({}) ", app.selected_nodes.len())
+        format!(" Tree ({}) ", app.selected_nodes.len())
     };
 
     let block = Block::default()
@@ -67,7 +67,8 @@ fn draw_tree(f: &mut Frame, app: &App, area: Rect) {
                         .bg(Color::DarkGray)
                         .add_modifier(Modifier::BOLD),
                 )
-                .highlight_symbol("→ ");
+                .node_open_symbol("~ ")
+                .node_closed_symbol("> ");
 
             // Render stateful tree using RefCell's borrow_mut
             f.render_stateful_widget(tree_widget, area, &mut app.tree_state.borrow_mut());
@@ -98,7 +99,7 @@ fn build_tree_item(
     selected: &[String],
 ) -> TreeItem<'static, String> {
     let marker = if selected.contains(&module.id) {
-        "✓"
+        "*"
     } else {
         " "
     };
@@ -124,22 +125,22 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
     
     match app.input_mode {
         InputMode::Normal => {
-            title = " 📍 Normal Mode ".to_string();
+            title = " Normal Mode ".to_string();
             prompt = "i=insert  j/k=nav  h/l=collapse/expand  v=select  d=delete  u=undo  r=redo  Enter=toggle  w=write  e=edit  :=cmd  q=quit".to_string();
             style_fg = Color::Yellow;
         },
         InputMode::Command => {
-            title = " ⌨️  Command Mode ".to_string();
+            title = " Command Mode ".to_string();
             prompt = "Enter command (type help for commands, Esc to exit):".to_string();
             style_fg = Color::Green;
         },
         InputMode::InsertEnterParams => {
-            title = " 📝 Insert Parameters ".to_string();
+            title = " Insert Parameters ".to_string();
             prompt = format!("Parameters for '{}': ", app.insert_module_name.as_deref().unwrap_or("?"));
             style_fg = Color::Cyan;
         },
         InputMode::ReplaceSelectModule => {
-            title = " 🔄 Replace Module ".to_string();
+            title = " Replace Module ".to_string();
             prompt = "Enter replacement module name: ".to_string();
             style_fg = Color::Yellow;
         },
@@ -199,7 +200,7 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
 
 fn draw_preview(f: &mut Frame, app: &App, area: Rect) {
     let block = Block::default()
-        .title(" 📄 Preview ")
+        .title(" Preview ")
         .borders(Borders::ALL)
         .style(Style::default().fg(Color::Green));
 

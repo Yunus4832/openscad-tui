@@ -3,9 +3,9 @@
 //! Normal mode: Quick keybindings for common operations (i/j/k/h/l/v)
 //! Command mode: Free text input for complex commands with parameter input
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crate::app::{App, InputMode};
 use crate::commands;
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 pub fn handle_key(key: KeyEvent, app: &mut App) {
     match app.input_mode {
@@ -25,121 +25,84 @@ fn handle_normal_input(key: KeyEvent, app: &mut App) {
             app.input_buffer = "insert ".to_string();
             app.set_info("Insert mode - enter module name (type 'help' for available modules)");
         }
-        
+
         // Navigation: j (next), k (prev), h (back/collapse), l (forward/expand)
         KeyCode::Char('j') | KeyCode::Down => {
-            app.tree_state.borrow_mut().key_down();
-            app.update_navigation_status();
+            execute_command(app, "next");
         }
         KeyCode::Char('k') | KeyCode::Up => {
-            app.tree_state.borrow_mut().key_up();
-            app.update_navigation_status();
+            execute_command(app, "prev");
         }
         KeyCode::Char('h') | KeyCode::Left => {
-            app.tree_state.borrow_mut().key_left();
-            app.update_navigation_status();
+            execute_command(app, "collapse");
         }
         KeyCode::Char('l') | KeyCode::Right => {
-            app.tree_state.borrow_mut().key_right();
-            app.update_navigation_status();
+            execute_command(app, "expand");
         }
-        
+
         // v - select/toggle node
         KeyCode::Char('v') => {
-            let selected = { app.tree_state.borrow().selected().last().cloned() };
-            if let Some(node_id) = selected {
-                if app.selected_nodes.contains(&node_id) {
-                    app.selected_nodes.retain(|n| n != &node_id);
-                    app.set_info(&format!("◯ Deselected: {}", node_id));
-                } else {
-                    app.selected_nodes.push(node_id.clone());
-                    app.set_info(&format!("✓ Selected: {}", node_id));
-                }
-            } else {
-                app.set_error("No node at cursor");
-            }
+            execute_command(app, "select");
         }
-        
+
         // u - undo
         KeyCode::Char('u') => {
-            app.undo();
-            app.set_info("⟲ Undo");
+            execute_command(app, "undo");
         }
-        
+
         // r - redo
         KeyCode::Char('r') => {
-            app.redo();
-            app.set_info("⟳ Redo");
+            execute_command(app, "redo");
         }
-        
+
         // d - delete node
         KeyCode::Char('d') => {
-            let selected = { app.tree_state.borrow().selected().last().cloned() };
-            if let Some(node_id) = selected {
-                app.push_undo();
-                if let Err(e) = commands::cmd_delete(app, &node_id) {
-                    app.set_error(&e.to_string());
-                } else {
-                    app.set_info(&format!("🗑 Deleted: {}", node_id));
-                    app.update_navigation_status();
-                }
-            } else {
-                app.set_error("No node to delete");
-            }
+            execute_command(app, "delete");
         }
-        
+
         // w - write (save to JSON)
         KeyCode::Char('w') => {
             app.input_mode = InputMode::Command;
             app.input_buffer = "write ".to_string();
             app.set_info("Save to JSON file - enter filename");
         }
-        
+
         // e - edit (load from JSON)
         KeyCode::Char('e') => {
             app.input_mode = InputMode::Command;
             app.input_buffer = "edit ".to_string();
             app.set_info("Load from JSON file - enter filename");
         }
-        
+
         // L - library (load library JSON)
         KeyCode::Char('L') => {
             app.input_mode = InputMode::Command;
             app.input_buffer = "library ".to_string();
             app.set_info("Load library from JSON file - enter filename");
         }
-        
+
         // : - enter command mode
         KeyCode::Char(':') => {
             app.input_mode = InputMode::Command;
             app.input_buffer.clear();
             app.set_info("Command mode - type 'help' for available commands");
         }
-        
+
         // Enter - toggle expand/collapse node
         KeyCode::Enter => {
-            let selected = { app.tree_state.borrow().selected().last().cloned() };
-            if let Some(node_id) = selected {
-                // Toggle the expand/collapse state using key_right
-                // which automatically handles the toggle logic
-                app.tree_state.borrow_mut().key_right();
-                app.set_info(&format!("⟳ Toggled node: {}", node_id));
-                app.update_navigation_status();
-            } else {
-                app.set_error("No node at cursor");
-            }
+            execute_command(app, "toggle");
         }
-        
+
         // q - quit
         KeyCode::Char('q') => {
-            app.should_quit = true;
+            execute_command(app, "quit");
         }
-        
+
         // Ctrl+C to quit
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.should_quit = true;
+            execute_command(app, "quit");
         }
-        
+
         _ => {}
     }
 }
@@ -153,28 +116,29 @@ fn handle_command_input(key: KeyEvent, app: &mut App) {
             app.input_buffer.clear();
             app.clear_error();
         }
-        
+
         // Regular character input - with echo
         KeyCode::Char(c) => {
             app.input_buffer.push(c);
         }
-        
+
         // Backspace to delete character
         KeyCode::Backspace => {
             app.input_buffer.pop();
         }
-        
+
         // Enter to execute command
         KeyCode::Enter => {
-            execute_command(app);
+            let cmd = app.input_buffer.clone();
+            execute_command(app, &cmd);
         }
-        
+
         // Tab for autocomplete
         KeyCode::Tab => {
             // TODO: Implement command/module autocomplete
             app.input_buffer.push('\t');
         }
-        
+
         _ => {}
     }
 }
@@ -206,7 +170,7 @@ fn handle_insert_params_input(key: KeyEvent, app: &mut App) {
                         return;
                     }
                 }
-                
+
                 app.push_undo();
                 if let Err(e) = commands::cmd_insert(app, module_name, None, Some(&params)) {
                     app.set_error(&e.to_string());
@@ -253,8 +217,7 @@ fn handle_replace_module_input(key: KeyEvent, app: &mut App) {
     }
 }
 
-fn execute_command(app: &mut App) {
-    let cmd = app.input_buffer.trim().to_string();
+fn execute_command(app: &mut App, cmd: &str) {
     app.input_buffer.clear();
 
     if cmd.is_empty() {
@@ -262,16 +225,18 @@ fn execute_command(app: &mut App) {
     }
 
     let parts: Vec<&str> = cmd.split_whitespace().collect();
-    
+
     // Handle shorthand commands first
     match parts.get(0) {
         // === Shorthand single-character commands ===
-        
+
         // q or quit
         Some(&"q") | Some(&"quit") => {
-            app.should_quit = true;
+            if let Err(e) = commands::cmd_quit(app) {
+                app.set_error(&e.to_string());
+            }
         }
-        
+
         // j/k/down/up - navigate down/up
         Some(&"j") | Some(&"next") | Some(&"down") => {
             if let Err(e) = commands::cmd_next(app) {
@@ -283,7 +248,7 @@ fn execute_command(app: &mut App) {
                 app.set_error(&e.to_string());
             }
         }
-        
+
         // h/l - collapse/expand
         Some(&"h") | Some(&"collapse") | Some(&"left") => {
             if let Err(e) = commands::cmd_collapse(app) {
@@ -295,28 +260,35 @@ fn execute_command(app: &mut App) {
                 app.set_error(&e.to_string());
             }
         }
-        
+        Some(&"toggle") => {
+            if let Err(e) = commands::cmd_toggle(app) {
+                app.set_error(&e.to_string());
+            }
+        }
+
         // v - select/toggle node
         Some(&"v") | Some(&"select") => {
             if let Err(e) = commands::cmd_select_toggle(app) {
                 app.set_error(&e.to_string());
             }
         }
-        
+
         // u - undo
         Some(&"u") | Some(&"undo") => {
-            app.undo();
-            app.set_info("⟲ Undo");
+            if let Err(e) = commands::cmd_undo(app) {
+                app.set_error(&e.to_string());
+            }
         }
-        
+
         // r - redo
         Some(&"r") | Some(&"redo") => {
-            app.redo();
-            app.set_info("⟳ Redo");
+            if let Err(e) = commands::cmd_redo(app) {
+                app.set_error(&e.to_string());
+            }
         }
-        
+
         // === Full commands ===
-        
+
         // insert <module_name> [params]
         // Shorthand: i <module_name> [params]
         Some(&"insert") | Some(&"i") => {
@@ -325,10 +297,10 @@ fn execute_command(app: &mut App) {
                 return;
             }
             let module_name = parts[1];
-            
+
             // Get module definition to check parameters and children requirements
             let module_def = app.library.get_module(module_name);
-            
+
             // Check if this module accepts children
             if let Some(ref mdef) = module_def {
                 if mdef.accepts_children && app.selected_nodes.is_empty() {
@@ -340,27 +312,32 @@ fn execute_command(app: &mut App) {
                     return;
                 }
             }
-            
+
             let params = if parts.len() > 2 {
                 Some(parts[2..].join(" "))
             } else {
                 None
             };
-            
+
             // Check if module has parameters
-            let module_has_params = module_def.as_ref().map_or(false, |mdef| !mdef.parameters.is_empty());
-            
+            let module_has_params = module_def
+                .as_ref()
+                .map_or(false, |mdef| !mdef.parameters.is_empty());
+
             // If params not provided and module has parameters, ask for them in next stage
             if params.is_none() && module_has_params {
                 app.insert_module_name = Some(module_name.to_string());
                 app.input_mode = InputMode::InsertEnterParams;
-                app.set_info(&format!("Enter parameters for '{}' (or press Enter to skip):", module_name));
+                app.set_info(&format!(
+                    "Enter parameters for '{}' (or press Enter to skip):",
+                    module_name
+                ));
                 return;
             }
-            
+
             // If no params provided and module has no parameters, use empty params
             let final_params = params.or_else(|| Some(String::new()));
-            
+
             app.push_undo();
             match commands::cmd_insert(app, module_name, None, final_params.as_deref()) {
                 Ok(_) => {
@@ -370,7 +347,7 @@ fn execute_command(app: &mut App) {
                 Err(e) => app.set_error(&e.to_string()),
             }
         }
-        
+
         // delete [node_id]
         // Shorthand: d [node_id] or dd or D
         Some(&"delete") | Some(&"d") | Some(&"dd") | Some(&"D") => {
@@ -387,16 +364,16 @@ fn execute_command(app: &mut App) {
                     }
                 }
             };
-            
+
             app.push_undo();
             if let Err(e) = commands::cmd_delete(app, &node_id) {
                 app.set_error(&e.to_string());
             } else {
-                app.set_info(&format!("🗑 Deleted: {}", node_id));
+                app.set_info(&format!("Deleted: {}", node_id));
                 app.update_navigation_status();
             }
         }
-        
+
         // union/difference/intersection <node1> <node2> ...
         Some(&"union") => {
             if app.selected_nodes.is_empty() {
@@ -408,12 +385,12 @@ fn execute_command(app: &mut App) {
             match commands::cmd_boolean_op(app, "union", &nodes) {
                 Ok(_) => {
                     app.selected_nodes.clear();
-                    app.set_info("✓ Union operation completed");
+                    app.set_info("Union operation completed");
                 }
                 Err(e) => app.set_error(&e.to_string()),
             }
         }
-        
+
         Some(&"difference") => {
             if app.selected_nodes.is_empty() {
                 app.set_error("No nodes selected. Usage: select node1, select node2, difference");
@@ -424,12 +401,12 @@ fn execute_command(app: &mut App) {
             match commands::cmd_boolean_op(app, "difference", &nodes) {
                 Ok(_) => {
                     app.selected_nodes.clear();
-                    app.set_info("✓ Difference operation completed");
+                    app.set_info("Difference operation completed");
                 }
                 Err(e) => app.set_error(&e.to_string()),
             }
         }
-        
+
         Some(&"intersection") => {
             if app.selected_nodes.is_empty() {
                 app.set_error("No nodes selected. Usage: select node1, select node2, intersection");
@@ -440,34 +417,34 @@ fn execute_command(app: &mut App) {
             match commands::cmd_boolean_op(app, "intersection", &nodes) {
                 Ok(_) => {
                     app.selected_nodes.clear();
-                    app.set_info("✓ Intersection operation completed");
+                    app.set_info("Intersection operation completed");
                 }
                 Err(e) => app.set_error(&e.to_string()),
             }
         }
-        
+
         // deselect-all or clear-selection
         Some(&"deselect-all") | Some(&"deselect_all") | Some(&"clear-selection") => {
             if let Err(e) = commands::cmd_deselect_all(app) {
                 app.set_error(&e.to_string());
             }
         }
-        
+
         // yank/copy - y [node_id]
         Some(&"yank") | Some(&"y") => {
             app.set_error("Yank command not implemented yet");
         }
-        
+
         // paste - p
         Some(&"paste") | Some(&"p") => {
             app.set_error("Paste command not implemented yet");
         }
-        
+
         // remove - x [node_id]
         Some(&"remove") | Some(&"x") => {
             app.set_error("Remove command not implemented yet");
         }
-        
+
         // replace - r <node_id> <new_module>
         Some(&"replace") => {
             if parts.len() < 2 {
@@ -476,7 +453,7 @@ fn execute_command(app: &mut App) {
             }
             app.set_error("Replace command not implemented yet");
         }
-        
+
         // write/save - w <filename>.json
         Some(&"write") | Some(&"save") | Some(&"w") => {
             if parts.len() < 2 {
@@ -489,7 +466,7 @@ fn execute_command(app: &mut App) {
                 Err(e) => app.set_error(&e.to_string()),
             }
         }
-        
+
         // edit - edit <filename>.json
         Some(&"edit") | Some(&"e") => {
             if parts.len() < 2 {
@@ -498,11 +475,11 @@ fn execute_command(app: &mut App) {
             }
             let filename = parts[1];
             match commands::cmd_load(app, filename) {
-                Ok(_) => app.set_info(&format!("✓ Loaded from {}", filename)),
+                Ok(_) => app.set_info(&format!("Loaded from {}", filename)),
                 Err(e) => app.set_error(&e.to_string()),
             }
         }
-        
+
         // export - export <filename>.scad
         Some(&"export") => {
             if parts.len() < 2 {
@@ -511,11 +488,11 @@ fn execute_command(app: &mut App) {
             }
             let filename = parts[1];
             match commands::cmd_export(app, filename) {
-                Ok(_) => app.set_info(&format!("✓ Exported to {}", filename)),
+                Ok(_) => app.set_info(&format!("Exported to {}", filename)),
                 Err(e) => app.set_error(&e.to_string()),
             }
         }
-        
+
         // library - library <filename>.json
         Some(&"library") => {
             if parts.len() < 2 {
@@ -524,11 +501,11 @@ fn execute_command(app: &mut App) {
             }
             let filename = parts[1];
             match commands::cmd_load_library(app, filename) {
-                Ok(_) => app.set_info(&format!("✓ Loaded library from {}", filename)),
+                Ok(_) => app.set_info(&format!("Loaded library from {}", filename)),
                 Err(e) => app.set_error(&e.to_string()),
             }
         }
-        
+
         // help - ?
         Some(&"help") | Some(&"?") => {
             let help_text = "OpenSCAD TUI - Command Reference\n\
@@ -559,13 +536,15 @@ fn execute_command(app: &mut App) {
                   help/? - show this help";
             app.set_error(help_text);
         }
-        
+
         _ => {
-            app.set_error(&format!("Unknown command: '{}'. Type 'help' for commands.", 
-                parts.get(0).unwrap_or(&"")));
+            app.set_error(&format!(
+                "Unknown command: '{}'. Type 'help' for commands.",
+                parts.get(0).unwrap_or(&"")
+            ));
         }
     }
-    
+
     // Return to Normal mode if we're in Command mode
     if app.input_mode == InputMode::Command {
         app.input_mode = InputMode::Normal;
