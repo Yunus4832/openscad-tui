@@ -15,6 +15,8 @@ pub enum InputMode {
     InsertEnterParams,
     /// Multi-stage replace - selecting replacement module
     ReplaceSelectModule,
+    /// Help modal - displaying help information
+    Help,
     /// Legacy modes (no longer used, kept for compatibility)
     Normal,
 }

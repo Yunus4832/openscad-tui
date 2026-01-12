@@ -777,6 +777,13 @@ pub fn cmd_redo(app: &mut crate::app::App) -> CommandResult<()> {
     Ok(())
 }
 
+/// Help command - Show help modal
+#[allow(dead_code)]
+pub fn cmd_help(app: &mut crate::app::App) -> CommandResult<()> {
+    app.input_mode = crate::app::InputMode::Help;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

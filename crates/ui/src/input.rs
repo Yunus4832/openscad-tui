@@ -13,6 +13,7 @@ pub fn handle_key(key: KeyEvent, app: &mut App) {
         InputMode::Command => handle_command_input(key, app),
         InputMode::InsertEnterParams => handle_insert_params_input(key, app),
         InputMode::ReplaceSelectModule => handle_replace_module_input(key, app),
+        InputMode::Help => handle_help_input(key, app),
     }
 }
 
@@ -23,7 +24,6 @@ fn handle_normal_input(key: KeyEvent, app: &mut App) {
         KeyCode::Char('i') => {
             app.input_mode = InputMode::Command;
             app.input_buffer = "insert ".to_string();
-            app.set_info("Insert mode - enter module name (type 'help' for available modules)");
         }
 
         // Navigation: j (next), k (prev), h (back/collapse), l (forward/expand)
@@ -85,7 +85,6 @@ fn handle_normal_input(key: KeyEvent, app: &mut App) {
         KeyCode::Char(':') => {
             app.input_mode = InputMode::Command;
             app.input_buffer.clear();
-            app.set_info("Command mode - type 'help' for available commands");
         }
 
         // Enter - toggle expand/collapse node
@@ -101,6 +100,11 @@ fn handle_normal_input(key: KeyEvent, app: &mut App) {
         // Ctrl+C to quit
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             execute_command(app, "quit");
+        }
+
+        // ? - show help
+        KeyCode::Char('?') => {
+            execute_command(app, "help");
         }
 
         _ => {}
@@ -212,6 +216,17 @@ fn handle_replace_module_input(key: KeyEvent, app: &mut App) {
             app.input_mode = InputMode::Command;
             app.input_buffer.clear();
             app.set_info("Replace cancelled");
+        }
+        _ => {}
+    }
+}
+
+/// Handle help modal input
+fn handle_help_input(key: KeyEvent, app: &mut App) {
+    match key.code {
+        // Any key to close help modal
+        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter => {
+            app.input_mode = InputMode::Normal;
         }
         _ => {}
     }
@@ -508,33 +523,9 @@ fn execute_command(app: &mut App, cmd: &str) {
 
         // help - ?
         Some(&"help") | Some(&"?") => {
-            let help_text = "OpenSCAD TUI - Command Reference\n\
-                \n\
-                Navigation (tree is visual only, use commands):\n\
-                  j/up, k/down - move cursor up/down\n\
-                  h/left, l/right - collapse/expand nodes\n\
-                \n\
-                Selection & Operations:\n\
-                  v/select - toggle select node at cursor\n\
-                  i/insert <name> [params] - insert module\n\
-                  d/delete [id] - delete node (uses cursor if no id)\n\
-                  union/difference/intersection - boolean ops on selected\n\
-                \n\
-                Editing:\n\
-                  u/undo - undo last operation\n\
-                  r/redo - redo last operation\n\
-                  y/yank, p/paste - copy/paste (not implemented)\n\
-                  x/remove - remove node (not implemented)\n\
-                \n\
-                File Operations:\n\
-                  w/write <file> - save to YAML\n\
-                  edit <file> - load from YAML\n\
-                  export <file> - export OpenSCAD code\n\
-                \n\
-                Other:\n\
-                  q/quit - exit application\n\
-                  help/? - show this help";
-            app.set_error(help_text);
+            if let Err(e) = commands::cmd_help(app) {
+                app.set_error(&e.to_string());
+            }
         }
 
         _ => {

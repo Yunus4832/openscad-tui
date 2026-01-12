@@ -62,10 +62,23 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Result<(
         }
 
         if crossterm::event::poll(std::time::Duration::from_millis(250))? {
-            if let Event::Key(key) = event::read()? {
-                handle_key(key, &mut app);
-                // Validate tree state after each command to ensure path is still valid
-                app.validate_tree_state();
+            match event::read()? {
+                Event::Key(key) => {
+                    handle_key(key, &mut app);
+                    // Validate tree state after each command to ensure path is still valid
+                    app.validate_tree_state();
+                }
+                // Mouse events are handled implicitly by CrossTerm
+                // Users can select and copy text using standard terminal mouse support
+                Event::Mouse(_mouse_event) => {
+                    // Mouse events are primarily for text selection and copying
+                    // which is handled by the terminal emulator, not the application
+                    // Future: could implement mouse clicks for UI navigation if needed
+                }
+                Event::Resize(_, _) => {
+                    // Terminal was resized, next draw will handle it automatically
+                }
+                _ => {}
             }
         }
     }
