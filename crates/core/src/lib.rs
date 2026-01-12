@@ -238,6 +238,109 @@ pub enum Argument {
     Named { name: String, value: Expr },
 }
 
+/// A parameter in a function or module definition
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Parameter {
+    /// Parameter name
+    pub name: String,
+    /// Optional default value
+    pub default: Option<Expr>,
+}
+
+impl Parameter {
+    /// Create a new parameter with a name
+    pub fn new(name: String) -> Self {
+        Self {
+            name,
+            default: None,
+        }
+    }
+
+    /// Create a new parameter with a default value
+    pub fn with_default(name: String, default: Expr) -> Self {
+        Self {
+            name,
+            default: Some(default),
+        }
+    }
+
+    /// Generate OpenSCAD code for this parameter
+    pub fn to_scad(&self) -> String {
+        if let Some(ref default) = self.default {
+            format!("{}={}", self.name, default.to_scad())
+        } else {
+            self.name.clone()
+        }
+    }
+}
+
+/// An assignment statement (name = value)
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Assignment {
+    /// Variable name
+    pub name: String,
+    /// Value expression
+    pub value: Expr,
+}
+
+impl Assignment {
+    /// Create a new assignment
+    pub fn new(name: String, value: Expr) -> Self {
+        Self { name, value }
+    }
+
+    /// Generate OpenSCAD code for this assignment
+    pub fn to_scad(&self) -> String {
+        format!("{} = {}", self.name, self.value.to_scad())
+    }
+}
+
+/// A global variable declaration in OpenSCAD
+///
+/// Global variables in OpenSCAD are declared at the top level with an assignment like:
+/// `$my_var = 10;` or `my_var = [1, 2, 3];`
+///
+/// The `is_special` flag indicates whether it's a special variable (starts with $)
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct GlobalVariable {
+    /// Variable name (without $ prefix for special variables)
+    pub name: String,
+    /// Variable value
+    pub value: Expr,
+    /// Whether this is a special variable (prefixed with $)
+    pub is_special: bool,
+}
+
+impl GlobalVariable {
+    /// Create a new global variable
+    pub fn new(name: String, value: Expr) -> Self {
+        Self {
+            name,
+            value,
+            is_special: false,
+        }
+    }
+
+    /// Create a new special global variable (prefixed with $)
+    pub fn new_special(name: String, value: Expr) -> Self {
+        Self {
+            name,
+            value,
+            is_special: true,
+        }
+    }
+
+    /// Generate OpenSCAD code for this global variable
+    pub fn to_scad(&self) -> String {
+        let var_name = if self.is_special {
+            format!("${}", self.name)
+        } else {
+            self.name.clone()
+        };
+        format!("{} = {};", var_name, self.value.to_scad())
+    }
+}
+
 /// A module node in the AST
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModuleNode {
@@ -345,10 +448,98 @@ impl ModuleNode {
     }
 }
 
+/// A function definition in OpenSCAD
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FunctionDefinition {
+    /// Function name
+    pub name: String,
+    /// Function parameters
+    pub parameters: Vec<Parameter>,
+    /// Function body expression
+    pub body: Expr,
+}
+
+impl FunctionDefinition {
+    /// Create a new function definition
+    pub fn new(name: String, parameters: Vec<Parameter>, body: Expr) -> Self {
+        Self {
+            name,
+            parameters,
+            body,
+        }
+    }
+
+    /// Generate OpenSCAD code for this function
+    pub fn to_scad(&self) -> String {
+        let params_str = if self.parameters.is_empty() {
+            String::new()
+        } else {
+            self.parameters
+                .iter()
+                .map(|p| p.to_scad())
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        format!("function {}({}) = {};", self.name, params_str, self.body.to_scad())
+    }
+}
+
+/// A module definition in OpenSCAD
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModuleDefinition {
+    /// Module name
+    pub name: String,
+    /// Module parameters
+    pub parameters: Vec<Parameter>,
+    /// Module body (statements/children)
+    pub body: Vec<ModuleNode>,
+}
+
+impl ModuleDefinition {
+    /// Create a new module definition
+    pub fn new(name: String, parameters: Vec<Parameter>, body: Vec<ModuleNode>) -> Self {
+        Self {
+            name,
+            parameters,
+            body,
+        }
+    }
+
+    /// Generate OpenSCAD code for this module
+    pub fn to_scad(&self) -> String {
+        let params_str = if self.parameters.is_empty() {
+            String::new()
+        } else {
+            self.parameters
+                .iter()
+                .map(|p| p.to_scad())
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+
+        let mut result = format!("module {}({}) {{\n", self.name, params_str);
+        for stmt in &self.body {
+            result.push_str(&stmt.to_scad(4));
+            result.push('\n');
+        }
+        result.push_str("}\n");
+        result
+    }
+}
+
 /// The root AST structure
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AstRoot {
-    /// All top-level modules
+    /// Global variable declarations
+    pub global_variables: Vec<GlobalVariable>,
+
+    /// Module definitions
+    pub module_defines: Vec<ModuleDefinition>,
+
+    /// Function definitions
+    pub function_defines: Vec<FunctionDefinition>,
+
+    /// All top-level module instantiations
     pub modules: Vec<ModuleNode>,
 
     /// Included libraries
@@ -362,6 +553,9 @@ impl AstRoot {
     /// Create a new empty AST
     pub fn new() -> Self {
         Self {
+            global_variables: Vec::new(),
+            module_defines: Vec::new(),
+            function_defines: Vec::new(),
             modules: Vec::new(),
             includes: Vec::new(),
             uses: Vec::new(),
@@ -463,7 +657,86 @@ impl AstRoot {
         false
     }
 
-    /// Generate complete OpenSCAD code
+    /// Add a function definition
+    pub fn add_function_define(&mut self, func_def: FunctionDefinition) -> Result<()> {
+        // Check for duplicate function names
+        if self.function_defines.iter().any(|f| f.name == func_def.name) {
+            return Err(AstError::DuplicateIdentifier(func_def.name.clone()));
+        }
+        self.function_defines.push(func_def);
+        Ok(())
+    }
+
+    /// Add a module definition
+    pub fn add_module_define(&mut self, module_def: ModuleDefinition) -> Result<()> {
+        // Check for duplicate module names
+        if self.module_defines.iter().any(|m| m.name == module_def.name) {
+            return Err(AstError::DuplicateIdentifier(module_def.name.clone()));
+        }
+        self.module_defines.push(module_def);
+        Ok(())
+    }
+
+    /// Find a function definition by name
+    pub fn find_function_define(&self, name: &str) -> Option<&FunctionDefinition> {
+        self.function_defines.iter().find(|f| f.name == name)
+    }
+
+    /// Find a module definition by name
+    pub fn find_module_define(&self, name: &str) -> Option<&ModuleDefinition> {
+        self.module_defines.iter().find(|m| m.name == name)
+    }
+
+    /// Add a global variable
+    pub fn add_global_variable(&mut self, var: GlobalVariable) -> Result<()> {
+        // Check for duplicate variable names
+        if self.global_variables.iter().any(|v| v.name == var.name && v.is_special == var.is_special) {
+            return Err(AstError::DuplicateIdentifier(var.name.clone()));
+        }
+        self.global_variables.push(var);
+        Ok(())
+    }
+
+    /// Remove a global variable by name
+    pub fn remove_global_variable(&mut self, name: &str, is_special: bool) -> Result<()> {
+        if let Some(pos) = self.global_variables.iter().position(|v| v.name == name && v.is_special == is_special) {
+            self.global_variables.remove(pos);
+            Ok(())
+        } else {
+            Err(AstError::NodeNotFound(name.to_string()))
+        }
+    }
+
+    /// Find a global variable by name
+    pub fn find_global_variable(&self, name: &str, is_special: bool) -> Option<&GlobalVariable> {
+        self.global_variables.iter().find(|v| v.name == name && v.is_special == is_special)
+    }
+
+    /// Find a mutable global variable by name
+    pub fn find_global_variable_mut(&mut self, name: &str, is_special: bool) -> Option<&mut GlobalVariable> {
+        self.global_variables.iter_mut().find(|v| v.name == name && v.is_special == is_special)
+    }
+
+    /// Update a global variable's value
+    pub fn update_global_variable(&mut self, name: &str, is_special: bool, new_value: Expr) -> Result<()> {
+        if let Some(var) = self.find_global_variable_mut(name, is_special) {
+            var.value = new_value;
+            Ok(())
+        } else {
+            Err(AstError::NodeNotFound(name.to_string()))
+        }
+    }
+
+    /// Get all global variables
+    pub fn global_variables(&self) -> &[GlobalVariable] {
+        &self.global_variables
+    }
+
+    /// Check if a global variable exists
+    pub fn has_global_variable(&self, name: &str, is_special: bool) -> bool {
+        self.global_variables.iter().any(|v| v.name == name && v.is_special == is_special)
+    }
+
     pub fn to_scad(&self) -> String {
         let mut result = String::new();
 
@@ -485,7 +758,37 @@ impl AstRoot {
             result.push('\n');
         }
 
-        // Add modules
+        // Add global variables
+        for var in &self.global_variables {
+            result.push_str(&var.to_scad());
+            result.push('\n');
+        }
+
+        if !self.global_variables.is_empty() {
+            result.push('\n');
+        }
+
+        // Add function definitions
+        for func_def in &self.function_defines {
+            result.push_str(&func_def.to_scad());
+            result.push('\n');
+        }
+
+        if !self.function_defines.is_empty() {
+            result.push('\n');
+        }
+
+        // Add module definitions
+        for module_def in &self.module_defines {
+            result.push_str(&module_def.to_scad());
+            result.push('\n');
+        }
+
+        if !self.module_defines.is_empty() {
+            result.push('\n');
+        }
+
+        // Add module instantiations
         for module in &self.modules {
             result.push_str(&module.to_scad(0));
             result.push('\n');
@@ -579,5 +882,305 @@ mod tests {
 
         ast.add_module(module).unwrap();
         assert_eq!(ast.modules.len(), 1);
+    }
+
+    #[test]
+    fn test_parameter_to_scad() {
+        let param = Parameter::new("size".to_string());
+        assert_eq!(param.to_scad(), "size");
+
+        let param_with_default = Parameter::with_default(
+            "center".to_string(),
+            Expr::Boolean(false),
+        );
+        assert_eq!(param_with_default.to_scad(), "center=false");
+    }
+
+    #[test]
+    fn test_assignment_to_scad() {
+        let assignment = Assignment::new(
+            "x".to_string(),
+            Expr::Integer(10),
+        );
+        assert_eq!(assignment.to_scad(), "x = 10");
+    }
+
+    #[test]
+    fn test_global_variable_regular() {
+        let var = GlobalVariable::new(
+            "width".to_string(),
+            Expr::Integer(100),
+        );
+        assert_eq!(var.to_scad(), "width = 100;");
+        assert!(!var.is_special);
+    }
+
+    #[test]
+    fn test_global_variable_special() {
+        let var = GlobalVariable::new_special(
+            "fn".to_string(),
+            Expr::Integer(50),
+        );
+        assert_eq!(var.to_scad(), "$fn = 50;");
+        assert!(var.is_special);
+    }
+
+    #[test]
+    fn test_global_variable_complex_expression() {
+        let var = GlobalVariable::new(
+            "size".to_string(),
+            Expr::List(vec![
+                Expr::Integer(10),
+                Expr::Integer(20),
+                Expr::Integer(30),
+            ]),
+        );
+        assert!(var.to_scad().contains("size = [10, 20, 30];"));
+    }
+
+    #[test]
+    fn test_function_definition() {
+        let func = FunctionDefinition::new(
+            "add".to_string(),
+            vec![
+                Parameter::new("a".to_string()),
+                Parameter::new("b".to_string()),
+            ],
+            Expr::BinOp {
+                left: Box::new(Expr::Identifier("a".to_string())),
+                op: BinOp::Add,
+                right: Box::new(Expr::Identifier("b".to_string())),
+            },
+        );
+
+        let scad = func.to_scad();
+        assert!(scad.contains("function add"));
+        assert!(scad.contains("a,"));
+        assert!(scad.contains("b)"));
+        assert!(scad.contains("a + b"));
+    }
+
+    #[test]
+    fn test_module_definition() {
+        let module_def = ModuleDefinition::new(
+            "my_cube".to_string(),
+            vec![Parameter::with_default(
+                "size".to_string(),
+                Expr::Integer(10),
+            )],
+            vec![ModuleNode::new_leaf(
+                "cube1".to_string(),
+                "cube".to_string(),
+                vec![],
+            )],
+        );
+
+        let scad = module_def.to_scad();
+        assert!(scad.contains("module my_cube"));
+        assert!(scad.contains("size=10"));
+        assert!(scad.contains("cube"));
+    }
+
+    #[test]
+    fn test_ast_root_with_definitions() {
+        let mut ast = AstRoot::new();
+
+        let func_def = FunctionDefinition::new(
+            "double".to_string(),
+            vec![Parameter::new("x".to_string())],
+            Expr::BinOp {
+                left: Box::new(Expr::Identifier("x".to_string())),
+                op: BinOp::Mul,
+                right: Box::new(Expr::Integer(2)),
+            },
+        );
+
+        ast.add_function_define(func_def).unwrap();
+        assert_eq!(ast.function_defines.len(), 1);
+        assert!(ast.find_function_define("double").is_some());
+
+        let module_def = ModuleDefinition::new(
+            "test_module".to_string(),
+            vec![],
+            vec![],
+        );
+
+        ast.add_module_define(module_def).unwrap();
+        assert_eq!(ast.module_defines.len(), 1);
+        assert!(ast.find_module_define("test_module").is_some());
+    }
+
+    #[test]
+    fn test_ast_root_complete_code_generation() {
+        let mut ast = AstRoot::new();
+        
+        // Add includes
+        ast.includes.push("lib.scad".to_string());
+        
+        // Add function definition
+        ast.add_function_define(FunctionDefinition::new(
+            "get_size".to_string(),
+            vec![],
+            Expr::Integer(10),
+        )).unwrap();
+
+        // Add module definition
+        ast.add_module_define(ModuleDefinition::new(
+            "my_shape".to_string(),
+            vec![],
+            vec![ModuleNode::new_leaf(
+                "m1".to_string(),
+                "cube".to_string(),
+                vec![],
+            )],
+        )).unwrap();
+
+        // Add module instantiation
+        ast.add_module(ModuleNode::new_leaf(
+            "instance1".to_string(),
+            "my_shape".to_string(),
+            vec![],
+        )).unwrap();
+
+        let scad = ast.to_scad();
+        assert!(scad.contains("include <lib.scad>"));
+        assert!(scad.contains("function get_size"));
+        assert!(scad.contains("module my_shape"));
+        assert!(scad.contains("my_shape()"));
+    }
+
+    #[test]
+    fn test_ast_root_with_global_variables() {
+        let mut ast = AstRoot::new();
+
+        // Add regular global variable
+        ast.add_global_variable(GlobalVariable::new(
+            "width".to_string(),
+            Expr::Integer(100),
+        )).unwrap();
+
+        // Add special global variable
+        ast.add_global_variable(GlobalVariable::new_special(
+            "fn".to_string(),
+            Expr::Integer(50),
+        )).unwrap();
+
+        assert_eq!(ast.global_variables.len(), 2);
+        assert!(ast.find_global_variable("width", false).is_some());
+        assert!(ast.find_global_variable("fn", true).is_some());
+        assert!(ast.has_global_variable("width", false));
+        assert!(!ast.has_global_variable("width", true));
+    }
+
+    #[test]
+    fn test_global_variable_duplicate_check() {
+        let mut ast = AstRoot::new();
+
+        ast.add_global_variable(GlobalVariable::new(
+            "size".to_string(),
+            Expr::Integer(10),
+        )).unwrap();
+
+        // Try to add duplicate
+        let result = ast.add_global_variable(GlobalVariable::new(
+            "size".to_string(),
+            Expr::Integer(20),
+        ));
+
+        assert!(result.is_err());
+        assert_eq!(ast.global_variables.len(), 1);
+    }
+
+    #[test]
+    fn test_global_variable_update() {
+        let mut ast = AstRoot::new();
+
+        ast.add_global_variable(GlobalVariable::new(
+            "size".to_string(),
+            Expr::Integer(10),
+        )).unwrap();
+
+        // Update the variable
+        ast.update_global_variable(
+            "size",
+            false,
+            Expr::Integer(20),
+        ).unwrap();
+
+        let var = ast.find_global_variable("size", false).unwrap();
+        assert_eq!(var.value, Expr::Integer(20));
+    }
+
+    #[test]
+    fn test_global_variable_remove() {
+        let mut ast = AstRoot::new();
+
+        ast.add_global_variable(GlobalVariable::new(
+            "size".to_string(),
+            Expr::Integer(10),
+        )).unwrap();
+
+        assert_eq!(ast.global_variables.len(), 1);
+
+        // Remove the variable
+        ast.remove_global_variable("size", false).unwrap();
+        assert_eq!(ast.global_variables.len(), 0);
+    }
+
+    #[test]
+    fn test_ast_root_with_all_components() {
+        let mut ast = AstRoot::new();
+
+        // Add includes
+        ast.includes.push("lib.scad".to_string());
+
+        // Add global variable
+        ast.add_global_variable(GlobalVariable::new_special(
+            "fn".to_string(),
+            Expr::Integer(32),
+        )).unwrap();
+
+        // Add function definition
+        ast.add_function_define(FunctionDefinition::new(
+            "double".to_string(),
+            vec![Parameter::new("x".to_string())],
+            Expr::BinOp {
+                left: Box::new(Expr::Identifier("x".to_string())),
+                op: BinOp::Mul,
+                right: Box::new(Expr::Integer(2)),
+            },
+        )).unwrap();
+
+        // Add module definition
+        ast.add_module_define(ModuleDefinition::new(
+            "cube_holder".to_string(),
+            vec![],
+            vec![ModuleNode::new_leaf(
+                "c1".to_string(),
+                "cube".to_string(),
+                vec![],
+            )],
+        )).unwrap();
+
+        // Add module instantiation
+        ast.add_module(ModuleNode::new_leaf(
+            "m1".to_string(),
+            "cube_holder".to_string(),
+            vec![],
+        )).unwrap();
+
+        let scad = ast.to_scad();
+
+        // Check order: includes -> global vars -> functions -> modules -> instantiations
+        let includes_pos = scad.find("include").unwrap();
+        let vars_pos = scad.find("$fn").unwrap();
+        let func_pos = scad.find("function double").unwrap();
+        let module_pos = scad.find("module cube_holder").unwrap();
+        let inst_pos = scad.find("cube_holder()").unwrap();
+
+        assert!(includes_pos < vars_pos);
+        assert!(vars_pos < func_pos);
+        assert!(func_pos < module_pos);
+        assert!(module_pos < inst_pos);
     }
 }

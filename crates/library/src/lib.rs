@@ -112,17 +112,18 @@ pub struct LibraryManager {
 
 impl LibraryManager {
     /// Create a new library manager with built-in modules
-    /// Create a new library manager
-    ///
-    /// Standard library modules are NOT loaded here.
-    /// They are loaded later by load_stdlib_with_config() which:
-    /// 1. Tries to load from user config dir (~/.config/openscad-tui/stdlib.json)
-    /// 2. Falls back to embedded stdlib.json if user config doesn't exist
     pub fn new() -> Self {
-        Self {
+        let mut manager = Self {
             builtin_modules: HashMap::new(),
             libraries: HashMap::new(),
+        };
+
+        // Load standard library with fallback to embedded version
+        if let Err(e) = manager.load_stdlib_with_config() {
+            eprintln!("Warning: Failed to load standard library: {}", e);
         }
+
+        manager
     }
 
     /// Get a module definition by name
