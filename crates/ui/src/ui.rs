@@ -59,8 +59,8 @@ fn draw_tree(f: &mut Frame, app: &App, area: Rect) {
         .borders(Borders::ALL)
         .style(Style::default().fg(Color::Cyan));
 
-    // Build tree items from AST
-    let tree_items = build_tree_items(&app.ast.modules, &app.selected_nodes);
+    // Build tree items from AST (includes all sections)
+    let tree_items = build_ast_tree_items(&app.ast, &app.selected_nodes);
 
     // Create tree widget
     match Tree::new(&tree_items) {
@@ -85,6 +85,116 @@ fn draw_tree(f: &mut Frame, app: &App, area: Rect) {
             f.render_widget(para, area);
         }
     }
+}
+
+/// Build TreeItems from entire AST (all sections)
+fn build_ast_tree_items(
+    ast: &openscad_core::AstRoot,
+    selected: &[String],
+) -> Vec<TreeItem<'static, String>> {
+    let mut items = Vec::new();
+
+    // Includes section
+    if !ast.includes.is_empty() {
+        let include_children: Vec<TreeItem<String>> = ast
+            .includes
+            .iter()
+            .enumerate()
+            .map(|(i, inc)| {
+                let id = format!("__include_{}", i);
+                TreeItem::new(id, format!("  {}", inc), vec![]).expect("Failed to create TreeItem")
+            })
+            .collect();
+        items.push(
+            TreeItem::new("__includes".to_string(), "[Includes]".to_string(), include_children)
+                .expect("Failed to create TreeItem"),
+        );
+    }
+
+    // Uses section
+    if !ast.uses.is_empty() {
+        let use_children: Vec<TreeItem<String>> = ast
+            .uses
+            .iter()
+            .enumerate()
+            .map(|(i, u)| {
+                let id = format!("__use_{}", i);
+                TreeItem::new(id, format!("  {}", u), vec![]).expect("Failed to create TreeItem")
+            })
+            .collect();
+        items.push(
+            TreeItem::new("__uses".to_string(), "[Uses]".to_string(), use_children)
+                .expect("Failed to create TreeItem"),
+        );
+    }
+
+    // Global Variables section
+    if !ast.global_variables.is_empty() {
+        let var_children: Vec<TreeItem<String>> = ast
+            .global_variables
+            .iter()
+            .map(|var| {
+                let id = format!("__var_{}_{}", if var.is_special { "s" } else { "n" }, var.name);
+                let display = if var.is_special {
+                    format!("  ${} = {}", var.name, var.value.to_scad())
+                } else {
+                    format!("  {} = {}", var.name, var.value.to_scad())
+                };
+                TreeItem::new(id, display, vec![]).expect("Failed to create TreeItem")
+            })
+            .collect();
+        items.push(
+            TreeItem::new("__globals".to_string(), "[Global Variables]".to_string(), var_children)
+                .expect("Failed to create TreeItem"),
+        );
+    }
+
+    // Function Definitions section
+    if !ast.function_defines.is_empty() {
+        let func_children: Vec<TreeItem<String>> = ast
+            .function_defines
+            .iter()
+            .map(|func| {
+                let id = format!("__func_{}", func.name);
+                let params = func.parameters.iter().map(|p| p.to_scad()).collect::<Vec<_>>().join(", ");
+                let display = format!("  function {}({})", func.name, params);
+                TreeItem::new(id, display, vec![]).expect("Failed to create TreeItem")
+            })
+            .collect();
+        items.push(
+            TreeItem::new("__functions".to_string(), "[Functions]".to_string(), func_children)
+                .expect("Failed to create TreeItem"),
+        );
+    }
+
+    // Module Definitions section
+    if !ast.module_defines.is_empty() {
+        let mod_def_children: Vec<TreeItem<String>> = ast
+            .module_defines
+            .iter()
+            .map(|mod_def| {
+                let id = format!("__moddef_{}", mod_def.name);
+                let params = mod_def.parameters.iter().map(|p| p.to_scad()).collect::<Vec<_>>().join(", ");
+                let display = format!("  module {}({})", mod_def.name, params);
+                TreeItem::new(id, display, vec![]).expect("Failed to create TreeItem")
+            })
+            .collect();
+        items.push(
+            TreeItem::new("__moddefs".to_string(), "[Module Definitions]".to_string(), mod_def_children)
+                .expect("Failed to create TreeItem"),
+        );
+    }
+
+    // Modules section (module instantiations)
+    if !ast.modules.is_empty() {
+        let module_children = build_tree_items(&ast.modules, selected);
+        items.push(
+            TreeItem::new("__modules".to_string(), "[Modules]".to_string(), module_children)
+                .expect("Failed to create TreeItem"),
+        );
+    }
+
+    items
 }
 
 /// Build TreeItems from AST modules

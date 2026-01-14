@@ -39,7 +39,7 @@ pub type CommandResult<T> = std::result::Result<T, CommandError>;
 ///
 /// For leaf modules (accepts_children: false):
 ///   - Insert after the currently selected node if there is one
-///   - If no node is selected, insert at root level
+///   - If no node is selected, or selected node is not in Modules section, insert at root level of Modules
 pub fn cmd_insert(
     app: &mut crate::app::App,
     module_name: &str,
@@ -171,21 +171,33 @@ pub fn cmd_insert(
         // Determine insertion point based on current selection
         let selected = app.tree_state.borrow().selected().last().cloned();
 
-        if let Some(selected_id) = selected {
+        // Check if selected node is in Modules section (not a section header)
+        let insert_at_root = match &selected {
+            None => true,
+            Some(id) => {
+                // If selected is a section header or not a module node, insert at root
+                id.starts_with("__") || app.ast.find_node_by_id(id).is_none()
+            }
+        };
+
+        if insert_at_root {
+            // Insert at root level of Modules section
+            app.ast.add_module(module)?;
+        } else if let Some(selected_id) = selected {
             // Find the selected node and insert after it
             insert_after_node(&mut app.ast.modules, &selected_id, module)?;
-        } else {
-            // No selection, insert at root level
-            app.ast.add_module(module)?;
         }
 
         // Select the newly inserted module for continued operations
         // Use the full path to ensure proper navigation in nested trees
         if let Some(path) = app.find_node_path(&node_id) {
             app.tree_state.borrow_mut().select(path);
+            // Open the __modules section to show the new node
+            app.tree_state.borrow_mut().open(vec!["__modules".to_string()]);
         } else {
             // Fallback: just select by ID if path not found
-            app.tree_state.borrow_mut().select(vec![node_id.clone()]);
+            app.tree_state.borrow_mut().select(vec!["__modules".to_string(), node_id.clone()]);
+            app.tree_state.borrow_mut().open(vec!["__modules".to_string()]);
         }
 
         Ok(node_id)
@@ -299,6 +311,14 @@ fn insert_child_before_recursive(
 
 /// Delete command
 pub fn cmd_delete(app: &mut crate::app::App, node_id: &str) -> CommandResult<()> {
+    // Prevent deletion of section headers
+    if node_id.starts_with("__") {
+        return Err(CommandError::Custom(format!(
+            "Cannot delete section header: {}",
+            node_id
+        )));
+    }
+
     app.ast.delete_node(node_id)?;
     app.selected_nodes.retain(|id| id != node_id);
 
@@ -473,6 +493,12 @@ pub fn cmd_toggle(app: &mut crate::app::App) -> CommandResult<()> {
 pub fn cmd_select_toggle(app: &mut crate::app::App) -> CommandResult<()> {
     let selected = app.tree_state.borrow().selected().last().cloned();
     if let Some(node_id) = selected {
+        // Prevent selection of section headers
+        if node_id.starts_with("__") {
+            app.set_info("Cannot select section headers");
+            return Ok(());
+        }
+
         if app.selected_nodes.contains(&node_id) {
             app.selected_nodes.retain(|n| n != &node_id);
             app.set_info(&format!("Deselected: {}", node_id));

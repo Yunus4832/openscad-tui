@@ -93,12 +93,19 @@ impl App {
 
     /// Initialize tree state with first item selected if available
     pub fn init_tree_selection(&mut self) {
-        if !self.ast.modules.is_empty() {
-            if let Some(first_module) = self.ast.modules.first() {
-                self.tree_state
-                    .borrow_mut()
-                    .select(vec![first_module.id.clone()]);
-            }
+        // Select first available section in the tree
+        if !self.ast.includes.is_empty() {
+            self.tree_state.borrow_mut().select(vec!["__includes".to_string()]);
+        } else if !self.ast.uses.is_empty() {
+            self.tree_state.borrow_mut().select(vec!["__uses".to_string()]);
+        } else if !self.ast.global_variables.is_empty() {
+            self.tree_state.borrow_mut().select(vec!["__globals".to_string()]);
+        } else if !self.ast.function_defines.is_empty() {
+            self.tree_state.borrow_mut().select(vec!["__functions".to_string()]);
+        } else if !self.ast.module_defines.is_empty() {
+            self.tree_state.borrow_mut().select(vec!["__moddefs".to_string()]);
+        } else if !self.ast.modules.is_empty() {
+            self.tree_state.borrow_mut().select(vec!["__modules".to_string()]);
         }
     }
 
@@ -107,24 +114,52 @@ impl App {
     pub fn restore_tree_selection(&mut self) {
         let current_selection = self.tree_state.borrow().selected().last().cloned();
 
-        // Check if current selection still exists in AST
+        // Check if current selection still exists
         if let Some(ref node_id) = current_selection {
-            if self.ast.find_node_by_id(node_id).is_some() {
-                // Current selection is still valid, keep it
+            // Check section headers
+            if node_id.starts_with("__") {
+                if self.is_valid_section_id(node_id) {
+                    return;
+                }
+            } else if self.ast.find_node_by_id(node_id).is_some() {
                 return;
             }
         }
 
-        // Current selection is invalid or empty, select first module
-        if !self.ast.modules.is_empty() {
-            if let Some(first_module) = self.ast.modules.first() {
-                self.tree_state
-                    .borrow_mut()
-                    .select(vec![first_module.id.clone()]);
+        // Current selection is invalid or empty, select first available section
+        self.init_tree_selection();
+    }
+
+    /// Check if a section ID is still valid
+    fn is_valid_section_id(&self, id: &str) -> bool {
+        match id {
+            "__includes" => !self.ast.includes.is_empty(),
+            "__uses" => !self.ast.uses.is_empty(),
+            "__globals" => !self.ast.global_variables.is_empty(),
+            "__functions" => !self.ast.function_defines.is_empty(),
+            "__moddefs" => !self.ast.module_defines.is_empty(),
+            "__modules" => !self.ast.modules.is_empty(),
+            s if s.starts_with("__include_") => {
+                let idx: usize = s.trim_start_matches("__include_").parse().unwrap_or(usize::MAX);
+                idx < self.ast.includes.len()
             }
-        } else {
-            // No modules at all, clear selection
-            self.tree_state.borrow_mut().select(vec![]);
+            s if s.starts_with("__use_") => {
+                let idx: usize = s.trim_start_matches("__use_").parse().unwrap_or(usize::MAX);
+                idx < self.ast.uses.len()
+            }
+            s if s.starts_with("__var_") => {
+                let name = s.trim_start_matches("__var_s_").trim_start_matches("__var_n_");
+                self.ast.global_variables.iter().any(|v| v.name == name)
+            }
+            s if s.starts_with("__func_") => {
+                let name = s.trim_start_matches("__func_");
+                self.ast.function_defines.iter().any(|f| f.name == name)
+            }
+            s if s.starts_with("__moddef_") => {
+                let name = s.trim_start_matches("__moddef_");
+                self.ast.module_defines.iter().any(|m| m.name == name)
+            }
+            _ => false,
         }
     }
 
@@ -136,45 +171,39 @@ impl App {
         let current_path = self.tree_state.borrow().selected().to_vec();
 
         if current_path.is_empty() {
-            // No selection, try to select first module
-            if !self.ast.modules.is_empty() {
-                if let Some(first_module) = self.ast.modules.first() {
-                    self.tree_state
-                        .borrow_mut()
-                        .select(vec![first_module.id.clone()]);
-                }
-            }
+            // No selection, try to select first section
+            self.init_tree_selection();
             return;
         }
 
         // Check if the last node in the path still exists
         if let Some(last_node_id) = current_path.last() {
-            if self.ast.find_node_by_id(last_node_id).is_some() {
-                // The selected node still exists, keep the path as is
+            // Check section headers and their children
+            if last_node_id.starts_with("__") {
+                if self.is_valid_section_id(last_node_id) {
+                    return;
+                }
+            } else if self.ast.find_node_by_id(last_node_id).is_some() {
                 return;
             }
         }
 
         // Last node in path doesn't exist, try to select the last valid node in the path
         for i in (0..current_path.len()).rev() {
-            if self.ast.find_node_by_id(&current_path[i]).is_some() {
-                self.tree_state
-                    .borrow_mut()
-                    .select(vec![current_path[i].clone()]);
+            let node_id = &current_path[i];
+            if node_id.starts_with("__") {
+                if self.is_valid_section_id(node_id) {
+                    self.tree_state.borrow_mut().select(vec![node_id.clone()]);
+                    return;
+                }
+            } else if self.ast.find_node_by_id(node_id).is_some() {
+                self.tree_state.borrow_mut().select(vec![node_id.clone()]);
                 return;
             }
         }
 
-        // No valid node in path, select first module
-        if !self.ast.modules.is_empty() {
-            if let Some(first_module) = self.ast.modules.first() {
-                self.tree_state
-                    .borrow_mut()
-                    .select(vec![first_module.id.clone()]);
-            }
-        } else {
-            self.tree_state.borrow_mut().select(vec![]);
-        }
+        // No valid node in path, select first section
+        self.init_tree_selection();
     }
 
     #[allow(dead_code)]
@@ -186,7 +215,21 @@ impl App {
     /// Find the path to a node (from root to the node)
     /// Returns a vector of node IDs representing the path from root to target node
     pub fn find_node_path(&self, target_id: &str) -> Option<Vec<String>> {
-        self.find_node_path_recursive(&self.ast.modules, target_id, &mut Vec::new())
+        // Check if target is a section header
+        if target_id.starts_with("__") {
+            if self.is_valid_section_id(target_id) {
+                return Some(vec![target_id.to_string()]);
+            }
+            return None;
+        }
+
+        // For module nodes, search within the modules section
+        let mut path = vec!["__modules".to_string()];
+        if let Some(mut module_path) = self.find_node_path_recursive(&self.ast.modules, target_id, &mut Vec::new()) {
+            path.append(&mut module_path);
+            return Some(path);
+        }
+        None
     }
 
     fn find_node_path_recursive(
@@ -280,13 +323,70 @@ impl App {
     pub fn update_navigation_status(&mut self) {
         let selected = self.tree_state.borrow().selected().last().cloned();
         if let Some(node_id) = selected {
-            // Find the module name from the node ID
-            let module_name = self
-                .find_module_name(&node_id)
-                .unwrap_or_else(|| node_id.clone());
-            self.set_info(&format!("> {}", module_name));
+            // Handle section headers
+            let display_name = if node_id.starts_with("__") {
+                self.get_section_display_name(&node_id)
+            } else {
+                self.find_module_name(&node_id).unwrap_or_else(|| node_id.clone())
+            };
+            self.set_info(&format!("> {}", display_name));
         } else {
             self.clear_message();
+        }
+    }
+
+    /// Get display name for section headers and their children
+    fn get_section_display_name(&self, node_id: &str) -> String {
+        match node_id {
+            "__includes" => "[Includes]".to_string(),
+            "__uses" => "[Uses]".to_string(),
+            "__globals" => "[Global Variables]".to_string(),
+            "__functions" => "[Functions]".to_string(),
+            "__moddefs" => "[Module Definitions]".to_string(),
+            "__modules" => "[Modules]".to_string(),
+            s if s.starts_with("__include_") => {
+                let idx: usize = s.trim_start_matches("__include_").parse().unwrap_or(0);
+                self.ast.includes.get(idx).cloned().unwrap_or_else(|| s.to_string())
+            }
+            s if s.starts_with("__use_") => {
+                let idx: usize = s.trim_start_matches("__use_").parse().unwrap_or(0);
+                self.ast.uses.get(idx).cloned().unwrap_or_else(|| s.to_string())
+            }
+            s if s.starts_with("__var_s_") => {
+                let name = s.trim_start_matches("__var_s_");
+                self.ast.global_variables.iter()
+                    .find(|v| v.name == name && v.is_special)
+                    .map(|v| format!("${} = {}", v.name, v.value.to_scad()))
+                    .unwrap_or_else(|| s.to_string())
+            }
+            s if s.starts_with("__var_n_") => {
+                let name = s.trim_start_matches("__var_n_");
+                self.ast.global_variables.iter()
+                    .find(|v| v.name == name && !v.is_special)
+                    .map(|v| format!("{} = {}", v.name, v.value.to_scad()))
+                    .unwrap_or_else(|| s.to_string())
+            }
+            s if s.starts_with("__func_") => {
+                let name = s.trim_start_matches("__func_");
+                self.ast.function_defines.iter()
+                    .find(|f| f.name == name)
+                    .map(|f| {
+                        let params = f.parameters.iter().map(|p| p.to_scad()).collect::<Vec<_>>().join(", ");
+                        format!("function {}({})", f.name, params)
+                    })
+                    .unwrap_or_else(|| s.to_string())
+            }
+            s if s.starts_with("__moddef_") => {
+                let name = s.trim_start_matches("__moddef_");
+                self.ast.module_defines.iter()
+                    .find(|m| m.name == name)
+                    .map(|m| {
+                        let params = m.parameters.iter().map(|p| p.to_scad()).collect::<Vec<_>>().join(", ");
+                        format!("module {}({})", m.name, params)
+                    })
+                    .unwrap_or_else(|| s.to_string())
+            }
+            _ => node_id.to_string(),
         }
     }
 
