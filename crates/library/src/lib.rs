@@ -108,6 +108,9 @@ pub struct LibraryManager {
 
     /// Loaded libraries
     libraries: HashMap<String, LibraryDef>,
+
+    /// User-defined custom modules
+    custom_modules: HashMap<String, ModuleDef>,
 }
 
 impl LibraryManager {
@@ -116,6 +119,7 @@ impl LibraryManager {
         let mut manager = Self {
             builtin_modules: HashMap::new(),
             libraries: HashMap::new(),
+            custom_modules: HashMap::new(),
         };
 
         // Load standard library with fallback to embedded version
@@ -128,16 +132,54 @@ impl LibraryManager {
 
     /// Get a module definition by name
     pub fn get_module(&self, name: &str) -> Option<ModuleDef> {
-        self.builtin_modules
+        self.custom_modules
             .get(name)
             .cloned()
+            .or_else(|| self.builtin_modules.get(name).cloned())
             .or_else(|| self.get_module_from_libraries(name))
+    }
+
+    /// Add a user-defined custom module
+    pub fn add_custom_module(&mut self, module: ModuleDef) {
+        self.custom_modules.insert(module.name.clone(), module);
+    }
+
+    /// Reload custom modules from AST module definitions
+    pub fn reload_custom_modules_from_ast(
+        &mut self,
+        module_defines: &[openscad_core::ModuleDefinition],
+    ) {
+        self.custom_modules.clear();
+        for module_def in module_defines {
+            let params: Vec<ParameterDef> = module_def
+                .parameters
+                .iter()
+                .map(|p| ParameterDef {
+                    name: p.name.clone(),
+                    param_type: "any".to_string(),
+                    default: p.default.as_ref().map(|e| e.to_scad()),
+                    description: None,
+                })
+                .collect();
+            let module = ModuleDef {
+                name: module_def.name.clone(),
+                description: Some(format!("User-defined module: {}", module_def.name)),
+                parameters: params,
+                accepts_children: false, // Custom modules cannot accept children at call time
+            };
+            self.custom_modules.insert(module_def.name.clone(), module);
+        }
     }
 
     /// Get module source information
     /// Returns (library_name, library_file) for third-party modules
     /// Returns (None, None) for built-in modules
     pub fn get_module_source(&self, name: &str) -> (Option<String>, Option<String>) {
+        // Check if it's a custom module (treated as built-in)
+        if self.custom_modules.contains_key(name) {
+            return (None, None);
+        }
+
         // Check if it's a built-in module
         if self.builtin_modules.contains_key(name) {
             return (None, None);
@@ -169,8 +211,16 @@ impl LibraryManager {
 
     /// Get all available modules
     pub fn get_all_modules(&self) -> Vec<ModuleDef> {
-        let mut modules: Vec<_> = self.builtin_modules.values().cloned().collect();
+        let mut modules: Vec<_> = self.custom_modules.values().cloned().collect();
 
+        // Add built-in modules, skipping any already added from custom_modules
+        for module in self.builtin_modules.values() {
+            if !modules.iter().any(|m| m.name == module.name) {
+                modules.push(module.clone());
+            }
+        }
+
+        // Add library modules, skipping any already added
         for lib in self.libraries.values() {
             for module in &lib.modules {
                 if !modules.iter().any(|m| m.name == module.name) {

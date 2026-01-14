@@ -480,7 +480,12 @@ impl FunctionDefinition {
                 .collect::<Vec<_>>()
                 .join(", ")
         };
-        format!("function {}({}) = {};", self.name, params_str, self.body.to_scad())
+        format!(
+            "function {}({}) = {};",
+            self.name,
+            params_str,
+            self.body.to_scad()
+        )
     }
 }
 
@@ -660,7 +665,11 @@ impl AstRoot {
     /// Add a function definition
     pub fn add_function_define(&mut self, func_def: FunctionDefinition) -> Result<()> {
         // Check for duplicate function names
-        if self.function_defines.iter().any(|f| f.name == func_def.name) {
+        if self
+            .function_defines
+            .iter()
+            .any(|f| f.name == func_def.name)
+        {
             return Err(AstError::DuplicateIdentifier(func_def.name.clone()));
         }
         self.function_defines.push(func_def);
@@ -670,7 +679,11 @@ impl AstRoot {
     /// Add a module definition
     pub fn add_module_define(&mut self, module_def: ModuleDefinition) -> Result<()> {
         // Check for duplicate module names
-        if self.module_defines.iter().any(|m| m.name == module_def.name) {
+        if self
+            .module_defines
+            .iter()
+            .any(|m| m.name == module_def.name)
+        {
             return Err(AstError::DuplicateIdentifier(module_def.name.clone()));
         }
         self.module_defines.push(module_def);
@@ -690,7 +703,11 @@ impl AstRoot {
     /// Add a global variable
     pub fn add_global_variable(&mut self, var: GlobalVariable) -> Result<()> {
         // Check for duplicate variable names
-        if self.global_variables.iter().any(|v| v.name == var.name && v.is_special == var.is_special) {
+        if self
+            .global_variables
+            .iter()
+            .any(|v| v.name == var.name && v.is_special == var.is_special)
+        {
             return Err(AstError::DuplicateIdentifier(var.name.clone()));
         }
         self.global_variables.push(var);
@@ -699,7 +716,11 @@ impl AstRoot {
 
     /// Remove a global variable by name
     pub fn remove_global_variable(&mut self, name: &str, is_special: bool) -> Result<()> {
-        if let Some(pos) = self.global_variables.iter().position(|v| v.name == name && v.is_special == is_special) {
+        if let Some(pos) = self
+            .global_variables
+            .iter()
+            .position(|v| v.name == name && v.is_special == is_special)
+        {
             self.global_variables.remove(pos);
             Ok(())
         } else {
@@ -709,16 +730,29 @@ impl AstRoot {
 
     /// Find a global variable by name
     pub fn find_global_variable(&self, name: &str, is_special: bool) -> Option<&GlobalVariable> {
-        self.global_variables.iter().find(|v| v.name == name && v.is_special == is_special)
+        self.global_variables
+            .iter()
+            .find(|v| v.name == name && v.is_special == is_special)
     }
 
     /// Find a mutable global variable by name
-    pub fn find_global_variable_mut(&mut self, name: &str, is_special: bool) -> Option<&mut GlobalVariable> {
-        self.global_variables.iter_mut().find(|v| v.name == name && v.is_special == is_special)
+    pub fn find_global_variable_mut(
+        &mut self,
+        name: &str,
+        is_special: bool,
+    ) -> Option<&mut GlobalVariable> {
+        self.global_variables
+            .iter_mut()
+            .find(|v| v.name == name && v.is_special == is_special)
     }
 
     /// Update a global variable's value
-    pub fn update_global_variable(&mut self, name: &str, is_special: bool, new_value: Expr) -> Result<()> {
+    pub fn update_global_variable(
+        &mut self,
+        name: &str,
+        is_special: bool,
+        new_value: Expr,
+    ) -> Result<()> {
         if let Some(var) = self.find_global_variable_mut(name, is_special) {
             var.value = new_value;
             Ok(())
@@ -734,7 +768,9 @@ impl AstRoot {
 
     /// Check if a global variable exists
     pub fn has_global_variable(&self, name: &str, is_special: bool) -> bool {
-        self.global_variables.iter().any(|v| v.name == name && v.is_special == is_special)
+        self.global_variables
+            .iter()
+            .any(|v| v.name == name && v.is_special == is_special)
     }
 
     pub fn to_scad(&self) -> String {
@@ -889,38 +925,27 @@ mod tests {
         let param = Parameter::new("size".to_string());
         assert_eq!(param.to_scad(), "size");
 
-        let param_with_default = Parameter::with_default(
-            "center".to_string(),
-            Expr::Boolean(false),
-        );
+        let param_with_default =
+            Parameter::with_default("center".to_string(), Expr::Boolean(false));
         assert_eq!(param_with_default.to_scad(), "center=false");
     }
 
     #[test]
     fn test_assignment_to_scad() {
-        let assignment = Assignment::new(
-            "x".to_string(),
-            Expr::Integer(10),
-        );
+        let assignment = Assignment::new("x".to_string(), Expr::Integer(10));
         assert_eq!(assignment.to_scad(), "x = 10");
     }
 
     #[test]
     fn test_global_variable_regular() {
-        let var = GlobalVariable::new(
-            "width".to_string(),
-            Expr::Integer(100),
-        );
+        let var = GlobalVariable::new("width".to_string(), Expr::Integer(100));
         assert_eq!(var.to_scad(), "width = 100;");
         assert!(!var.is_special);
     }
 
     #[test]
     fn test_global_variable_special() {
-        let var = GlobalVariable::new_special(
-            "fn".to_string(),
-            Expr::Integer(50),
-        );
+        let var = GlobalVariable::new_special("fn".to_string(), Expr::Integer(50));
         assert_eq!(var.to_scad(), "$fn = 50;");
         assert!(var.is_special);
     }
@@ -999,11 +1024,7 @@ mod tests {
         assert_eq!(ast.function_defines.len(), 1);
         assert!(ast.find_function_define("double").is_some());
 
-        let module_def = ModuleDefinition::new(
-            "test_module".to_string(),
-            vec![],
-            vec![],
-        );
+        let module_def = ModuleDefinition::new("test_module".to_string(), vec![], vec![]);
 
         ast.add_module_define(module_def).unwrap();
         assert_eq!(ast.module_defines.len(), 1);
@@ -1013,16 +1034,17 @@ mod tests {
     #[test]
     fn test_ast_root_complete_code_generation() {
         let mut ast = AstRoot::new();
-        
+
         // Add includes
         ast.includes.push("lib.scad".to_string());
-        
+
         // Add function definition
         ast.add_function_define(FunctionDefinition::new(
             "get_size".to_string(),
             vec![],
             Expr::Integer(10),
-        )).unwrap();
+        ))
+        .unwrap();
 
         // Add module definition
         ast.add_module_define(ModuleDefinition::new(
@@ -1033,14 +1055,16 @@ mod tests {
                 "cube".to_string(),
                 vec![],
             )],
-        )).unwrap();
+        ))
+        .unwrap();
 
         // Add module instantiation
         ast.add_module(ModuleNode::new_leaf(
             "instance1".to_string(),
             "my_shape".to_string(),
             vec![],
-        )).unwrap();
+        ))
+        .unwrap();
 
         let scad = ast.to_scad();
         assert!(scad.contains("include <lib.scad>"));
@@ -1054,16 +1078,15 @@ mod tests {
         let mut ast = AstRoot::new();
 
         // Add regular global variable
-        ast.add_global_variable(GlobalVariable::new(
-            "width".to_string(),
-            Expr::Integer(100),
-        )).unwrap();
+        ast.add_global_variable(GlobalVariable::new("width".to_string(), Expr::Integer(100)))
+            .unwrap();
 
         // Add special global variable
         ast.add_global_variable(GlobalVariable::new_special(
             "fn".to_string(),
             Expr::Integer(50),
-        )).unwrap();
+        ))
+        .unwrap();
 
         assert_eq!(ast.global_variables.len(), 2);
         assert!(ast.find_global_variable("width", false).is_some());
@@ -1076,16 +1099,12 @@ mod tests {
     fn test_global_variable_duplicate_check() {
         let mut ast = AstRoot::new();
 
-        ast.add_global_variable(GlobalVariable::new(
-            "size".to_string(),
-            Expr::Integer(10),
-        )).unwrap();
+        ast.add_global_variable(GlobalVariable::new("size".to_string(), Expr::Integer(10)))
+            .unwrap();
 
         // Try to add duplicate
-        let result = ast.add_global_variable(GlobalVariable::new(
-            "size".to_string(),
-            Expr::Integer(20),
-        ));
+        let result =
+            ast.add_global_variable(GlobalVariable::new("size".to_string(), Expr::Integer(20)));
 
         assert!(result.is_err());
         assert_eq!(ast.global_variables.len(), 1);
@@ -1095,17 +1114,12 @@ mod tests {
     fn test_global_variable_update() {
         let mut ast = AstRoot::new();
 
-        ast.add_global_variable(GlobalVariable::new(
-            "size".to_string(),
-            Expr::Integer(10),
-        )).unwrap();
+        ast.add_global_variable(GlobalVariable::new("size".to_string(), Expr::Integer(10)))
+            .unwrap();
 
         // Update the variable
-        ast.update_global_variable(
-            "size",
-            false,
-            Expr::Integer(20),
-        ).unwrap();
+        ast.update_global_variable("size", false, Expr::Integer(20))
+            .unwrap();
 
         let var = ast.find_global_variable("size", false).unwrap();
         assert_eq!(var.value, Expr::Integer(20));
@@ -1115,10 +1129,8 @@ mod tests {
     fn test_global_variable_remove() {
         let mut ast = AstRoot::new();
 
-        ast.add_global_variable(GlobalVariable::new(
-            "size".to_string(),
-            Expr::Integer(10),
-        )).unwrap();
+        ast.add_global_variable(GlobalVariable::new("size".to_string(), Expr::Integer(10)))
+            .unwrap();
 
         assert_eq!(ast.global_variables.len(), 1);
 
@@ -1138,7 +1150,8 @@ mod tests {
         ast.add_global_variable(GlobalVariable::new_special(
             "fn".to_string(),
             Expr::Integer(32),
-        )).unwrap();
+        ))
+        .unwrap();
 
         // Add function definition
         ast.add_function_define(FunctionDefinition::new(
@@ -1149,7 +1162,8 @@ mod tests {
                 op: BinOp::Mul,
                 right: Box::new(Expr::Integer(2)),
             },
-        )).unwrap();
+        ))
+        .unwrap();
 
         // Add module definition
         ast.add_module_define(ModuleDefinition::new(
@@ -1160,14 +1174,16 @@ mod tests {
                 "cube".to_string(),
                 vec![],
             )],
-        )).unwrap();
+        ))
+        .unwrap();
 
         // Add module instantiation
         ast.add_module(ModuleNode::new_leaf(
             "m1".to_string(),
             "cube_holder".to_string(),
             vec![],
-        )).unwrap();
+        ))
+        .unwrap();
 
         let scad = ast.to_scad();
 

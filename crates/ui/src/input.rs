@@ -242,7 +242,7 @@ fn execute_command(app: &mut App, cmd: &str) {
     let parts: Vec<&str> = cmd.split_whitespace().collect();
 
     // Handle shorthand commands first
-    match parts.get(0) {
+    match parts.first() {
         // === Shorthand single-character commands ===
 
         // q or quit
@@ -337,7 +337,7 @@ fn execute_command(app: &mut App, cmd: &str) {
             // Check if module has parameters
             let module_has_params = module_def
                 .as_ref()
-                .map_or(false, |mdef| !mdef.parameters.is_empty());
+                .is_some_and(|mdef| !mdef.parameters.is_empty());
 
             // If params not provided and module has parameters, ask for them in next stage
             if params.is_none() && module_has_params {
@@ -358,6 +358,28 @@ fn execute_command(app: &mut App, cmd: &str) {
                 Ok(_) => {
                     app.update_navigation_status();
                     app.set_info(&format!("Inserted: {}", module_name));
+                }
+                Err(e) => app.set_error(&e.to_string()),
+            }
+        }
+
+        // moddef <module_name> [params]
+        Some(&"moddef") => {
+            if parts.len() < 2 {
+                app.set_error("Usage: moddef <module_name> [params]");
+                return;
+            }
+            let module_name = parts[1];
+            let params = if parts.len() > 2 {
+                Some(parts[2..].join(" "))
+            } else {
+                None
+            };
+            app.push_undo();
+            match commands::cmd_moddef(app, module_name, params.as_deref()) {
+                Ok(_) => {
+                    app.update_navigation_status();
+                    app.set_info(&format!("Module '{}' defined", module_name));
                 }
                 Err(e) => app.set_error(&e.to_string()),
             }
@@ -531,7 +553,7 @@ fn execute_command(app: &mut App, cmd: &str) {
         _ => {
             app.set_error(&format!(
                 "Unknown command: '{}'. Type 'help' for commands.",
-                parts.get(0).unwrap_or(&"")
+                parts.first().unwrap_or(&"")
             ));
         }
     }

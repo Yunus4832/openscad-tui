@@ -95,17 +95,29 @@ impl App {
     pub fn init_tree_selection(&mut self) {
         // Select first available section in the tree
         if !self.ast.includes.is_empty() {
-            self.tree_state.borrow_mut().select(vec!["__includes".to_string()]);
+            self.tree_state
+                .borrow_mut()
+                .select(vec!["__includes".to_string()]);
         } else if !self.ast.uses.is_empty() {
-            self.tree_state.borrow_mut().select(vec!["__uses".to_string()]);
+            self.tree_state
+                .borrow_mut()
+                .select(vec!["__uses".to_string()]);
         } else if !self.ast.global_variables.is_empty() {
-            self.tree_state.borrow_mut().select(vec!["__globals".to_string()]);
+            self.tree_state
+                .borrow_mut()
+                .select(vec!["__globals".to_string()]);
         } else if !self.ast.function_defines.is_empty() {
-            self.tree_state.borrow_mut().select(vec!["__functions".to_string()]);
+            self.tree_state
+                .borrow_mut()
+                .select(vec!["__functions".to_string()]);
         } else if !self.ast.module_defines.is_empty() {
-            self.tree_state.borrow_mut().select(vec!["__moddefs".to_string()]);
+            self.tree_state
+                .borrow_mut()
+                .select(vec!["__moddefs".to_string()]);
         } else if !self.ast.modules.is_empty() {
-            self.tree_state.borrow_mut().select(vec!["__modules".to_string()]);
+            self.tree_state
+                .borrow_mut()
+                .select(vec!["__modules".to_string()]);
         }
     }
 
@@ -140,7 +152,10 @@ impl App {
             "__moddefs" => !self.ast.module_defines.is_empty(),
             "__modules" => !self.ast.modules.is_empty(),
             s if s.starts_with("__include_") => {
-                let idx: usize = s.trim_start_matches("__include_").parse().unwrap_or(usize::MAX);
+                let idx: usize = s
+                    .trim_start_matches("__include_")
+                    .parse()
+                    .unwrap_or(usize::MAX);
                 idx < self.ast.includes.len()
             }
             s if s.starts_with("__use_") => {
@@ -148,7 +163,9 @@ impl App {
                 idx < self.ast.uses.len()
             }
             s if s.starts_with("__var_") => {
-                let name = s.trim_start_matches("__var_s_").trim_start_matches("__var_n_");
+                let name = s
+                    .trim_start_matches("__var_s_")
+                    .trim_start_matches("__var_n_");
                 self.ast.global_variables.iter().any(|v| v.name == name)
             }
             s if s.starts_with("__func_") => {
@@ -183,7 +200,9 @@ impl App {
                 if self.is_valid_section_id(last_node_id) {
                     return;
                 }
-            } else if self.ast.find_node_by_id(last_node_id).is_some() {
+            } else if self.ast.find_node_by_id(last_node_id).is_some()
+                || self.find_module_definition_for_node(last_node_id).is_some()
+            {
                 return;
             }
         }
@@ -196,7 +215,9 @@ impl App {
                     self.tree_state.borrow_mut().select(vec![node_id.clone()]);
                     return;
                 }
-            } else if self.ast.find_node_by_id(node_id).is_some() {
+            } else if self.ast.find_node_by_id(node_id).is_some()
+                || self.find_module_definition_for_node(node_id).is_some()
+            {
                 self.tree_state.borrow_mut().select(vec![node_id.clone()]);
                 return;
             }
@@ -217,6 +238,20 @@ impl App {
     pub fn find_node_path(&self, target_id: &str) -> Option<Vec<String>> {
         // Check if target is a section header
         if target_id.starts_with("__") {
+            // Check if it's a module definition ID
+            if let Some(module_name) = target_id.strip_prefix("__moddef_") {
+                // Verify this module definition exists
+                if self
+                    .ast
+                    .module_defines
+                    .iter()
+                    .any(|md| md.name == module_name)
+                {
+                    return Some(vec!["__moddefs".to_string(), target_id.to_string()]);
+                }
+                return None;
+            }
+
             if self.is_valid_section_id(target_id) {
                 return Some(vec![target_id.to_string()]);
             }
@@ -225,15 +260,67 @@ impl App {
 
         // For module nodes, search within the modules section
         let mut path = vec!["__modules".to_string()];
-        if let Some(mut module_path) = self.find_node_path_recursive(&self.ast.modules, target_id, &mut Vec::new()) {
+        if let Some(mut module_path) =
+            Self::find_node_path_recursive(&self.ast.modules, target_id, &mut Vec::new())
+        {
             path.append(&mut module_path);
             return Some(path);
+        }
+
+        // If not found in modules, search in module definitions
+        if let Some(mod_def_path) =
+            Self::find_node_in_module_definitions(&self.ast.module_defines, target_id)
+        {
+            return Some(mod_def_path);
+        }
+
+        None
+    }
+
+    /// Check if a node is inside a module definition and return the module definition name
+    pub fn find_module_definition_for_node(&self, node_id: &str) -> Option<String> {
+        // First, check if the node exists in the modules section (instances)
+        // If it does, it's not in a module definition (even if same ID appears in definition body)
+        if self.ast.find_node_by_id(node_id).is_some() {
+            return None;
+        }
+
+        // Check if node_id is a module definition itself (__moddef_{name})
+        if let Some(module_name) = node_id.strip_prefix("__moddef_") {
+            // Verify this module definition exists
+            if self
+                .ast
+                .module_defines
+                .iter()
+                .any(|md| md.name == module_name)
+            {
+                return Some(module_name.to_string());
+            }
+        }
+
+        for mod_def in &self.ast.module_defines {
+            // Check if node is in module definition body
+            if Self::find_node_in_module_body(&mod_def.body, node_id) {
+                return Some(mod_def.name.clone());
+            }
         }
         None
     }
 
+    /// Helper to check if a node is in module definition body
+    fn find_node_in_module_body(modules: &[openscad_core::ModuleNode], target_id: &str) -> bool {
+        for module in modules {
+            if module.id == target_id {
+                return true;
+            }
+            if Self::find_node_in_module_body(&module.children, target_id) {
+                return true;
+            }
+        }
+        false
+    }
+
     fn find_node_path_recursive(
-        &self,
         modules: &[openscad_core::ModuleNode],
         target_id: &str,
         current_path: &mut Vec<String>,
@@ -246,12 +333,36 @@ impl App {
             }
 
             if let Some(path) =
-                self.find_node_path_recursive(&module.children, target_id, current_path)
+                Self::find_node_path_recursive(&module.children, target_id, current_path)
             {
                 return Some(path);
             }
 
             current_path.pop();
+        }
+        None
+    }
+
+    /// Search for a node within module definitions
+    fn find_node_in_module_definitions(
+        module_defs: &[openscad_core::ModuleDefinition],
+        target_id: &str,
+    ) -> Option<Vec<String>> {
+        for mod_def in module_defs {
+            let mod_def_id = format!("__moddef_{}", mod_def.name);
+            // Check if target is the module definition itself
+            if mod_def_id == target_id {
+                return Some(vec!["__moddefs".to_string(), mod_def_id]);
+            }
+
+            // Search in module definition body
+            let mut path = vec!["__moddefs".to_string(), mod_def_id];
+            if let Some(mut body_path) =
+                Self::find_node_path_recursive(&mod_def.body, target_id, &mut Vec::new())
+            {
+                path.append(&mut body_path);
+                return Some(path);
+            }
         }
         None
     }
@@ -327,7 +438,8 @@ impl App {
             let display_name = if node_id.starts_with("__") {
                 self.get_section_display_name(&node_id)
             } else {
-                self.find_module_name(&node_id).unwrap_or_else(|| node_id.clone())
+                self.find_module_name(&node_id)
+                    .unwrap_or_else(|| node_id.clone())
             };
             self.set_info(&format!("> {}", display_name));
         } else {
@@ -346,42 +458,68 @@ impl App {
             "__modules" => "[Modules]".to_string(),
             s if s.starts_with("__include_") => {
                 let idx: usize = s.trim_start_matches("__include_").parse().unwrap_or(0);
-                self.ast.includes.get(idx).cloned().unwrap_or_else(|| s.to_string())
+                self.ast
+                    .includes
+                    .get(idx)
+                    .cloned()
+                    .unwrap_or_else(|| s.to_string())
             }
             s if s.starts_with("__use_") => {
                 let idx: usize = s.trim_start_matches("__use_").parse().unwrap_or(0);
-                self.ast.uses.get(idx).cloned().unwrap_or_else(|| s.to_string())
+                self.ast
+                    .uses
+                    .get(idx)
+                    .cloned()
+                    .unwrap_or_else(|| s.to_string())
             }
             s if s.starts_with("__var_s_") => {
                 let name = s.trim_start_matches("__var_s_");
-                self.ast.global_variables.iter()
+                self.ast
+                    .global_variables
+                    .iter()
                     .find(|v| v.name == name && v.is_special)
                     .map(|v| format!("${} = {}", v.name, v.value.to_scad()))
                     .unwrap_or_else(|| s.to_string())
             }
             s if s.starts_with("__var_n_") => {
                 let name = s.trim_start_matches("__var_n_");
-                self.ast.global_variables.iter()
+                self.ast
+                    .global_variables
+                    .iter()
                     .find(|v| v.name == name && !v.is_special)
                     .map(|v| format!("{} = {}", v.name, v.value.to_scad()))
                     .unwrap_or_else(|| s.to_string())
             }
             s if s.starts_with("__func_") => {
                 let name = s.trim_start_matches("__func_");
-                self.ast.function_defines.iter()
+                self.ast
+                    .function_defines
+                    .iter()
                     .find(|f| f.name == name)
                     .map(|f| {
-                        let params = f.parameters.iter().map(|p| p.to_scad()).collect::<Vec<_>>().join(", ");
+                        let params = f
+                            .parameters
+                            .iter()
+                            .map(|p| p.to_scad())
+                            .collect::<Vec<_>>()
+                            .join(", ");
                         format!("function {}({})", f.name, params)
                     })
                     .unwrap_or_else(|| s.to_string())
             }
             s if s.starts_with("__moddef_") => {
                 let name = s.trim_start_matches("__moddef_");
-                self.ast.module_defines.iter()
+                self.ast
+                    .module_defines
+                    .iter()
                     .find(|m| m.name == name)
                     .map(|m| {
-                        let params = m.parameters.iter().map(|p| p.to_scad()).collect::<Vec<_>>().join(", ");
+                        let params = m
+                            .parameters
+                            .iter()
+                            .map(|p| p.to_scad())
+                            .collect::<Vec<_>>()
+                            .join(", ");
                         format!("module {}({})", m.name, params)
                     })
                     .unwrap_or_else(|| s.to_string())
@@ -392,12 +530,11 @@ impl App {
 
     /// Find module display name by node ID
     fn find_module_name(&self, node_id: &str) -> Option<String> {
-        self.find_module_name_recursive(&self.ast.modules, node_id)
+        Self::find_module_name_recursive(&self.ast.modules, node_id)
     }
 
     /// Recursively find module name in the AST
     fn find_module_name_recursive(
-        &self,
         modules: &[openscad_core::ModuleNode],
         node_id: &str,
     ) -> Option<String> {
@@ -405,7 +542,7 @@ impl App {
             if module.id == node_id {
                 return Some(module.get_display_name());
             }
-            if let Some(name) = self.find_module_name_recursive(&module.children, node_id) {
+            if let Some(name) = Self::find_module_name_recursive(&module.children, node_id) {
                 return Some(name);
             }
         }

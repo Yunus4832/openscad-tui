@@ -91,71 +91,9 @@ pub fn cmd_insert(
             }
         }
 
-        // Find the parent of the first selected node
-        let first_selected = app.selected_nodes.first().cloned();
-        let parent_id = if let Some(ref first_id) = first_selected {
-            find_node_parent(&app.ast.modules, first_id)
-        } else {
-            None
-        };
-
-        // Insert the container BEFORE deleting the selected nodes
-        // This way we can still find the position of the first selected node
-        if let Some(parent_id_val) = &parent_id {
-            insert_child_before(
-                &mut app.ast.modules,
-                parent_id_val,
-                &first_selected.clone().unwrap(),
-                container.clone(),
-            )?;
-        } else {
-            // First selected node was at root level, so we need to find its position
-            if let Some(pos) = app
-                .ast
-                .modules
-                .iter()
-                .position(|m| m.id == first_selected.clone().unwrap())
-            {
-                app.ast.modules.insert(pos, container.clone());
-            } else {
-                // Fallback: just add at root
-                app.ast.add_module(container.clone())?;
-            }
-        }
-
-        // Collect nodes to move before modifying the tree
-        let nodes_to_move: Vec<ModuleNode> = app
-            .selected_nodes
-            .clone()
-            .iter()
-            .filter_map(|node_id_to_move| app.ast.find_node_by_id(node_id_to_move).cloned())
-            .collect();
-
-        // Delete the selected nodes from the tree
-        for node_id_to_move in &app.selected_nodes.clone() {
-            app.ast.delete_node(node_id_to_move)?;
-        }
-
-        // Add collected nodes to the container
-        if let Some(container_mut) = app.ast.find_node_mut(&node_id) {
-            for node in nodes_to_move {
-                container_mut.children.push(node);
-            }
-        }
-
-        // Clear selection after moving nodes
-        app.selected_nodes.clear();
-
-        // Select the newly created container module for continued operations
-        // Use the full path to ensure proper navigation in nested trees
-        if let Some(path) = app.find_node_path(&node_id) {
-            app.tree_state.borrow_mut().select(path);
-        } else {
-            // Fallback: just select by ID if path not found
-            app.tree_state.borrow_mut().select(vec![node_id.clone()]);
-        }
-
-        Ok(node_id)
+        // Use the shared implementation for inserting container with selected nodes
+        let selected_nodes = app.selected_nodes.clone();
+        insert_container_with_selected_nodes(app, container, &selected_nodes)
     } else {
         // For leaf modules, create with source library info
         let mut module = ModuleNode::new_leaf(node_id.clone(), module_name.to_string(), args);
@@ -171,33 +109,98 @@ pub fn cmd_insert(
         // Determine insertion point based on current selection
         let selected = app.tree_state.borrow().selected().last().cloned();
 
-        // Check if selected node is in Modules section (not a section header)
-        let insert_at_root = match &selected {
-            None => true,
-            Some(id) => {
-                // If selected is a section header or not a module node, insert at root
-                id.starts_with("__") || app.ast.find_node_by_id(id).is_none()
-            }
+        // Check if selected node is in a module definition
+        let mut in_module_def = if let Some(ref selected_id) = selected {
+            app.find_module_definition_for_node(selected_id).is_some()
+        } else {
+            false
         };
 
-        if insert_at_root {
-            // Insert at root level of Modules section
-            app.ast.add_module(module)?;
-        } else if let Some(selected_id) = selected {
-            // Find the selected node and insert after it
-            insert_after_node(&mut app.ast.modules, &selected_id, module)?;
+        // Special case: inserting a module with the same name as the module definition when selected is the definition header
+        // This should create an instance in the modules section, not add to definition body
+        if in_module_def {
+            let selected_id = selected.as_ref().unwrap();
+            if let Some(mod_def_name) = app.find_module_definition_for_node(selected_id) {
+                if module_name == mod_def_name && selected_id.starts_with("__moddef_") {
+                    in_module_def = false;
+                }
+            }
+        }
+
+        if in_module_def {
+            // Insert into module definition body
+            let selected_id = selected.unwrap();
+            let mod_def_name = app.find_module_definition_for_node(&selected_id).unwrap();
+
+            // Find the module definition
+            let mod_def_idx = app
+                .ast
+                .module_defines
+                .iter()
+                .position(|md| md.name == mod_def_name)
+                .ok_or_else(|| {
+                    CommandError::InvalidCommand(format!(
+                        "Module definition not found: {}",
+                        mod_def_name
+                    ))
+                })?;
+
+            // Check if selected node is the module definition itself
+            if selected_id.starts_with("__moddef_") {
+                // Insert at the end of module definition body
+                app.ast.module_defines[mod_def_idx].body.push(module);
+            } else {
+                // Insert after the selected node in module definition body
+                insert_after_node(
+                    &mut app.ast.module_defines[mod_def_idx].body,
+                    &selected_id,
+                    module,
+                )?;
+            }
+        } else {
+            // Check if selected node is in Modules section (not a section header)
+            let insert_at_root = match &selected {
+                None => true,
+                Some(id) => {
+                    // If selected is a section header or not a module node, insert at root
+                    id.starts_with("__") || app.ast.find_node_by_id(id).is_none()
+                }
+            };
+
+            if insert_at_root {
+                // Insert at root level of Modules section
+                app.ast.add_module(module)?;
+            } else if let Some(selected_id) = selected {
+                // Find the selected node and insert after it
+                insert_after_node(&mut app.ast.modules, &selected_id, module)?;
+            }
         }
 
         // Select the newly inserted module for continued operations
         // Use the full path to ensure proper navigation in nested trees
         if let Some(path) = app.find_node_path(&node_id) {
-            app.tree_state.borrow_mut().select(path);
-            // Open the __modules section to show the new node
-            app.tree_state.borrow_mut().open(vec!["__modules".to_string()]);
+            app.tree_state.borrow_mut().select(path.clone());
+            // Open the appropriate section based on path
+            if !path.is_empty() {
+                // Open all parent sections
+                let mut parent_path = Vec::new();
+                for item in path.iter().take(path.len() - 1) {
+                    parent_path.push(item.clone());
+                    app.tree_state.borrow_mut().open(parent_path.clone());
+                }
+            }
         } else {
             // Fallback: just select by ID if path not found
-            app.tree_state.borrow_mut().select(vec!["__modules".to_string(), node_id.clone()]);
-            app.tree_state.borrow_mut().open(vec!["__modules".to_string()]);
+            // Try to determine if this is in module definitions or modules
+            let section = if in_module_def {
+                "__moddefs"
+            } else {
+                "__modules"
+            };
+            app.tree_state
+                .borrow_mut()
+                .select(vec![section.to_string(), node_id.clone()]);
+            app.tree_state.borrow_mut().open(vec![section.to_string()]);
         }
 
         Ok(node_id)
@@ -324,7 +327,7 @@ pub fn cmd_delete(app: &mut crate::app::App, node_id: &str) -> CommandResult<()>
 
     // Clear tree state selection if the deleted node was selected
     let mut tree_state = app.tree_state.borrow_mut();
-    if tree_state.selected() == &[node_id.to_string()] {
+    if tree_state.selected() == [node_id.to_string()] {
         tree_state.select(vec![]);
     }
     drop(tree_state); // Explicitly drop the borrow
@@ -357,64 +360,256 @@ pub fn cmd_boolean_op(
 
     let container = ModuleNode::new_container(op_id.clone(), operation.to_string(), Vec::new());
 
-    // Find the parent of the first selected node
-    let first_selected = node_ids.first().cloned();
-    let parent_id = if let Some(ref first_id) = first_selected {
-        find_node_parent(&app.ast.modules, first_id)
+    // Use the shared implementation for inserting container with selected nodes
+    insert_container_with_selected_nodes(app, container, node_ids)
+}
+
+/// Insert a container module with selected nodes as children
+/// Handles both modules section and module definition contexts
+fn insert_container_with_selected_nodes(
+    app: &mut crate::app::App,
+    container: ModuleNode,
+    selected_node_ids: &[String],
+) -> CommandResult<String> {
+    if selected_node_ids.is_empty() {
+        return Err(CommandError::NoChildrenSelected);
+    }
+
+    let container_id = container.id.clone();
+    let first_selected = selected_node_ids.first().cloned();
+    let in_module_def = if let Some(ref first_id) = first_selected {
+        app.find_module_definition_for_node(first_id).is_some()
     } else {
-        None
+        false
     };
 
-    // Insert the container BEFORE deleting the selected nodes
-    if let Some(parent_id_val) = &parent_id {
-        insert_child_before(
-            &mut app.ast.modules,
-            parent_id_val,
-            &first_selected.clone().unwrap(),
-            container.clone(),
-        )?;
-    } else {
-        // First selected node was at root level
-        if let Some(pos) = app
-            .ast
-            .modules
-            .iter()
-            .position(|m| m.id == first_selected.clone().unwrap())
-        {
-            app.ast.modules.insert(pos, container.clone());
-        } else {
-            app.ast.add_module(container.clone())?;
+    // Validate all selected nodes are in the same context
+    let mut context_module_def_name: Option<String> = None;
+    for node_id in selected_node_ids {
+        let node_in_module_def = app.find_module_definition_for_node(node_id);
+        match (node_in_module_def, &context_module_def_name) {
+            (Some(ref mod_def_name), Some(ref context_name)) => {
+                if mod_def_name != context_name {
+                    return Err(CommandError::InvalidCommand(format!(
+                        "Selected nodes are in different module definitions: {} vs {}",
+                        mod_def_name, context_name
+                    )));
+                }
+            }
+            (Some(ref mod_def_name), None) => {
+                context_module_def_name = Some(mod_def_name.clone());
+            }
+            (None, Some(_)) => {
+                return Err(CommandError::InvalidCommand(
+                    "Selected nodes are in mixed contexts (module definition vs modules section)"
+                        .to_string(),
+                ));
+            }
+            (None, None) => {
+                // All nodes are in modules section, context remains None
+            }
         }
     }
-
-    // Collect nodes to move before modifying the tree
-    let nodes_to_move: Vec<ModuleNode> = node_ids
-        .iter()
-        .filter_map(|node_id| app.ast.find_node_by_id(node_id).cloned())
-        .collect();
-
-    // Delete the selected nodes from the tree
-    for node_id in node_ids {
-        app.ast.delete_node(node_id)?;
+    // Ensure context consistency with first node
+    if in_module_def && context_module_def_name.is_none() {
+        // This shouldn't happen but handle edge case
+        return Err(CommandError::InvalidCommand(
+            "Inconsistent context detection".to_string(),
+        ));
     }
 
-    // Add collected nodes to the container
-    if let Some(container_mut) = app.ast.find_node_mut(&op_id) {
-        for node in nodes_to_move {
-            container_mut.children.push(node);
+    if in_module_def {
+        // Handle insertion into module definition body
+        let first_id = first_selected.unwrap();
+        let mod_def_name = context_module_def_name.unwrap();
+
+        // Find the module definition index
+        let mod_def_idx = app
+            .ast
+            .module_defines
+            .iter()
+            .position(|md| md.name == mod_def_name)
+            .ok_or_else(|| {
+                CommandError::InvalidCommand(format!(
+                    "Module definition not found: {}",
+                    mod_def_name
+                ))
+            })?;
+
+        // Find parent in module definition body
+        let parent_id = find_node_parent(&app.ast.module_defines[mod_def_idx].body, &first_id);
+
+        // Insert the container in module definition body
+        if let Some(parent_id_val) = &parent_id {
+            insert_child_before(
+                &mut app.ast.module_defines[mod_def_idx].body,
+                parent_id_val,
+                &first_id,
+                container.clone(),
+            )?;
+        } else {
+            // First selected node was at root level of module definition body
+            if let Some(pos) = app.ast.module_defines[mod_def_idx]
+                .body
+                .iter()
+                .position(|m| m.id == first_id)
+            {
+                app.ast.module_defines[mod_def_idx]
+                    .body
+                    .insert(pos, container.clone());
+            } else {
+                // Fallback: add to end of module definition body
+                app.ast.module_defines[mod_def_idx]
+                    .body
+                    .push(container.clone());
+            }
+        }
+
+        // Collect nodes to move from module definition body
+        let mut nodes_to_move = Vec::new();
+        for node_id in selected_node_ids {
+            // Search in module definition body
+            if let Some(node) =
+                find_node_in_module_definition(&app.ast.module_defines[mod_def_idx].body, node_id)
+            {
+                nodes_to_move.push(node.clone());
+            }
+        }
+
+        // Delete nodes from module definition body
+        for node_id in selected_node_ids {
+            delete_node_from_module_definition(
+                &mut app.ast.module_defines[mod_def_idx].body,
+                node_id,
+            )?;
+        }
+
+        // Add collected nodes to the container
+        if let Some(container_mut) = find_node_in_module_definition_mut(
+            &mut app.ast.module_defines[mod_def_idx].body,
+            &container_id,
+        ) {
+            for node in nodes_to_move {
+                container_mut.children.push(node);
+            }
+        }
+    } else {
+        // Original logic for modules section
+        let parent_id = if let Some(ref first_id) = first_selected {
+            find_node_parent(&app.ast.modules, first_id)
+        } else {
+            None
+        };
+
+        // Insert the container BEFORE deleting the selected nodes
+        if let Some(parent_id_val) = &parent_id {
+            insert_child_before(
+                &mut app.ast.modules,
+                parent_id_val,
+                &first_selected.clone().unwrap(),
+                container.clone(),
+            )?;
+        } else {
+            // First selected node was at root level
+            if let Some(pos) = app
+                .ast
+                .modules
+                .iter()
+                .position(|m| m.id == first_selected.clone().unwrap())
+            {
+                app.ast.modules.insert(pos, container.clone());
+            } else {
+                app.ast.add_module(container.clone())?;
+            }
+        }
+
+        // Collect nodes to move before modifying the tree
+        let nodes_to_move: Vec<ModuleNode> = selected_node_ids
+            .iter()
+            .filter_map(|node_id| app.ast.find_node_by_id(node_id).cloned())
+            .collect();
+
+        // Delete the selected nodes from the tree
+        for node_id in selected_node_ids {
+            app.ast.delete_node(node_id)?;
+        }
+
+        // Add collected nodes to the container
+        if let Some(container_mut) = app.ast.find_node_mut(&container_id) {
+            for node in nodes_to_move {
+                container_mut.children.push(node);
+            }
         }
     }
 
     // Select the newly created container module for continued operations
     // Use the full path to ensure proper navigation in nested trees
-    if let Some(path) = app.find_node_path(&op_id) {
+    if let Some(path) = app.find_node_path(&container_id) {
         app.tree_state.borrow_mut().select(path);
     } else {
         // Fallback: just select by ID if path not found
-        app.tree_state.borrow_mut().select(vec![op_id.clone()]);
+        app.tree_state
+            .borrow_mut()
+            .select(vec![container_id.clone()]);
     }
 
-    Ok(op_id)
+    Ok(container_id)
+}
+
+/// Find a node in module definition body
+fn find_node_in_module_definition<'a>(
+    modules: &'a [openscad_core::ModuleNode],
+    node_id: &str,
+) -> Option<&'a openscad_core::ModuleNode> {
+    for module in modules {
+        if module.id == node_id {
+            return Some(module);
+        }
+        if let Some(found) = find_node_in_module_definition(&module.children, node_id) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+/// Find a mutable node in module definition body
+fn find_node_in_module_definition_mut<'a>(
+    modules: &'a mut [openscad_core::ModuleNode],
+    node_id: &str,
+) -> Option<&'a mut openscad_core::ModuleNode> {
+    for module in modules {
+        if module.id == node_id {
+            return Some(module);
+        }
+        if let Some(found) = find_node_in_module_definition_mut(&mut module.children, node_id) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+/// Delete a node from module definition body
+fn delete_node_from_module_definition(
+    modules: &mut Vec<openscad_core::ModuleNode>,
+    node_id: &str,
+) -> CommandResult<()> {
+    // First, try to find and remove at this level
+    if let Some(pos) = modules.iter().position(|m| m.id == node_id) {
+        modules.remove(pos);
+        return Ok(());
+    }
+
+    // Recursively search in children
+    for module in modules {
+        if delete_node_from_module_definition(&mut module.children, node_id).is_ok() {
+            return Ok(());
+        }
+    }
+
+    Err(CommandError::InvalidCommand(format!(
+        "Node not found in module definition body: {}",
+        node_id
+    )))
 }
 
 /// Select command
@@ -733,6 +928,10 @@ pub fn cmd_load(app: &mut crate::app::App, filename: &str) -> CommandResult<()> 
     // Replace AST
     app.ast = ast;
 
+    // Reload custom modules in library manager
+    app.library
+        .reload_custom_modules_from_ast(&app.ast.module_defines);
+
     // Reset navigation state
     app.selected_nodes.clear();
     app.tree_state.borrow_mut().select(Vec::new());
@@ -810,6 +1009,141 @@ pub fn cmd_help(app: &mut crate::app::App) -> CommandResult<()> {
     Ok(())
 }
 
+/// Define a new custom module
+/// Syntax: moddef <module_name> [params]
+///   params: optional parameter list like "size=10, center=false"
+///   children: taken from selected nodes (if any)
+pub fn cmd_moddef(
+    app: &mut crate::app::App,
+    module_name: &str,
+    params: Option<&str>,
+) -> CommandResult<()> {
+    use openscad_core::ModuleDefinition;
+    use openscad_library::{ModuleDef, ParameterDef};
+
+    // Parse parameters
+    let parameters = if let Some(param_str) = params {
+        parse_module_parameters(param_str)?
+    } else {
+        Vec::new()
+    };
+
+    // Collect children from selected nodes (copy them with new IDs to avoid duplication)
+    let mut children = Vec::new();
+    for node_id in &app.selected_nodes.clone() {
+        if let Some(node) = app.ast.find_node_by_id(node_id).cloned() {
+            let node_with_new_id = clone_module_with_new_ids(&node);
+            children.push(node_with_new_id);
+        }
+    }
+
+    // Clear selection after copying
+    app.selected_nodes.clear();
+
+    // Create ModuleDefinition for AST
+    let module_def = ModuleDefinition::new(module_name.to_string(), parameters.clone(), children);
+
+    // Add to AST
+    app.ast
+        .add_module_define(module_def)
+        .map_err(CommandError::AstError)?;
+
+    // Create ModuleDef for library manager
+    let library_params: Vec<ParameterDef> = parameters
+        .iter()
+        .map(|p| {
+            ParameterDef {
+                name: p.name.clone(),
+                param_type: "any".to_string(), // Default type, could be inferred
+                default: p.default.as_ref().map(|e| e.to_scad()),
+                description: None,
+            }
+        })
+        .collect();
+
+    let module_lib_def = ModuleDef {
+        name: module_name.to_string(),
+        description: Some(format!("User-defined module: {}", module_name)),
+        parameters: library_params,
+        accepts_children: false, // Custom modules cannot accept children at call time
+    };
+
+    // Add to library manager
+    app.library.add_custom_module(module_lib_def);
+
+    // Update UI selection to show the new module definition
+    if let Some(path) = app.find_node_path(&format!("__moddef_{}", module_name)) {
+        app.tree_state.borrow_mut().select(path);
+    }
+
+    Ok(())
+}
+
+/// Parse module parameters from string
+/// Format: "name1=expr1, name2=expr2, name3" (name without default)
+fn parse_module_parameters(param_str: &str) -> CommandResult<Vec<openscad_core::Parameter>> {
+    use openscad_core::{Expr, Parameter};
+
+    let mut parameters = Vec::new();
+
+    if param_str.trim().is_empty() {
+        return Ok(parameters);
+    }
+
+    // Split by commas while respecting brackets and quotes (reuse split_parameters)
+    let parts = split_parameters(param_str)?;
+
+    for part in parts {
+        let part = part.trim();
+
+        // Check if this is a parameter with default value (contains '=')
+        if let Some(eq_pos) = part.find('=') {
+            let name = part[..eq_pos].trim();
+            let value_str = part[eq_pos + 1..].trim();
+
+            let value = Expr::parse(value_str).map_err(|e| {
+                CommandError::ParameterError(format!(
+                    "Invalid default value for parameter '{}': {} - {}",
+                    name, value_str, e
+                ))
+            })?;
+
+            parameters.push(Parameter::with_default(name.to_string(), value));
+        } else {
+            // Parameter without default value
+            parameters.push(Parameter::new(part.to_string()));
+        }
+    }
+
+    Ok(parameters)
+}
+
+/// Clone a module node and all its children, generating new unique IDs for each
+fn clone_module_with_new_ids(node: &openscad_core::ModuleNode) -> openscad_core::ModuleNode {
+    // Generate new ID with timestamp to ensure uniqueness
+    let new_id = format!(
+        "{}_{}",
+        node.name,
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+
+    // Clone the node with new ID
+    let mut new_node = node.clone();
+    new_node.id = new_id.clone();
+
+    // Recursively clone children with new IDs
+    new_node.children = node
+        .children
+        .iter()
+        .map(clone_module_with_new_ids)
+        .collect();
+
+    new_node
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -824,5 +1158,474 @@ mod tests {
         let args = parse_arguments("10,10,10", &cube_def);
         // Either ok or err is fine - this is just testing the function exists
         let _ = args;
+    }
+
+    #[test]
+    fn test_cmd_moddef_basic() {
+        use crate::app::App;
+
+        let mut app = App::new();
+
+        // Create a module definition without parameters
+        let result = cmd_moddef(&mut app, "my_module", None);
+        assert!(result.is_ok(), "cmd_moddef should succeed");
+
+        // Check that module was added to AST
+        assert_eq!(app.ast.module_defines.len(), 1);
+        let module_def = &app.ast.module_defines[0];
+        assert_eq!(module_def.name, "my_module");
+        assert!(module_def.parameters.is_empty());
+        assert!(module_def.body.is_empty());
+
+        // Check that module was added to library manager
+        let module = app.library.get_module("my_module");
+        assert!(module.is_some());
+        let module = module.unwrap();
+        assert_eq!(module.name, "my_module");
+        assert!(!module.accepts_children);
+    }
+
+    #[test]
+    fn test_cmd_moddef_with_params() {
+        use crate::app::App;
+
+        let mut app = App::new();
+
+        // Create a module definition with parameters
+        let result = cmd_moddef(&mut app, "my_box", Some("size=10, center=false"));
+        assert!(result.is_ok(), "cmd_moddef should succeed");
+
+        // Check that module was added to AST
+        assert_eq!(app.ast.module_defines.len(), 1);
+        let module_def = &app.ast.module_defines[0];
+        assert_eq!(module_def.name, "my_box");
+        assert_eq!(module_def.parameters.len(), 2);
+        assert!(module_def.body.is_empty());
+
+        // Check parameters
+        let param1 = &module_def.parameters[0];
+        assert_eq!(param1.name, "size");
+        assert!(param1.default.is_some());
+        let param2 = &module_def.parameters[1];
+        assert_eq!(param2.name, "center");
+        assert!(param2.default.is_some());
+
+        // Check library module
+        let module = app.library.get_module("my_box");
+        assert!(module.is_some());
+        let module = module.unwrap();
+        assert_eq!(module.name, "my_box");
+        assert_eq!(module.parameters.len(), 2);
+        assert!(!module.accepts_children);
+    }
+
+    #[test]
+    fn test_cmd_moddef_duplicate_name() {
+        use crate::app::App;
+
+        let mut app = App::new();
+
+        // First module definition should succeed
+        let result = cmd_moddef(&mut app, "my_module", None);
+        assert!(result.is_ok());
+
+        // Second module definition with same name should fail
+        let result = cmd_moddef(&mut app, "my_module", None);
+        assert!(result.is_err());
+
+        // Verify only one module in AST
+        assert_eq!(app.ast.module_defines.len(), 1);
+    }
+
+    #[test]
+    fn test_cmd_moddef_complex_parameters() {
+        use crate::app::App;
+
+        let mut app = App::new();
+
+        // Test complex parameter expressions
+        let result = cmd_moddef(
+            &mut app,
+            "complex",
+            Some("size=10, offset=5, name=\"test\""),
+        );
+        result.unwrap();
+
+        // Check parameters were parsed
+        assert_eq!(app.ast.module_defines.len(), 1);
+        let module_def = &app.ast.module_defines[0];
+        assert_eq!(module_def.parameters.len(), 3);
+
+        // Check library module
+        let module = app.library.get_module("complex");
+        assert!(module.is_some());
+        let module = module.unwrap();
+        assert_eq!(module.parameters.len(), 3);
+    }
+
+    #[test]
+    fn test_serialize_deserialize_with_custom_module() {
+        use crate::app::App;
+        use openscad_core::AstRoot;
+
+        let mut app = App::new();
+
+        // Create a custom module
+        cmd_moddef(&mut app, "my_cube", Some("size=10")).unwrap();
+
+        // Add a module instance to the modules section
+        // This tests that insert works with custom modules
+        let result = cmd_insert(&mut app, "my_cube", None, Some("size=15"));
+        assert!(result.is_ok(), "insert should work with custom module");
+
+        // Serialize the AST to JSON
+        let json = serde_json::to_string_pretty(&app.ast).expect("Failed to serialize AST");
+
+        // Deserialize back
+        let deserialized: AstRoot = serde_json::from_str(&json).expect("Failed to deserialize AST");
+
+        // Verify module definitions
+        assert_eq!(deserialized.module_defines.len(), 1);
+        assert_eq!(deserialized.module_defines[0].name, "my_cube");
+        assert_eq!(deserialized.module_defines[0].parameters.len(), 1);
+
+        // Verify module instances (should be empty because modules are not in module_defines)
+        // Actually, modules field contains module instances, not definitions
+        // The inserted module should be in modules field
+        assert!(!deserialized.modules.is_empty());
+
+        // Check that custom modules are reloaded in library manager
+        // (This would be tested in integration, but we can at least ensure no panic)
+    }
+
+    #[test]
+    fn test_serialize_deserialize_with_custom_module_and_children() {
+        use crate::app::App;
+        use openscad_core::{Argument, AstRoot, Expr, ModuleNode};
+
+        let mut app = App::new();
+
+        // Create a custom module with parameters
+        cmd_moddef(&mut app, "my_container", Some("scale=2")).unwrap();
+
+        // Add a child module to the custom module definition body
+        let child_node = ModuleNode::new_leaf(
+            "cube_1".to_string(),
+            "cube".to_string(),
+            vec![Argument::Named {
+                name: "size".to_string(),
+                value: Expr::Integer(5),
+            }],
+        );
+
+        // Add child to the first module definition's body
+        app.ast.module_defines[0].body.push(child_node);
+
+        // Serialize the AST to JSON
+        let json = serde_json::to_string_pretty(&app.ast).expect("Failed to serialize AST");
+
+        // Deserialize back
+        let deserialized: AstRoot = serde_json::from_str(&json).expect("Failed to deserialize AST");
+
+        // Verify module definitions
+        assert_eq!(deserialized.module_defines.len(), 1);
+        assert_eq!(deserialized.module_defines[0].name, "my_container");
+        assert_eq!(deserialized.module_defines[0].parameters.len(), 1);
+
+        // Verify child node in module definition body
+        assert_eq!(deserialized.module_defines[0].body.len(), 1);
+        assert_eq!(deserialized.module_defines[0].body[0].name, "cube");
+
+        // Verify library manager can reload custom modules
+        // (This is done in cmd_load, but we test that serialization works)
+    }
+
+    #[test]
+    fn test_cmd_insert_into_modules_section() {
+        use crate::app::App;
+
+        let mut app = App::new();
+
+        // Simulate selecting the __modules section
+        app.tree_state
+            .borrow_mut()
+            .select(vec!["__modules".to_string()]);
+
+        // Insert a module (cube) into the Modules section
+        let result = cmd_insert(&mut app, "cube", None, Some("10,10,10"));
+        assert!(result.is_ok(), "insert should succeed");
+
+        // Check that module was added to ast.modules
+        assert_eq!(app.ast.modules.len(), 1);
+        let inserted = &app.ast.modules[0];
+        assert_eq!(inserted.name, "cube");
+
+        // Check that tree state is updated to select the new module
+        let selected = app.tree_state.borrow().selected().last().cloned();
+        assert!(selected.is_some());
+        // The selected ID should be the inserted module's ID
+        assert_eq!(selected.unwrap(), inserted.id);
+    }
+
+    #[test]
+    fn test_cmd_insert_into_module_definition() {
+        use crate::app::App;
+
+        let mut app = App::new();
+
+        // Create a custom module definition
+        cmd_moddef(&mut app, "my_module", None).unwrap();
+
+        // Simulate selecting the module definition itself (__moddef_my_module)
+        app.tree_state.borrow_mut().select(vec![
+            "__moddefs".to_string(),
+            "__moddef_my_module".to_string(),
+        ]);
+
+        // Insert a cube into the module definition body
+        let result = cmd_insert(&mut app, "cube", None, Some("5,5,5"));
+        assert!(result.is_ok(), "insert should succeed");
+
+        // Check that module was added to module definition body, not ast.modules
+        assert_eq!(app.ast.modules.len(), 0); // No module instances
+        assert_eq!(app.ast.module_defines.len(), 1);
+        assert_eq!(app.ast.module_defines[0].body.len(), 1);
+        let inserted = &app.ast.module_defines[0].body[0];
+        assert_eq!(inserted.name, "cube");
+
+        // Check tree state selection
+        let selected = app.tree_state.borrow().selected().last().cloned();
+        assert!(selected.is_some());
+        assert_eq!(selected.unwrap(), inserted.id);
+    }
+
+    #[test]
+    fn test_cmd_boolean_op_in_modules_section() {
+        use crate::app::App;
+
+        let mut app = App::new();
+
+        // Insert two cubes into modules section
+        let cube1_id = cmd_insert(&mut app, "cube", None, Some("5,5,5")).unwrap();
+        let cube2_id = cmd_insert(&mut app, "cube", None, Some("10,10,10")).unwrap();
+
+        // Select both nodes
+        let selected_nodes = vec![cube1_id.clone(), cube2_id.clone()];
+        app.selected_nodes = selected_nodes.clone();
+
+        // Perform union operation
+        let result = cmd_boolean_op(&mut app, "union", &selected_nodes);
+        assert!(result.is_ok(), "boolean operation should succeed");
+
+        let container_id = result.unwrap();
+
+        // Check that container was created in modules section
+        assert!(app.ast.find_node_by_id(&container_id).is_some());
+        let container = app.ast.find_node_by_id(&container_id).unwrap();
+        assert_eq!(container.name, "union");
+
+        // Check that container has two children
+        assert_eq!(container.children.len(), 2);
+
+        // Check that original nodes are now children of the container
+        assert_eq!(container.children.len(), 2);
+        let child_ids: Vec<String> = container.children.iter().map(|c| c.id.clone()).collect();
+        assert!(child_ids.contains(&cube1_id));
+        assert!(child_ids.contains(&cube2_id));
+        // Check that nodes are not at root level of modules section
+        assert!(!app.ast.modules.iter().any(|m| m.id == cube1_id));
+        assert!(!app.ast.modules.iter().any(|m| m.id == cube2_id));
+
+        // Check that container is selected
+        assert_eq!(
+            app.tree_state.borrow().selected().last(),
+            Some(&container_id)
+        );
+    }
+
+    #[test]
+    fn test_cmd_boolean_op_in_module_definition() {
+        use crate::app::App;
+
+        let mut app = App::new();
+
+        // Create a custom module definition
+        cmd_moddef(&mut app, "my_module", None).unwrap();
+
+        // Add two cubes to module definition body
+        let cube1 = openscad_core::ModuleNode::new_leaf(
+            "cube_1".to_string(),
+            "cube".to_string(),
+            vec![openscad_core::Argument::Named {
+                name: "size".to_string(),
+                value: openscad_core::Expr::Integer(5),
+            }],
+        );
+        let cube2 = openscad_core::ModuleNode::new_leaf(
+            "cube_2".to_string(),
+            "cube".to_string(),
+            vec![openscad_core::Argument::Named {
+                name: "size".to_string(),
+                value: openscad_core::Expr::Integer(10),
+            }],
+        );
+
+        // Add cubes to module definition body
+        app.ast.module_defines[0].body.push(cube1.clone());
+        app.ast.module_defines[0].body.push(cube2.clone());
+
+        // Select both nodes (they are in module definition body)
+        let selected_nodes = vec![cube1.id.clone(), cube2.id.clone()];
+        app.selected_nodes = selected_nodes.clone();
+
+        // Perform difference operation
+        let result = cmd_boolean_op(&mut app, "difference", &selected_nodes);
+        assert!(
+            result.is_ok(),
+            "boolean operation should succeed in module definition"
+        );
+
+        let container_id = result.unwrap();
+
+        // Check that container was created in module definition body, not modules section
+        assert!(app.ast.find_node_by_id(&container_id).is_none()); // Not in modules section
+
+        // Check that container exists in module definition body
+        let mod_def = &app.ast.module_defines[0];
+        let container = find_node_in_module_definition(&mod_def.body, &container_id);
+        assert!(container.is_some());
+        let container = container.unwrap();
+        assert_eq!(container.name, "difference");
+
+        // Check that container has two children with the original nodes
+        assert_eq!(container.children.len(), 2);
+        let child_ids: Vec<String> = container.children.iter().map(|c| c.id.clone()).collect();
+        assert!(child_ids.contains(&cube1.id));
+        assert!(child_ids.contains(&cube2.id));
+        // Check that nodes are not at root level of module definition body
+        assert!(!mod_def.body.iter().any(|m| m.id == cube1.id));
+        assert!(!mod_def.body.iter().any(|m| m.id == cube2.id));
+
+        // Check that container is selected
+        assert_eq!(
+            app.tree_state.borrow().selected().last(),
+            Some(&container_id)
+        );
+    }
+
+    #[test]
+    fn test_cmd_boolean_op_mixed_context_error() {
+        use crate::app::App;
+
+        let mut app = App::new();
+
+        // Create a custom module definition
+        cmd_moddef(&mut app, "my_module", None).unwrap();
+        // Clear selection to ensure next insert goes to modules section
+        app.tree_state.borrow_mut().select(Vec::new());
+
+        // Add a cube to module definition body
+        let cube1 = openscad_core::ModuleNode::new_leaf(
+            "cube_1".to_string(),
+            "cube".to_string(),
+            vec![openscad_core::Argument::Named {
+                name: "size".to_string(),
+                value: openscad_core::Expr::Integer(5),
+            }],
+        );
+        app.ast.module_defines[0].body.push(cube1.clone());
+
+        // Insert a cube into modules section
+        let cube2_id = cmd_insert(&mut app, "cube", None, Some("10,10,10")).unwrap();
+
+        // Select nodes from both contexts (mixed)
+        let selected_nodes = vec![cube1.id.clone(), cube2_id.clone()];
+        app.selected_nodes = selected_nodes.clone();
+
+        // Perform union operation - should fail with mixed context error
+        let result = cmd_boolean_op(&mut app, "union", &selected_nodes);
+        assert!(
+            result.is_err(),
+            "boolean operation should fail with mixed context"
+        );
+
+        // Verify error message indicates mixed context
+        let err = result.unwrap_err();
+        assert!(matches!(err, CommandError::InvalidCommand(_)));
+        let err_msg = match err {
+            CommandError::InvalidCommand(msg) => msg,
+            _ => panic!("Unexpected error type"),
+        };
+        assert!(err_msg.contains("mixed contexts") || err_msg.contains("different contexts"));
+    }
+
+    #[test]
+    fn test_cmd_insert_container_in_module_definition() {
+        use crate::app::App;
+
+        let mut app = App::new();
+
+        // Create a custom module definition
+        cmd_moddef(&mut app, "my_module", None).unwrap();
+
+        // Add two cubes to module definition body
+        let cube1 = openscad_core::ModuleNode::new_leaf(
+            "cube_1".to_string(),
+            "cube".to_string(),
+            vec![openscad_core::Argument::Named {
+                name: "size".to_string(),
+                value: openscad_core::Expr::Integer(5),
+            }],
+        );
+        let cube2 = openscad_core::ModuleNode::new_leaf(
+            "cube_2".to_string(),
+            "cube".to_string(),
+            vec![openscad_core::Argument::Named {
+                name: "size".to_string(),
+                value: openscad_core::Expr::Integer(10),
+            }],
+        );
+
+        // Add cubes to module definition body
+        app.ast.module_defines[0].body.push(cube1.clone());
+        app.ast.module_defines[0].body.push(cube2.clone());
+
+        // Select both nodes (they are in module definition body)
+        app.selected_nodes = vec![cube1.id.clone(), cube2.id.clone()];
+
+        // Insert a difference container module
+        let result = cmd_insert(&mut app, "difference", None, None);
+        assert!(
+            result.is_ok(),
+            "insert difference should succeed in module definition"
+        );
+
+        let container_id = result.unwrap();
+
+        // Check that container was created in module definition body, not modules section
+        assert!(app.ast.find_node_by_id(&container_id).is_none()); // Not in modules section
+
+        // Check that container exists in module definition body
+        let mod_def = &app.ast.module_defines[0];
+        let container = find_node_in_module_definition(&mod_def.body, &container_id);
+        assert!(container.is_some());
+        let container = container.unwrap();
+        assert_eq!(container.name, "difference");
+
+        // Check that container has two children with the original nodes
+        assert_eq!(container.children.len(), 2);
+        let child_ids: Vec<String> = container.children.iter().map(|c| c.id.clone()).collect();
+        assert!(child_ids.contains(&cube1.id));
+        assert!(child_ids.contains(&cube2.id));
+
+        // Check that nodes are not at root level of module definition body
+        assert!(!mod_def.body.iter().any(|m| m.id == cube1.id));
+        assert!(!mod_def.body.iter().any(|m| m.id == cube2.id));
+
+        // Check that container is selected (tree state should select it)
+        assert_eq!(
+            app.tree_state.borrow().selected().last(),
+            Some(&container_id)
+        );
     }
 }

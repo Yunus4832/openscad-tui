@@ -1,5 +1,6 @@
 //! UI rendering module
 
+use crate::app::App;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -8,32 +9,19 @@ use ratatui::{
     Frame,
 };
 use tui_tree_widget::{Tree, TreeItem};
-use crate::app::App;
 
 pub fn draw(f: &mut Frame, app: &App) {
     // 主布局：上部是内容区，下部是命令行
     let main_chunks = Layout::default()
         .direction(Direction::Vertical)
         .margin(0)
-        .constraints(
-            [
-                Constraint::Min(10),
-                Constraint::Length(4),
-            ]
-            .as_ref(),
-        )
+        .constraints([Constraint::Min(10), Constraint::Length(4)].as_ref())
         .split(f.area());
 
     // 上部内容区：左侧树形图，右侧预览
     let content_chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints(
-            [
-                Constraint::Percentage(30),
-                Constraint::Percentage(70),
-            ]
-            .as_ref(),
-        )
+        .constraints([Constraint::Percentage(30), Constraint::Percentage(70)].as_ref())
         .split(main_chunks[0]);
 
     // 绘制各个组件
@@ -106,8 +94,12 @@ fn build_ast_tree_items(
             })
             .collect();
         items.push(
-            TreeItem::new("__includes".to_string(), "[Includes]".to_string(), include_children)
-                .expect("Failed to create TreeItem"),
+            TreeItem::new(
+                "__includes".to_string(),
+                "[Includes]".to_string(),
+                include_children,
+            )
+            .expect("Failed to create TreeItem"),
         );
     }
 
@@ -134,7 +126,11 @@ fn build_ast_tree_items(
             .global_variables
             .iter()
             .map(|var| {
-                let id = format!("__var_{}_{}", if var.is_special { "s" } else { "n" }, var.name);
+                let id = format!(
+                    "__var_{}_{}",
+                    if var.is_special { "s" } else { "n" },
+                    var.name
+                );
                 let display = if var.is_special {
                     format!("  ${} = {}", var.name, var.value.to_scad())
                 } else {
@@ -144,8 +140,12 @@ fn build_ast_tree_items(
             })
             .collect();
         items.push(
-            TreeItem::new("__globals".to_string(), "[Global Variables]".to_string(), var_children)
-                .expect("Failed to create TreeItem"),
+            TreeItem::new(
+                "__globals".to_string(),
+                "[Global Variables]".to_string(),
+                var_children,
+            )
+            .expect("Failed to create TreeItem"),
         );
     }
 
@@ -156,14 +156,23 @@ fn build_ast_tree_items(
             .iter()
             .map(|func| {
                 let id = format!("__func_{}", func.name);
-                let params = func.parameters.iter().map(|p| p.to_scad()).collect::<Vec<_>>().join(", ");
+                let params = func
+                    .parameters
+                    .iter()
+                    .map(|p| p.to_scad())
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 let display = format!("  function {}({})", func.name, params);
                 TreeItem::new(id, display, vec![]).expect("Failed to create TreeItem")
             })
             .collect();
         items.push(
-            TreeItem::new("__functions".to_string(), "[Functions]".to_string(), func_children)
-                .expect("Failed to create TreeItem"),
+            TreeItem::new(
+                "__functions".to_string(),
+                "[Functions]".to_string(),
+                func_children,
+            )
+            .expect("Failed to create TreeItem"),
         );
     }
 
@@ -174,14 +183,25 @@ fn build_ast_tree_items(
             .iter()
             .map(|mod_def| {
                 let id = format!("__moddef_{}", mod_def.name);
-                let params = mod_def.parameters.iter().map(|p| p.to_scad()).collect::<Vec<_>>().join(", ");
+                let params = mod_def
+                    .parameters
+                    .iter()
+                    .map(|p| p.to_scad())
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 let display = format!("  module {}({})", mod_def.name, params);
-                TreeItem::new(id, display, vec![]).expect("Failed to create TreeItem")
+                // Build children from module definition body
+                let body_children = build_tree_items(&mod_def.body, selected);
+                TreeItem::new(id, display, body_children).expect("Failed to create TreeItem")
             })
             .collect();
         items.push(
-            TreeItem::new("__moddefs".to_string(), "[Module Definitions]".to_string(), mod_def_children)
-                .expect("Failed to create TreeItem"),
+            TreeItem::new(
+                "__moddefs".to_string(),
+                "[Module Definitions]".to_string(),
+                mod_def_children,
+            )
+            .expect("Failed to create TreeItem"),
         );
     }
 
@@ -189,8 +209,12 @@ fn build_ast_tree_items(
     if !ast.modules.is_empty() {
         let module_children = build_tree_items(&ast.modules, selected);
         items.push(
-            TreeItem::new("__modules".to_string(), "[Modules]".to_string(), module_children)
-                .expect("Failed to create TreeItem"),
+            TreeItem::new(
+                "__modules".to_string(),
+                "[Modules]".to_string(),
+                module_children,
+            )
+            .expect("Failed to create TreeItem"),
         );
     }
 
@@ -233,39 +257,42 @@ fn build_tree_item(
 
 fn draw_input(f: &mut Frame, app: &App, area: Rect) {
     use crate::app::InputMode;
-    
+
     let title: String;
     let prompt: String;
     let style_fg: Color;
-    
+
     match app.input_mode {
         InputMode::Normal => {
             title = " Normal Mode ".to_string();
             prompt = "i=insert  j/k=nav  h/l=collapse/expand  v=select  d=delete  u=undo  r=redo  Enter=toggle  w=write  e=edit  :=cmd  ?=help  q=quit".to_string();
             style_fg = Color::Yellow;
-        },
+        }
         InputMode::Command => {
             title = " Command Mode ".to_string();
             prompt = "Enter command (type help for commands, Esc to exit):".to_string();
             style_fg = Color::Green;
-        },
+        }
         InputMode::InsertEnterParams => {
             title = " Insert Parameters ".to_string();
-            prompt = format!("Parameters for '{}': ", app.insert_module_name.as_deref().unwrap_or("?"));
+            prompt = format!(
+                "Parameters for '{}': ",
+                app.insert_module_name.as_deref().unwrap_or("?")
+            );
             style_fg = Color::Cyan;
-        },
+        }
         InputMode::ReplaceSelectModule => {
             title = " Replace Module ".to_string();
             prompt = "Enter replacement module name: ".to_string();
             style_fg = Color::Yellow;
-        },
+        }
         InputMode::Help => {
             title = " Help ".to_string();
             prompt = "Press Esc or q to close".to_string();
             style_fg = Color::Cyan;
-        },
+        }
     };
-    
+
     let block = Block::default()
         .title(title)
         .borders(Borders::ALL)
@@ -273,29 +300,24 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
 
     // Create line-by-line content with proper styling
     let mut lines: Vec<Line> = Vec::new();
-    
+
     // Add prompt line
-    lines.push(Line::from(vec![
-        Span::styled(
-            prompt.clone(),
-            Style::default().fg(style_fg)
-        ),
-    ]));
-    
+    lines.push(Line::from(vec![Span::styled(
+        prompt.clone(),
+        Style::default().fg(style_fg),
+    )]));
+
     // Add input line (only in command/param modes)
     if app.input_mode == InputMode::Command || app.input_mode == InputMode::InsertEnterParams {
         lines.push(Line::from(vec![
             Span::styled(
                 "> ",
-                Style::default().fg(style_fg).add_modifier(Modifier::BOLD)
+                Style::default().fg(style_fg).add_modifier(Modifier::BOLD),
             ),
-            Span::styled(
-                app.input_buffer.clone(),
-                Style::default().fg(Color::White)
-            ),
+            Span::styled(app.input_buffer.clone(), Style::default().fg(Color::White)),
         ]));
     }
-    
+
     // Add error line if there's a message
     if let Some(ref msg) = app.message {
         let msg_color = match app.message_type {
@@ -303,12 +325,10 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
             crate::app::MessageType::Warning => Color::Yellow,
             crate::app::MessageType::Info => Color::Green,
         };
-        lines.push(Line::from(vec![
-            Span::styled(
-                msg.clone(),
-                Style::default().fg(msg_color)
-            ),
-        ]));
+        lines.push(Line::from(vec![Span::styled(
+            msg.clone(),
+            Style::default().fg(msg_color),
+        )]));
     }
 
     let paragraph = Paragraph::new(lines)
@@ -326,18 +346,18 @@ fn draw_preview(f: &mut Frame, app: &App, area: Rect) {
 
     let code = app.ast.to_scad();
     let lines: Vec<&str> = code.lines().collect();
-    
+
     // 计算可显示的行数
     let visible_height = area.height.saturating_sub(2) as usize;
     let total_lines = lines.len();
-    
+
     // 确保光标在可见范围内
     let preview_offset = if app.preview_offset >= total_lines {
         (total_lines).saturating_sub(visible_height)
     } else {
         app.preview_offset
     };
-    
+
     let visible_lines: Vec<Line> = lines
         .iter()
         .skip(preview_offset)
@@ -349,20 +369,17 @@ fn draw_preview(f: &mut Frame, app: &App, area: Rect) {
             Line::from(vec![
                 Span::styled(
                     line_num_str,
-                    Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM),
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::DIM),
                 ),
-                Span::styled(
-                    line.to_string(),
-                    Style::default().fg(Color::Cyan),
-                ),
+                Span::styled(line.to_string(), Style::default().fg(Color::Cyan)),
             ])
         })
         .collect();
 
-    let paragraph = Paragraph::new(visible_lines)
-        .block(block)
-        .scroll((0, 0));
-    
+    let paragraph = Paragraph::new(visible_lines).block(block).scroll((0, 0));
+
     f.render_widget(paragraph, area);
 }
 
@@ -373,7 +390,7 @@ fn draw_help_modal(f: &mut Frame, _app: &App) {
     let modal_height = (area.height as f32 * 0.85) as u16;
     let modal_x = (area.width.saturating_sub(modal_width)) / 2;
     let modal_y = (area.height.saturating_sub(modal_height)) / 2;
-    
+
     let modal_area = Rect {
         x: modal_x,
         y: modal_y,
@@ -386,43 +403,49 @@ fn draw_help_modal(f: &mut Frame, _app: &App) {
     let help_content = vec![
         Line::from("OpenSCAD TUI - Command Reference"),
         Line::from(""),
-        Line::from(vec![
-            Span::styled("Navigation:", Style::default().add_modifier(Modifier::BOLD)),
-        ]),
+        Line::from(vec![Span::styled(
+            "Navigation:",
+            Style::default().add_modifier(Modifier::BOLD),
+        )]),
         Line::from("  j/↑, k/↓     - move cursor up/down"),
         Line::from("  h/←, l/→     - collapse/expand nodes"),
         Line::from(""),
-        Line::from(vec![
-            Span::styled("Selection & Insertion:", Style::default().add_modifier(Modifier::BOLD)),
-        ]),
+        Line::from(vec![Span::styled(
+            "Selection & Insertion:",
+            Style::default().add_modifier(Modifier::BOLD),
+        )]),
         Line::from("  v            - toggle select node at cursor"),
         Line::from("  i/insert     - insert module (enter module name)"),
         Line::from("  d/delete     - delete node at cursor"),
         Line::from(""),
-        Line::from(vec![
-            Span::styled("Boolean Operations:", Style::default().add_modifier(Modifier::BOLD)),
-        ]),
+        Line::from(vec![Span::styled(
+            "Boolean Operations:",
+            Style::default().add_modifier(Modifier::BOLD),
+        )]),
         Line::from("  union        - union of selected nodes"),
         Line::from("  difference   - difference of selected nodes"),
         Line::from("  intersection - intersection of selected nodes"),
         Line::from(""),
-        Line::from(vec![
-            Span::styled("Undo/Redo:", Style::default().add_modifier(Modifier::BOLD)),
-        ]),
+        Line::from(vec![Span::styled(
+            "Undo/Redo:",
+            Style::default().add_modifier(Modifier::BOLD),
+        )]),
         Line::from("  u/undo       - undo last operation"),
         Line::from("  r/redo       - redo last operation"),
         Line::from(""),
-        Line::from(vec![
-            Span::styled("File Operations:", Style::default().add_modifier(Modifier::BOLD)),
-        ]),
+        Line::from(vec![Span::styled(
+            "File Operations:",
+            Style::default().add_modifier(Modifier::BOLD),
+        )]),
         Line::from("  w/write      - save AST to JSON"),
         Line::from("  e/edit       - load AST from JSON"),
         Line::from("  export       - export to OpenSCAD file"),
         Line::from("  library      - load third-party library"),
         Line::from(""),
-        Line::from(vec![
-            Span::styled("Other:", Style::default().add_modifier(Modifier::BOLD)),
-        ]),
+        Line::from(vec![Span::styled(
+            "Other:",
+            Style::default().add_modifier(Modifier::BOLD),
+        )]),
         Line::from("  :            - enter command mode"),
         Line::from("  help/?       - show this help"),
         Line::from("  q/quit       - exit application"),
