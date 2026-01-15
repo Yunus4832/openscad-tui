@@ -352,29 +352,30 @@ pub fn cmd_delete(app: &mut crate::app::App, node_id: &str) -> CommandResult<()>
 }
 
 /// Apply boolean operation (union, difference, intersection)
+#[allow(dead_code)]
 pub fn cmd_boolean_op(
     app: &mut crate::app::App,
     operation: &str,
     node_ids: &[String],
 ) -> CommandResult<String> {
-    if node_ids.is_empty() {
-        return Err(CommandError::NoChildrenSelected);
+    // For boolean operations, we need to select the nodes first
+    // Save current selection
+    let current_selection = app.selected_nodes.clone();
+
+    // Temporarily set selection to the provided node_ids
+    app.selected_nodes = node_ids.to_vec();
+
+    // Call cmd_insert with no parameters (boolean operations don't have parameters)
+    let result = cmd_insert(app, operation, None, None);
+
+    // If cmd_insert failed, restore original selection
+    if result.is_err() {
+        app.selected_nodes = current_selection;
     }
+    // If cmd_insert succeeded, it will have cleared the selection
+    // (through insert_container_with_selected_nodes)
 
-    // Create container module
-    let op_id = format!(
-        "{}_{}",
-        operation,
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis()
-    );
-
-    let container = ModuleNode::new_container(op_id.clone(), operation.to_string(), Vec::new());
-
-    // Use the shared implementation for inserting container with selected nodes
-    insert_container_with_selected_nodes(app, container, node_ids)
+    result
 }
 
 /// Insert a container module with selected nodes as children
@@ -566,6 +567,9 @@ fn insert_container_with_selected_nodes(
             .select(vec![container_id.clone()]);
     }
 
+    // Clear the selected nodes since they've been moved into the container
+    app.selected_nodes.clear();
+
     Ok(container_id)
 }
 
@@ -738,42 +742,6 @@ pub fn cmd_select_toggle(app: &mut crate::app::App) -> CommandResult<()> {
 pub fn cmd_deselect_all(app: &mut crate::app::App) -> CommandResult<()> {
     app.selected_nodes.clear();
     app.set_info("All nodes deselected");
-    Ok(())
-}
-
-/// Translate command
-#[allow(dead_code)]
-pub fn cmd_translate(
-    app: &mut crate::app::App,
-    node_id: &str,
-    x: f64,
-    y: f64,
-    z: f64,
-) -> CommandResult<()> {
-    // Wrap the node in a translate module
-    if let Some(node) = app.ast.find_node_by_id(node_id).cloned() {
-        let translate_id = format!(
-            "translate_{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis()
-        );
-
-        let mut translate = ModuleNode::new_container(
-            translate_id,
-            "translate".to_string(),
-            vec![Argument::Named {
-                name: "v".to_string(),
-                value: Expr::List(vec![Expr::Float(x), Expr::Float(y), Expr::Float(z)]),
-            }],
-        );
-
-        translate.children.push(node);
-        app.ast.delete_node(node_id)?;
-        app.ast.add_module(translate)?;
-    }
-
     Ok(())
 }
 

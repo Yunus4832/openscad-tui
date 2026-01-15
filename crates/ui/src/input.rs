@@ -26,6 +26,18 @@ fn handle_normal_input(key: KeyEvent, app: &mut App) {
             app.input_buffer = "insert ".to_string();
         }
 
+        // t - translate
+        KeyCode::Char('t') => {
+            app.input_mode = InputMode::Command;
+            app.input_buffer = "translate ".to_string();
+        }
+
+        // s - scale
+        KeyCode::Char('s') => {
+            app.input_mode = InputMode::Command;
+            app.input_buffer = "scale ".to_string();
+        }
+
         // Navigation: j (next), k (prev), h (back/collapse), l (forward/expand)
         KeyCode::Char('j') | KeyCode::Down => {
             execute_command(app, "next");
@@ -50,9 +62,13 @@ fn handle_normal_input(key: KeyEvent, app: &mut App) {
             execute_command(app, "undo");
         }
 
-        // r - redo
-        KeyCode::Char('r') => {
+        // r - rotate (Ctrl+r for redo)
+        KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             execute_command(app, "redo");
+        }
+        KeyCode::Char('r') => {
+            app.input_mode = InputMode::Command;
+            app.input_buffer = "rotate ".to_string();
         }
 
         // d - delete node
@@ -309,6 +325,7 @@ fn execute_command(app: &mut App, cmd: &str) {
         Some(&"insert") | Some(&"i") => {
             if parts.len() < 2 {
                 app.set_error("Usage: insert <module_name> [params]");
+                app.input_mode = InputMode::Normal;
                 return;
             }
             let module_name = parts[1];
@@ -324,6 +341,7 @@ fn execute_command(app: &mut App, cmd: &str) {
                         "'{}' requires child modules. Select modules with 'v' first",
                         module_name
                     ));
+                    app.input_mode = InputMode::Normal;
                     return;
                 }
             }
@@ -367,6 +385,7 @@ fn execute_command(app: &mut App, cmd: &str) {
         Some(&"moddef") => {
             if parts.len() < 2 {
                 app.set_error("Usage: moddef <module_name> [params]");
+                app.input_mode = InputMode::Normal;
                 return;
             }
             let module_name = parts[1];
@@ -397,6 +416,7 @@ fn execute_command(app: &mut App, cmd: &str) {
                     Some(id) => id,
                     None => {
                         app.set_error("No node selected");
+                        app.input_mode = InputMode::Normal;
                         return;
                     }
                 }
@@ -411,50 +431,136 @@ fn execute_command(app: &mut App, cmd: &str) {
             }
         }
 
-        // union/difference/intersection <node1> <node2> ...
+        // translate [params] - apply translate to selected nodes
+        Some(&"translate") => {
+            // Check if we have selected nodes
+            if app.selected_nodes.is_empty() {
+                app.set_error("No nodes selected. Select nodes with 'v' first");
+                app.input_mode = InputMode::Normal;
+                return;
+            }
+
+            // Get parameters if provided
+            let params = if parts.len() > 1 {
+                Some(parts[1..].join(" "))
+            } else {
+                None
+            };
+
+            app.push_undo();
+            match commands::cmd_insert(app, "translate", None, params.as_deref()) {
+                Ok(_) => {
+                    app.set_info("Applied translate to selected nodes");
+                    app.update_navigation_status();
+                }
+                Err(e) => app.set_error(&e.to_string()),
+            }
+        }
+
+        // rotate [params] - apply rotate to selected nodes
+        Some(&"rotate") => {
+            // Check if we have selected nodes
+            if app.selected_nodes.is_empty() {
+                app.set_error("No nodes selected. Select nodes with 'v' first");
+                app.input_mode = InputMode::Normal;
+                return;
+            }
+
+            // Get parameters if provided
+            let params = if parts.len() > 1 {
+                Some(parts[1..].join(" "))
+            } else {
+                None
+            };
+
+            app.push_undo();
+            match commands::cmd_insert(app, "rotate", None, params.as_deref()) {
+                Ok(_) => {
+                    app.set_info("Applied rotate to selected nodes");
+                    app.update_navigation_status();
+                }
+                Err(e) => app.set_error(&e.to_string()),
+            }
+        }
+
+        // scale [params] - apply scale to selected nodes
+        Some(&"scale") => {
+            // Check if we have selected nodes
+            if app.selected_nodes.is_empty() {
+                app.set_error("No nodes selected. Select nodes with 'v' first");
+                app.input_mode = InputMode::Normal;
+                return;
+            }
+
+            // Get parameters if provided
+            let params = if parts.len() > 1 {
+                Some(parts[1..].join(" "))
+            } else {
+                None
+            };
+
+            app.push_undo();
+            match commands::cmd_insert(app, "scale", None, params.as_deref()) {
+                Ok(_) => {
+                    app.set_info("Applied scale to selected nodes");
+                    app.update_navigation_status();
+                }
+                Err(e) => app.set_error(&e.to_string()),
+            }
+        }
+
+        // union - apply union to selected nodes
         Some(&"union") => {
+            // Check if we have selected nodes
             if app.selected_nodes.is_empty() {
-                app.set_error("No nodes selected. Usage: select node1, select node2, union");
+                app.set_error("No nodes selected. Select nodes with 'v' first");
+                app.input_mode = InputMode::Normal;
                 return;
             }
-            let nodes = app.selected_nodes.clone();
+
             app.push_undo();
-            match commands::cmd_boolean_op(app, "union", &nodes) {
+            match commands::cmd_insert(app, "union", None, None) {
                 Ok(_) => {
-                    app.selected_nodes.clear();
-                    app.set_info("Union operation completed");
+                    app.set_info("Applied union to selected nodes");
+                    app.update_navigation_status();
                 }
                 Err(e) => app.set_error(&e.to_string()),
             }
         }
 
+        // difference - apply difference to selected nodes
         Some(&"difference") => {
+            // Check if we have selected nodes
             if app.selected_nodes.is_empty() {
-                app.set_error("No nodes selected. Usage: select node1, select node2, difference");
+                app.set_error("No nodes selected. Select nodes with 'v' first");
+                app.input_mode = InputMode::Normal;
                 return;
             }
-            let nodes = app.selected_nodes.clone();
+
             app.push_undo();
-            match commands::cmd_boolean_op(app, "difference", &nodes) {
+            match commands::cmd_insert(app, "difference", None, None) {
                 Ok(_) => {
-                    app.selected_nodes.clear();
-                    app.set_info("Difference operation completed");
+                    app.set_info("Applied difference to selected nodes");
+                    app.update_navigation_status();
                 }
                 Err(e) => app.set_error(&e.to_string()),
             }
         }
 
+        // intersection - apply intersection to selected nodes
         Some(&"intersection") => {
+            // Check if we have selected nodes
             if app.selected_nodes.is_empty() {
-                app.set_error("No nodes selected. Usage: select node1, select node2, intersection");
+                app.set_error("No nodes selected. Select nodes with 'v' first");
+                app.input_mode = InputMode::Normal;
                 return;
             }
-            let nodes = app.selected_nodes.clone();
+
             app.push_undo();
-            match commands::cmd_boolean_op(app, "intersection", &nodes) {
+            match commands::cmd_insert(app, "intersection", None, None) {
                 Ok(_) => {
-                    app.selected_nodes.clear();
-                    app.set_info("Intersection operation completed");
+                    app.set_info("Applied intersection to selected nodes");
+                    app.update_navigation_status();
                 }
                 Err(e) => app.set_error(&e.to_string()),
             }
@@ -486,6 +592,7 @@ fn execute_command(app: &mut App, cmd: &str) {
         Some(&"replace") => {
             if parts.len() < 2 {
                 app.set_error("Usage: replace <node_id> <new_module_name>");
+                app.input_mode = InputMode::Normal;
                 return;
             }
             app.set_error("Replace command not implemented yet");
@@ -495,6 +602,7 @@ fn execute_command(app: &mut App, cmd: &str) {
         Some(&"write") | Some(&"save") | Some(&"w") => {
             if parts.len() < 2 {
                 app.set_error("Usage: write <filename>.json");
+                app.input_mode = InputMode::Normal;
                 return;
             }
             let filename = parts[1];
@@ -508,6 +616,7 @@ fn execute_command(app: &mut App, cmd: &str) {
         Some(&"edit") | Some(&"e") => {
             if parts.len() < 2 {
                 app.set_error("Usage: edit <filename>.json");
+                app.input_mode = InputMode::Normal;
                 return;
             }
             let filename = parts[1];
@@ -521,6 +630,7 @@ fn execute_command(app: &mut App, cmd: &str) {
         Some(&"export") => {
             if parts.len() < 2 {
                 app.set_error("Usage: export <filename>.scad");
+                app.input_mode = InputMode::Normal;
                 return;
             }
             let filename = parts[1];
@@ -534,6 +644,7 @@ fn execute_command(app: &mut App, cmd: &str) {
         Some(&"library") => {
             if parts.len() < 2 {
                 app.set_error("Usage: library <filename>.json");
+                app.input_mode = InputMode::Normal;
                 return;
             }
             let filename = parts[1];

@@ -6,5 +6,5 @@ pub mod commands;
 pub use app::App;
 pub use commands::{
     cmd_boolean_op, cmd_clear_selection, cmd_delete, cmd_deselect, cmd_insert, cmd_select,
-    cmd_translate, CommandError, CommandResult,
+    CommandError, CommandResult,
 };
