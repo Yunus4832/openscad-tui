@@ -1,10 +1,13 @@
 //! Commands module for OpenSCAD TUI
 
 use openscad_core::{Argument, AstError, Expr, ModuleNode};
-use openscad_library::ModuleDef;
+use openscad_library::{LibraryError, ModuleDef};
 use std::fs;
 use std::path::Path;
+use std::sync::Arc;
 use thiserror::Error;
+
+const MAX_RECURSION_DEPTH: usize = 1000;
 
 #[derive(Error, Debug)]
 pub enum CommandError {
@@ -13,6 +16,9 @@ pub enum CommandError {
 
     #[error("AST error: {0}")]
     AstError(#[from] AstError),
+
+    #[error("Library error: {0}")]
+    LibraryError(#[from] LibraryError),
 
     #[error("Parameter parsing error: {0}")]
     ParameterError(String),
@@ -86,8 +92,8 @@ pub fn cmd_insert(
 
         // If this module comes from a third-party library, add include statement
         if let Some(ref lib_file) = source_lib_file {
-            if !app.ast.includes.contains(lib_file) {
-                app.ast.includes.push(lib_file.clone());
+            if !app.ast_mut().includes.contains(lib_file) {
+                app.ast_mut().includes.push(lib_file.clone());
             }
         }
 
@@ -101,8 +107,8 @@ pub fn cmd_insert(
 
         // If this module comes from a third-party library, add include statement
         if let Some(ref lib_file) = source_lib_file {
-            if !app.ast.includes.contains(lib_file) {
-                app.ast.includes.push(lib_file.clone());
+            if !app.ast_mut().includes.contains(lib_file) {
+                app.ast_mut().includes.push(lib_file.clone());
             }
         }
 
@@ -155,11 +161,11 @@ pub fn cmd_insert(
             // Check if selected node is the module definition itself
             if selected_id.starts_with("__moddef_") {
                 // Insert at the end of module definition body
-                app.ast.module_defines[mod_def_idx].body.push(module);
+                app.ast_mut().module_defines[mod_def_idx].body.push(module);
             } else {
                 // Insert after the selected node in module definition body
                 insert_after_node(
-                    &mut app.ast.module_defines[mod_def_idx].body,
+                    &mut app.ast_mut().module_defines[mod_def_idx].body,
                     &selected_id,
                     module,
                 )?;
@@ -176,10 +182,10 @@ pub fn cmd_insert(
 
             if insert_at_root {
                 // Insert at root level of Modules section
-                app.ast.add_module(module)?;
+                app.ast_mut().add_module(module)?;
             } else if let Some(selected_id) = selected {
                 // Find the selected node and insert after it
-                insert_after_node(&mut app.ast.modules, &selected_id, module)?;
+                insert_after_node(&mut app.ast_mut().modules, &selected_id, module)?;
             }
         }
 
@@ -254,77 +260,6 @@ fn insert_after_node(
     )))
 }
 
-/// Find the parent ID of a node
-/// Returns the ID of the parent node, or None if the node is at root level
-fn find_node_parent(modules: &[ModuleNode], target_id: &str) -> Option<String> {
-    find_node_parent_recursive(modules, target_id)
-}
-
-fn find_node_parent_recursive(modules: &[ModuleNode], target_id: &str) -> Option<String> {
-    for module in modules {
-        // Check if target is a direct child of this module
-        if module.children.iter().any(|child| child.id == target_id) {
-            return Some(module.id.clone());
-        }
-        // Recursively search in children
-        if let Some(parent) = find_node_parent_recursive(&module.children, target_id) {
-            return Some(parent);
-        }
-    }
-    None
-}
-
-/// Insert a child node before a specific sibling node
-/// Finds the parent and inserts the new module before the sibling
-fn insert_child_before(
-    modules: &mut [ModuleNode],
-    parent_id: &str,
-    before_node_id: &str,
-    new_child: ModuleNode,
-) -> CommandResult<()> {
-    insert_child_before_recursive(modules, parent_id, before_node_id, new_child)
-}
-
-fn insert_child_before_recursive(
-    modules: &mut [ModuleNode],
-    parent_id: &str,
-    before_node_id: &str,
-    new_child: ModuleNode,
-) -> CommandResult<()> {
-    for module in modules {
-        if module.id == parent_id {
-            // Found the parent, now find the position of the sibling
-            if let Some(pos) = module
-                .children
-                .iter()
-                .position(|child| child.id == before_node_id)
-            {
-                module.children.insert(pos, new_child);
-                return Ok(());
-            } else {
-                return Err(CommandError::InvalidCommand(format!(
-                    "Sibling node not found: {}",
-                    before_node_id
-                )));
-            }
-        }
-        // Recursively search in children
-        match insert_child_before_recursive(
-            &mut module.children,
-            parent_id,
-            before_node_id,
-            new_child.clone(),
-        ) {
-            Ok(()) => return Ok(()),
-            Err(_) => continue, // Try next module
-        }
-    }
-    Err(CommandError::InvalidCommand(format!(
-        "Parent node not found: {}",
-        parent_id
-    )))
-}
-
 /// Delete command
 pub fn cmd_delete(app: &mut crate::app::App, node_id: &str) -> CommandResult<()> {
     // Prevent deletion of section headers
@@ -335,7 +270,7 @@ pub fn cmd_delete(app: &mut crate::app::App, node_id: &str) -> CommandResult<()>
         )));
     }
 
-    app.ast.delete_node(node_id)?;
+    app.ast_mut().delete_node(node_id)?;
     app.selected_nodes.retain(|id| id != node_id);
 
     // Clear tree state selection if the deleted node was selected
@@ -456,24 +391,25 @@ fn insert_container_with_selected_nodes(
         // Insert the container in module definition body
         if let Some(parent_id_val) = &parent_id {
             insert_child_before(
-                &mut app.ast.module_defines[mod_def_idx].body,
+                &mut app.ast_mut().module_defines[mod_def_idx].body,
                 parent_id_val,
                 &first_id,
                 container.clone(),
-            )?;
+            )
+            .map_err(CommandError::InvalidCommand)?;
         } else {
             // First selected node was at root level of module definition body
-            if let Some(pos) = app.ast.module_defines[mod_def_idx]
+            if let Some(pos) = app.ast_mut().module_defines[mod_def_idx]
                 .body
                 .iter()
                 .position(|m| m.id == first_id)
             {
-                app.ast.module_defines[mod_def_idx]
+                app.ast_mut().module_defines[mod_def_idx]
                     .body
                     .insert(pos, container.clone());
             } else {
                 // Fallback: add to end of module definition body
-                app.ast.module_defines[mod_def_idx]
+                app.ast_mut().module_defines[mod_def_idx]
                     .body
                     .push(container.clone());
             }
@@ -493,14 +429,15 @@ fn insert_container_with_selected_nodes(
         // Delete nodes from module definition body
         for node_id in selected_node_ids {
             delete_node_from_module_definition(
-                &mut app.ast.module_defines[mod_def_idx].body,
+                &mut app.ast_mut().module_defines[mod_def_idx].body,
                 node_id,
-            )?;
+            )
+            .map_err(CommandError::InvalidCommand)?;
         }
 
         // Add collected nodes to the container
         if let Some(container_mut) = find_node_in_module_definition_mut(
-            &mut app.ast.module_defines[mod_def_idx].body,
+            &mut app.ast_mut().module_defines[mod_def_idx].body,
             &container_id,
         ) {
             for node in nodes_to_move {
@@ -518,22 +455,23 @@ fn insert_container_with_selected_nodes(
         // Insert the container BEFORE deleting the selected nodes
         if let Some(parent_id_val) = &parent_id {
             insert_child_before(
-                &mut app.ast.modules,
+                &mut app.ast_mut().modules,
                 parent_id_val,
-                &first_selected.clone().unwrap(),
+                first_selected.as_ref().unwrap(),
                 container.clone(),
-            )?;
+            )
+            .map_err(CommandError::InvalidCommand)?;
         } else {
             // First selected node was at root level
             if let Some(pos) = app
                 .ast
                 .modules
                 .iter()
-                .position(|m| m.id == first_selected.clone().unwrap())
+                .position(|m| m.id == *first_selected.as_ref().unwrap())
             {
-                app.ast.modules.insert(pos, container.clone());
+                app.ast_mut().modules.insert(pos, container.clone());
             } else {
-                app.ast.add_module(container.clone())?;
+                app.ast_mut().add_module(container.clone())?;
             }
         }
 
@@ -545,11 +483,11 @@ fn insert_container_with_selected_nodes(
 
         // Delete the selected nodes from the tree
         for node_id in selected_node_ids {
-            app.ast.delete_node(node_id)?;
+            app.ast_mut().delete_node(node_id)?;
         }
 
         // Add collected nodes to the container
-        if let Some(container_mut) = app.ast.find_node_mut(&container_id) {
+        if let Some(container_mut) = app.ast_mut().find_node_mut(&container_id) {
             for node in nodes_to_move {
                 container_mut.children.push(node);
             }
@@ -571,75 +509,6 @@ fn insert_container_with_selected_nodes(
     app.selected_nodes.clear();
 
     Ok(container_id)
-}
-
-/// Find a node in module definition body
-fn find_node_in_module_definition<'a>(
-    modules: &'a [openscad_core::ModuleNode],
-    node_id: &str,
-) -> Option<&'a openscad_core::ModuleNode> {
-    for module in modules {
-        if module.id == node_id {
-            return Some(module);
-        }
-        if let Some(found) = find_node_in_module_definition(&module.children, node_id) {
-            return Some(found);
-        }
-    }
-    None
-}
-
-/// Check if module definition body contains a children module
-fn contains_children_module(modules: &[openscad_core::ModuleNode]) -> bool {
-    for module in modules {
-        if module.name == "children" {
-            return true;
-        }
-        if contains_children_module(&module.children) {
-            return true;
-        }
-    }
-    false
-}
-
-/// Find a mutable node in module definition body
-fn find_node_in_module_definition_mut<'a>(
-    modules: &'a mut [openscad_core::ModuleNode],
-    node_id: &str,
-) -> Option<&'a mut openscad_core::ModuleNode> {
-    for module in modules {
-        if module.id == node_id {
-            return Some(module);
-        }
-        if let Some(found) = find_node_in_module_definition_mut(&mut module.children, node_id) {
-            return Some(found);
-        }
-    }
-    None
-}
-
-/// Delete a node from module definition body
-fn delete_node_from_module_definition(
-    modules: &mut Vec<openscad_core::ModuleNode>,
-    node_id: &str,
-) -> CommandResult<()> {
-    // First, try to find and remove at this level
-    if let Some(pos) = modules.iter().position(|m| m.id == node_id) {
-        modules.remove(pos);
-        return Ok(());
-    }
-
-    // Recursively search in children
-    for module in modules {
-        if delete_node_from_module_definition(&mut module.children, node_id).is_ok() {
-            return Ok(());
-        }
-    }
-
-    Err(CommandError::InvalidCommand(format!(
-        "Node not found in module definition body: {}",
-        node_id
-    )))
 }
 
 /// Select command
@@ -891,7 +760,7 @@ pub fn cmd_write(app: &crate::app::App, filename: &str) -> CommandResult<()> {
     };
 
     // Serialize AST to JSON
-    let json = serde_json::to_string_pretty(&app.ast)
+    let json = serde_json::to_string_pretty(&*app.ast)
         .map_err(|e| CommandError::Custom(format!("Failed to serialize AST: {}", e)))?;
 
     // Write to file
@@ -920,7 +789,7 @@ pub fn cmd_load(app: &mut crate::app::App, filename: &str) -> CommandResult<()> 
         .map_err(|e| CommandError::Custom(format!("Failed to parse JSON: {}", e)))?;
 
     // Replace AST
-    app.ast = ast;
+    app.ast = Arc::new(ast);
 
     // Reload custom modules in library manager
     app.library
@@ -968,9 +837,7 @@ pub fn cmd_load_library(app: &mut crate::app::App, filename: &str) -> CommandRes
     }
 
     // Load library
-    app.library
-        .load_library(path)
-        .map_err(|e| CommandError::Custom(format!("Failed to load library: {}", e)))?;
+    app.library.load_library(path)?;
 
     Ok(())
 }
@@ -1024,7 +891,7 @@ pub fn cmd_moddef(
 
     // Collect children from selected nodes (copy them with new IDs to avoid duplication)
     let mut children = Vec::new();
-    for node_id in &app.selected_nodes.clone() {
+    for node_id in &app.selected_nodes {
         if let Some(node) = app.ast.find_node_by_id(node_id).cloned() {
             let node_with_new_id = clone_module_with_new_ids(&node);
             children.push(node_with_new_id);
@@ -1041,7 +908,7 @@ pub fn cmd_moddef(
     let module_def = ModuleDefinition::new(module_name.to_string(), parameters.clone(), children);
 
     // Add to AST
-    app.ast
+    app.ast_mut()
         .add_module_define(module_def)
         .map_err(CommandError::AstError)?;
 
@@ -1139,6 +1006,207 @@ fn clone_module_with_new_ids(node: &openscad_core::ModuleNode) -> openscad_core:
         .collect();
 
     new_node
+}
+
+/// Find the parent ID of a node in a module tree
+fn find_node_parent(nodes: &[openscad_core::ModuleNode], target_id: &str) -> Option<String> {
+    // Use explicit stack to avoid recursion depth issues
+    let mut stack: Vec<(&openscad_core::ModuleNode, usize)> =
+        nodes.iter().map(|n| (n, 0)).collect();
+
+    while let Some((node, depth)) = stack.pop() {
+        if depth >= MAX_RECURSION_DEPTH {
+            continue; // Skip to avoid infinite recursion
+        }
+
+        // Check if target is a direct child of this node
+        for child in &node.children {
+            if child.id == target_id {
+                return Some(node.id.clone());
+            }
+            // Push child to stack for deeper search
+            stack.push((child, depth + 1));
+        }
+    }
+
+    None
+}
+
+/// Insert a child node before a target node in its parent's children list
+#[allow(clippy::ptr_arg)]
+fn insert_child_before(
+    nodes: &mut Vec<openscad_core::ModuleNode>,
+    parent_id: &str,
+    target_id: &str,
+    new_node: openscad_core::ModuleNode,
+) -> Result<(), String> {
+    // Find the parent node
+    for node in nodes.iter_mut() {
+        if node.id == parent_id {
+            // Find position of target child
+            if let Some(pos) = node.children.iter().position(|c| c.id == target_id) {
+                node.children.insert(pos, new_node);
+                return Ok(());
+            } else {
+                return Err(format!(
+                    "Target node {} not found in parent {}",
+                    target_id, parent_id
+                ));
+            }
+        }
+
+        // Recursively search in children
+        if !node.children.is_empty() {
+            // Use explicit stack to avoid recursion depth issues
+            let mut stack: Vec<&mut Vec<openscad_core::ModuleNode>> = vec![&mut node.children];
+            let mut depth = 0;
+
+            while let Some(children) = stack.pop() {
+                if depth >= MAX_RECURSION_DEPTH {
+                    break;
+                }
+
+                for child in children.iter_mut() {
+                    if child.id == parent_id {
+                        if let Some(pos) = child.children.iter().position(|c| c.id == target_id) {
+                            child.children.insert(pos, new_node);
+                            return Ok(());
+                        } else {
+                            return Err(format!(
+                                "Target node {} not found in parent {}",
+                                target_id, parent_id
+                            ));
+                        }
+                    }
+
+                    if !child.children.is_empty() {
+                        stack.push(&mut child.children);
+                    }
+                }
+                depth += 1;
+            }
+        }
+    }
+
+    Err(format!("Parent node {} not found", parent_id))
+}
+
+/// Find a node in a module definition body
+fn find_node_in_module_definition(
+    nodes: &[openscad_core::ModuleNode],
+    target_id: &str,
+) -> Option<openscad_core::ModuleNode> {
+    // Use explicit stack to avoid recursion depth issues
+    let mut stack: Vec<(&openscad_core::ModuleNode, usize)> =
+        nodes.iter().map(|n| (n, 0)).collect();
+
+    while let Some((node, depth)) = stack.pop() {
+        if depth >= MAX_RECURSION_DEPTH {
+            continue;
+        }
+
+        if node.id == target_id {
+            return Some(node.clone());
+        }
+
+        // Push children to stack
+        for child in &node.children {
+            stack.push((child, depth + 1));
+        }
+    }
+
+    None
+}
+
+/// Find a node in a module definition body (mutable version)
+fn find_node_in_module_definition_mut<'a>(
+    nodes: &'a mut [openscad_core::ModuleNode],
+    target_id: &str,
+) -> Option<&'a mut openscad_core::ModuleNode> {
+    // Use explicit stack to avoid recursion depth issues
+    let mut stack: Vec<(&mut openscad_core::ModuleNode, usize)> =
+        nodes.iter_mut().map(|n| (n, 0)).collect();
+
+    while let Some((node, depth)) = stack.pop() {
+        if depth >= MAX_RECURSION_DEPTH {
+            continue;
+        }
+
+        if node.id == target_id {
+            return Some(node);
+        }
+
+        // Push children to stack
+        for child in &mut node.children {
+            stack.push((child, depth + 1));
+        }
+    }
+
+    None
+}
+
+/// Delete a node from a module definition body
+fn delete_node_from_module_definition(
+    nodes: &mut Vec<openscad_core::ModuleNode>,
+    target_id: &str,
+) -> Result<(), String> {
+    // First try to find and remove from root level
+    if let Some(pos) = nodes.iter().position(|n| n.id == target_id) {
+        nodes.remove(pos);
+        return Ok(());
+    }
+
+    // Search in children recursively
+    for node in nodes.iter_mut() {
+        // Use explicit stack to avoid recursion depth issues
+        let mut stack: Vec<&mut Vec<openscad_core::ModuleNode>> = vec![&mut node.children];
+        let mut depth = 0;
+
+        while let Some(children) = stack.pop() {
+            if depth >= MAX_RECURSION_DEPTH {
+                break;
+            }
+
+            if let Some(pos) = children.iter().position(|n| n.id == target_id) {
+                children.remove(pos);
+                return Ok(());
+            }
+
+            // Continue search in deeper children
+            for child in children.iter_mut() {
+                if !child.children.is_empty() {
+                    stack.push(&mut child.children);
+                }
+            }
+            depth += 1;
+        }
+    }
+
+    Err(format!("Node {} not found", target_id))
+}
+
+/// Check if a module tree contains a children module
+fn contains_children_module(nodes: &[openscad_core::ModuleNode]) -> bool {
+    // Use explicit stack to avoid recursion depth issues
+    let mut stack: Vec<(&openscad_core::ModuleNode, usize)> =
+        nodes.iter().map(|n| (n, 0)).collect();
+
+    while let Some((node, depth)) = stack.pop() {
+        if depth >= MAX_RECURSION_DEPTH {
+            continue;
+        }
+
+        if node.name == "children" {
+            return true;
+        }
+
+        // Push children to stack
+        for child in &node.children {
+            stack.push((child, depth + 1));
+        }
+    }
+
+    false
 }
 
 #[cfg(test)]
@@ -1276,7 +1344,7 @@ mod tests {
         assert!(result.is_ok(), "insert should work with custom module");
 
         // Serialize the AST to JSON
-        let json = serde_json::to_string_pretty(&app.ast).expect("Failed to serialize AST");
+        let json = serde_json::to_string_pretty(&*app.ast).expect("Failed to serialize AST");
 
         // Deserialize back
         let deserialized: AstRoot = serde_json::from_str(&json).expect("Failed to deserialize AST");
@@ -1316,10 +1384,10 @@ mod tests {
         );
 
         // Add child to the first module definition's body
-        app.ast.module_defines[0].body.push(child_node);
+        app.ast_mut().module_defines[0].body.push(child_node);
 
         // Serialize the AST to JSON
-        let json = serde_json::to_string_pretty(&app.ast).expect("Failed to serialize AST");
+        let json = serde_json::to_string_pretty(&*app.ast).expect("Failed to serialize AST");
 
         // Deserialize back
         let deserialized: AstRoot = serde_json::from_str(&json).expect("Failed to deserialize AST");
@@ -1468,8 +1536,8 @@ mod tests {
         );
 
         // Add cubes to module definition body
-        app.ast.module_defines[0].body.push(cube1.clone());
-        app.ast.module_defines[0].body.push(cube2.clone());
+        app.ast_mut().module_defines[0].body.push(cube1.clone());
+        app.ast_mut().module_defines[0].body.push(cube2.clone());
 
         // Select both nodes (they are in module definition body)
         let selected_nodes = vec![cube1.id.clone(), cube2.id.clone()];
@@ -1530,7 +1598,7 @@ mod tests {
                 value: openscad_core::Expr::Integer(5),
             }],
         );
-        app.ast.module_defines[0].body.push(cube1.clone());
+        app.ast_mut().module_defines[0].body.push(cube1.clone());
 
         // Insert a cube into modules section
         let cube2_id = cmd_insert(&mut app, "cube", None, Some("10,10,10")).unwrap();
@@ -1584,8 +1652,8 @@ mod tests {
         );
 
         // Add cubes to module definition body
-        app.ast.module_defines[0].body.push(cube1.clone());
-        app.ast.module_defines[0].body.push(cube2.clone());
+        app.ast_mut().module_defines[0].body.push(cube1.clone());
+        app.ast_mut().module_defines[0].body.push(cube2.clone());
 
         // Select both nodes (they are in module definition body)
         app.selected_nodes = vec![cube1.id.clone(), cube2.id.clone()];

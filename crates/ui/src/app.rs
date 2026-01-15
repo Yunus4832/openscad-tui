@@ -4,6 +4,7 @@ use openscad_core::AstRoot;
 use openscad_library::LibraryManager;
 use std::cell::RefCell;
 use std::collections::VecDeque;
+use std::sync::Arc;
 use tui_tree_widget::TreeState;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -33,11 +34,11 @@ pub enum MessageType {
 }
 
 pub struct App {
-    pub ast: AstRoot,
+    pub ast: Arc<AstRoot>,
     pub library: LibraryManager,
     pub selected_nodes: Vec<String>,
-    pub undo_stack: VecDeque<AstRoot>,
-    pub redo_stack: VecDeque<AstRoot>,
+    pub undo_stack: VecDeque<Arc<AstRoot>>,
+    pub redo_stack: VecDeque<Arc<AstRoot>>,
 
     // UI state - Tree navigation (using RefCell for interior mutability)
     pub tree_state: RefCell<TreeState<String>>,
@@ -63,7 +64,7 @@ pub struct App {
 impl App {
     pub fn new() -> Self {
         let mut app = Self {
-            ast: AstRoot::new(),
+            ast: Arc::new(AstRoot::new()),
             library: LibraryManager::new(),
             selected_nodes: Vec::new(),
             undo_stack: VecDeque::with_capacity(100),
@@ -119,6 +120,11 @@ impl App {
                 .borrow_mut()
                 .select(vec!["__modules".to_string()]);
         }
+    }
+
+    /// Get mutable reference to AST, cloning if necessary (copy-on-write)
+    pub fn ast_mut(&mut self) -> &mut AstRoot {
+        Arc::make_mut(&mut self.ast)
     }
 
     /// Restore tree state to a valid position
@@ -309,15 +315,26 @@ impl App {
 
     /// Helper to check if a node is in module definition body
     fn find_node_in_module_body(modules: &[openscad_core::ModuleNode], target_id: &str) -> bool {
-        for module in modules {
-            if module.id == target_id {
-                return true;
+        const MAX_DEPTH: usize = 1000;
+        fn find_recursive(
+            modules: &[openscad_core::ModuleNode],
+            target_id: &str,
+            depth: usize,
+        ) -> bool {
+            if depth >= MAX_DEPTH {
+                return false;
             }
-            if Self::find_node_in_module_body(&module.children, target_id) {
-                return true;
+            for module in modules {
+                if module.id == target_id {
+                    return true;
+                }
+                if find_recursive(&module.children, target_id, depth + 1) {
+                    return true;
+                }
             }
+            false
         }
-        false
+        find_recursive(modules, target_id, 0)
     }
 
     fn find_node_path_recursive(
@@ -325,22 +342,34 @@ impl App {
         target_id: &str,
         current_path: &mut Vec<String>,
     ) -> Option<Vec<String>> {
-        for module in modules {
-            current_path.push(module.id.clone());
-
-            if module.id == target_id {
-                return Some(current_path.clone());
+        const MAX_DEPTH: usize = 1000;
+        fn find_recursive(
+            modules: &[openscad_core::ModuleNode],
+            target_id: &str,
+            current_path: &mut Vec<String>,
+            depth: usize,
+        ) -> Option<Vec<String>> {
+            if depth >= MAX_DEPTH {
+                return None;
             }
+            for module in modules {
+                current_path.push(module.id.clone());
 
-            if let Some(path) =
-                Self::find_node_path_recursive(&module.children, target_id, current_path)
-            {
-                return Some(path);
+                if module.id == target_id {
+                    return Some(current_path.clone());
+                }
+
+                if let Some(path) =
+                    find_recursive(&module.children, target_id, current_path, depth + 1)
+                {
+                    return Some(path);
+                }
+
+                current_path.pop();
             }
-
-            current_path.pop();
+            None
         }
-        None
+        find_recursive(modules, target_id, current_path, 0)
     }
 
     /// Search for a node within module definitions
@@ -538,15 +567,26 @@ impl App {
         modules: &[openscad_core::ModuleNode],
         node_id: &str,
     ) -> Option<String> {
-        for module in modules {
-            if module.id == node_id {
-                return Some(module.get_display_name());
+        const MAX_DEPTH: usize = 1000;
+        fn find_recursive(
+            modules: &[openscad_core::ModuleNode],
+            node_id: &str,
+            depth: usize,
+        ) -> Option<String> {
+            if depth >= MAX_DEPTH {
+                return None;
             }
-            if let Some(name) = Self::find_module_name_recursive(&module.children, node_id) {
-                return Some(name);
+            for module in modules {
+                if module.id == node_id {
+                    return Some(module.get_display_name());
+                }
+                if let Some(name) = find_recursive(&module.children, node_id, depth + 1) {
+                    return Some(name);
+                }
             }
+            None
         }
-        None
+        find_recursive(modules, node_id, 0)
     }
 }
 

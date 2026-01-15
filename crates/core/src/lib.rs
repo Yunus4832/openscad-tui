@@ -583,13 +583,12 @@ impl AstRoot {
     }
 
     fn find_in_vec<'a>(modules: &'a [ModuleNode], id: &str) -> Option<&'a ModuleNode> {
-        for module in modules {
+        let mut stack: Vec<&'a ModuleNode> = modules.iter().collect();
+        while let Some(module) = stack.pop() {
             if module.id == id {
                 return Some(module);
             }
-            if let Some(found) = Self::find_in_vec(&module.children, id) {
-                return Some(found);
-            }
+            stack.extend(module.children.iter());
         }
         None
     }
@@ -600,15 +599,26 @@ impl AstRoot {
     }
 
     fn find_in_vec_mut<'a>(modules: &'a mut [ModuleNode], id: &str) -> Option<&'a mut ModuleNode> {
-        for module in modules {
-            if module.id == id {
-                return Some(module);
+        const MAX_DEPTH: usize = 1000;
+        fn find_recursive<'a>(
+            modules: &'a mut [ModuleNode],
+            id: &str,
+            depth: usize,
+        ) -> Option<&'a mut ModuleNode> {
+            if depth >= MAX_DEPTH {
+                return None;
             }
-            if let Some(found) = Self::find_in_vec_mut(&mut module.children, id) {
-                return Some(found);
+            for module in modules {
+                if module.id == id {
+                    return Some(module);
+                }
+                if let Some(found) = find_recursive(&mut module.children, id, depth + 1) {
+                    return Some(found);
+                }
             }
+            None
         }
-        None
+        find_recursive(modules, id, 0)
     }
 
     /// Insert a child module into a parent module
@@ -627,16 +637,28 @@ impl AstRoot {
     }
 
     fn insert_child_in_vec(modules: &mut [ModuleNode], parent_id: &str, child: ModuleNode) -> bool {
-        for module in modules {
-            if module.id == parent_id {
-                module.children.push(child);
-                return true;
+        const MAX_DEPTH: usize = 1000;
+        fn insert_recursive(
+            modules: &mut [ModuleNode],
+            parent_id: &str,
+            child: &ModuleNode,
+            depth: usize,
+        ) -> bool {
+            if depth >= MAX_DEPTH {
+                return false;
             }
-            if Self::insert_child_in_vec(&mut module.children, parent_id, child.clone()) {
-                return true;
+            for module in modules {
+                if module.id == parent_id {
+                    module.children.push(child.clone());
+                    return true;
+                }
+                if insert_recursive(&mut module.children, parent_id, child, depth + 1) {
+                    return true;
+                }
             }
+            false
         }
-        false
+        insert_recursive(modules, parent_id, &child, 0)
     }
 
     /// Delete a node and all its children
@@ -646,20 +668,27 @@ impl AstRoot {
     }
 
     fn delete_node_in_vec(modules: &mut Vec<ModuleNode>, id: &str) -> bool {
-        for i in (0..modules.len()).rev() {
-            if modules[i].id == id {
-                modules.remove(i);
-                return true;
+        const MAX_DEPTH: usize = 1000;
+        fn delete_recursive(modules: &mut Vec<ModuleNode>, id: &str, depth: usize) -> bool {
+            if depth >= MAX_DEPTH {
+                return false;
             }
-        }
-
-        for module in modules {
-            if Self::delete_node_in_vec(&mut module.children, id) {
-                return true;
+            for i in (0..modules.len()).rev() {
+                if modules[i].id == id {
+                    modules.remove(i);
+                    return true;
+                }
             }
-        }
 
-        false
+            for module in modules {
+                if delete_recursive(&mut module.children, id, depth + 1) {
+                    return true;
+                }
+            }
+
+            false
+        }
+        delete_recursive(modules, id, 0)
     }
 
     /// Add a function definition
