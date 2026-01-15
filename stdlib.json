@@ -186,6 +186,19 @@
       "parameters": []
     },
     {
+      "name": "children",
+      "description": "Access children of a custom module. Can only be used inside module definitions.",
+      "accepts_children": false,
+      "parameters": [
+        {
+          "name": "index",
+          "param_type": "any",
+          "default": null,
+          "description": "Optional index or range to select specific children (e.g., 0, [0:2])"
+        }
+      ]
+    },
+    {
       "name": "render",
       "description": "Force rendering of children",
       "accepts_children": true,

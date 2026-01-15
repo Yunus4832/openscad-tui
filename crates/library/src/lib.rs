@@ -144,6 +144,19 @@ impl LibraryManager {
         self.custom_modules.insert(module.name.clone(), module);
     }
 
+    /// Check if module body contains a children module
+    fn contains_children_module(modules: &[openscad_core::ModuleNode]) -> bool {
+        for module in modules {
+            if module.name == "children" {
+                return true;
+            }
+            if Self::contains_children_module(&module.children) {
+                return true;
+            }
+        }
+        false
+    }
+
     /// Reload custom modules from AST module definitions
     pub fn reload_custom_modules_from_ast(
         &mut self,
@@ -161,11 +174,12 @@ impl LibraryManager {
                     description: None,
                 })
                 .collect();
+            let accepts_children = Self::contains_children_module(&module_def.body);
             let module = ModuleDef {
                 name: module_def.name.clone(),
                 description: Some(format!("User-defined module: {}", module_def.name)),
                 parameters: params,
-                accepts_children: false, // Custom modules cannot accept children at call time
+                accepts_children, // Custom modules accept children if they contain a children module
             };
             self.custom_modules.insert(module_def.name.clone(), module);
         }

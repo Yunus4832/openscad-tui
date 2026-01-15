@@ -116,6 +116,13 @@ pub fn cmd_insert(
             false
         };
 
+        // Children module can only be used inside module definitions
+        if module_name == "children" && !in_module_def {
+            return Err(CommandError::InvalidCommand(
+                "children module can only be used inside module definitions".to_string(),
+            ));
+        }
+
         // Special case: inserting a module with the same name as the module definition when selected is the definition header
         // This should create an instance in the modules section, not add to definition body
         if in_module_def {
@@ -201,6 +208,12 @@ pub fn cmd_insert(
                 .borrow_mut()
                 .select(vec![section.to_string(), node_id.clone()]);
             app.tree_state.borrow_mut().open(vec![section.to_string()]);
+        }
+
+        // If we inserted a children module into a module definition, update the custom module's accepts_children flag
+        if module_name == "children" && in_module_def {
+            app.library
+                .reload_custom_modules_from_ast(&app.ast.module_defines);
         }
 
         Ok(node_id)
@@ -570,6 +583,19 @@ fn find_node_in_module_definition<'a>(
         }
     }
     None
+}
+
+/// Check if module definition body contains a children module
+fn contains_children_module(modules: &[openscad_core::ModuleNode]) -> bool {
+    for module in modules {
+        if module.name == "children" {
+            return true;
+        }
+        if contains_children_module(&module.children) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Find a mutable node in module definition body
@@ -1040,6 +1066,9 @@ pub fn cmd_moddef(
     // Clear selection after copying
     app.selected_nodes.clear();
 
+    // Determine if module accepts children (contains a children module in its body)
+    let accepts_children = contains_children_module(&children);
+
     // Create ModuleDefinition for AST
     let module_def = ModuleDefinition::new(module_name.to_string(), parameters.clone(), children);
 
@@ -1065,7 +1094,7 @@ pub fn cmd_moddef(
         name: module_name.to_string(),
         description: Some(format!("User-defined module: {}", module_name)),
         parameters: library_params,
-        accepts_children: false, // Custom modules cannot accept children at call time
+        accepts_children, // Custom modules accept children if they contain a children module
     };
 
     // Add to library manager
@@ -1627,5 +1656,64 @@ mod tests {
             app.tree_state.borrow().selected().last(),
             Some(&container_id)
         );
+    }
+
+    #[test]
+    fn test_cmd_moddef_with_children_module() {
+        use crate::app::App;
+
+        let mut app = App::new();
+
+        // Create a custom module definition without children module initially
+        cmd_moddef(&mut app, "my_module", None).unwrap();
+
+        // Initially, the module should not accept children
+        let module = app.library.get_module("my_module").unwrap();
+        assert!(!module.accepts_children);
+
+        // Clear selection and navigate to module definition body
+        app.tree_state.borrow_mut().select(vec![
+            "__moddefs".to_string(),
+            "__moddef_my_module".to_string(),
+        ]);
+
+        // Insert a children module into the module definition body
+        let result = cmd_insert(&mut app, "children", None, None);
+        assert!(
+            result.is_ok(),
+            "children module should be insertable into module definition"
+        );
+
+        // After inserting children module, the custom module should accept children
+        // Note: The library manager should have been updated via reload_custom_modules_from_ast
+        let module = app.library.get_module("my_module").unwrap();
+        assert!(
+            module.accepts_children,
+            "module with children module should accept children"
+        );
+    }
+
+    #[test]
+    fn test_cmd_insert_children_outside_module_definition_fails() {
+        use crate::app::App;
+
+        let mut app = App::new();
+
+        // Try to insert children module outside module definition (in modules section)
+        // Ensure no module definition is selected
+        app.tree_state.borrow_mut().select(Vec::new());
+
+        let result = cmd_insert(&mut app, "children", None, None);
+        assert!(
+            result.is_err(),
+            "children module should not be insertable outside module definitions"
+        );
+        let err = result.unwrap_err();
+        assert!(matches!(err, CommandError::InvalidCommand(_)));
+        let err_msg = match err {
+            CommandError::InvalidCommand(msg) => msg,
+            _ => panic!("Unexpected error type"),
+        };
+        assert!(err_msg.contains("children module can only be used inside module definitions"));
     }
 }
