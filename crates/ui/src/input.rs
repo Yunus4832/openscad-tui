@@ -381,6 +381,29 @@ fn execute_command(app: &mut App, cmd: &str) {
             }
         }
 
+        // funcdef <function_name> [params=body]
+        Some(&"funcdef") => {
+            if parts.len() < 2 {
+                app.set_error("Usage: funcdef <function_name> [(param1, param2, ...)=expression]");
+                app.input_mode = InputMode::Normal;
+                return;
+            }
+            let func_name = parts[1];
+            let params_body = if parts.len() > 2 {
+                Some(parts[2..].join(" "))
+            } else {
+                None
+            };
+            app.push_undo();
+            match commands::cmd_funcdef(app, func_name, params_body.as_deref()) {
+                Ok(_) => {
+                    app.update_navigation_status();
+                    app.set_info(&format!("Function '{}' defined", func_name));
+                }
+                Err(e) => app.set_error(&e.to_string()),
+            }
+        }
+
         // moddef <module_name> [params]
         Some(&"moddef") => {
             if parts.len() < 2 {

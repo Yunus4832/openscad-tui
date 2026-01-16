@@ -914,6 +914,93 @@ fn is_valid_identifier(name: &str) -> bool {
     name.chars().all(|c| c.is_alphanumeric() || c == '_')
 }
 
+/// Define a new custom function
+/// Syntax: funcdef <function_name>(param1, param2, ...) = expression
+/// Example: funcdef square(x) = x * x
+///          funcdef add(a, b) = a + b
+pub fn cmd_funcdef(
+    app: &mut crate::app::App,
+    func_name: &str,
+    params_body: Option<&str>,
+) -> CommandResult<()> {
+    use openscad_core::{Expr, FunctionDefinition, Parameter};
+
+    let (parameters, body_expr) = if let Some(params_body_str) = params_body {
+        // Parse parameters and body from format like "x, y = x + y"
+        let equals_pos = params_body_str.find('=');
+
+        if let Some(pos) = equals_pos {
+            let params_part = params_body_str[..pos].trim();
+            let body_part = params_body_str[pos + 1..].trim();
+
+            // Parse parameters
+            let parameters = if params_part.is_empty() {
+                Vec::new()
+            } else {
+                // Split parameters by comma
+                let param_names: Vec<&str> = params_part.split(',').map(|s| s.trim()).collect();
+                let mut params = Vec::new();
+                for param_name in param_names {
+                    if !param_name.is_empty() {
+                        params.push(Parameter::new(param_name.to_string()));
+                    }
+                }
+                params
+            };
+
+            // Parse body expression
+            let body = Expr::parse(body_part).map_err(|e| {
+                CommandError::ParameterError(format!(
+                    "Invalid function body expression: {} - {}",
+                    body_part, e
+                ))
+            })?;
+
+            (parameters, body)
+        } else {
+            // If no equals sign, treat the whole string as the body with no parameters
+            let body = Expr::parse(params_body_str).map_err(|e| {
+                CommandError::ParameterError(format!(
+                    "Invalid function body expression: {} - {}",
+                    params_body_str, e
+                ))
+            })?;
+            (Vec::new(), body)
+        }
+    } else {
+        // No parameters or body provided, create function with empty body (placeholder)
+        let body = Expr::Integer(0); // Placeholder value
+        (Vec::new(), body)
+    };
+
+    // Validate function name
+    if !is_valid_identifier(func_name) {
+        return Err(CommandError::InvalidCommand(format!(
+            "Invalid function name: {}",
+            func_name
+        )));
+    }
+
+    // Check if function with this name already exists
+    if app.ast.find_function_define(func_name).is_some() {
+        return Err(CommandError::InvalidCommand(format!(
+            "Function '{}' already defined",
+            func_name
+        )));
+    }
+
+    // Create FunctionDefinition for AST
+    let function_def =
+        FunctionDefinition::new(func_name.to_string(), parameters.clone(), body_expr);
+
+    // Add to AST
+    app.ast_mut()
+        .add_function_define(function_def)
+        .map_err(CommandError::AstError)?;
+
+    Ok(())
+}
+
 /// Quit app command
 #[allow(dead_code)]
 pub fn cmd_quit(app: &mut crate::app::App) -> CommandResult<()> {
@@ -1989,5 +2076,106 @@ mod tests {
             panic!("Expected float expression");
         }
         assert!(!var.is_special);
+    }
+
+    #[test]
+    fn test_cmd_funcdef_basic() {
+        use crate::app::App;
+
+        let mut app = App::new();
+
+        // Create a function definition with one parameter
+        let result = cmd_funcdef(&mut app, "square", Some("x = 10"));
+        assert!(result.is_ok(), "cmd_funcdef should succeed");
+
+        // Check that function was added to AST
+        assert_eq!(app.ast.function_defines.len(), 1);
+        let func_def = &app.ast.function_defines[0];
+        assert_eq!(func_def.name, "square");
+        assert_eq!(func_def.parameters.len(), 1);
+        assert_eq!(func_def.parameters[0].name, "x");
+    }
+
+    #[test]
+    fn test_cmd_funcdef_no_params() {
+        use crate::app::App;
+
+        let mut app = App::new();
+
+        // Create a function definition without parameters
+        let result = cmd_funcdef(&mut app, "pi_value", Some("= 3.14159"));
+        assert!(result.is_ok(), "cmd_funcdef should succeed");
+
+        // Check that function was added to AST
+        assert_eq!(app.ast.function_defines.len(), 1);
+        let func_def = &app.ast.function_defines[0];
+        assert_eq!(func_def.name, "pi_value");
+        assert_eq!(func_def.parameters.len(), 0);
+        // Verify the body is the constant value
+    }
+
+    #[test]
+    fn test_cmd_funcdef_multiple_params() {
+        use crate::app::App;
+
+        let mut app = App::new();
+
+        // Create a function definition with multiple parameters
+        let result = cmd_funcdef(&mut app, "add", Some("a, b = 15"));
+        assert!(result.is_ok(), "cmd_funcdef should succeed");
+
+        // Check that function was added to AST
+        assert_eq!(app.ast.function_defines.len(), 1);
+        let func_def = &app.ast.function_defines[0];
+        assert_eq!(func_def.name, "add");
+        assert_eq!(func_def.parameters.len(), 2);
+        assert_eq!(func_def.parameters[0].name, "a");
+        assert_eq!(func_def.parameters[1].name, "b");
+    }
+
+    #[test]
+    fn test_cmd_funcdef_duplicate_name() {
+        use crate::app::App;
+
+        let mut app = App::new();
+
+        // First function definition should succeed
+        let result = cmd_funcdef(&mut app, "my_func", Some("x = 10"));
+        assert!(result.is_ok());
+
+        // Second function definition with same name should fail
+        let result = cmd_funcdef(&mut app, "my_func", Some("y = 20"));
+        assert!(result.is_err());
+
+        // Verify only one function in AST
+        assert_eq!(app.ast.function_defines.len(), 1);
+    }
+
+    #[test]
+    fn test_cmd_funcdef_invalid_syntax() {
+        use crate::app::App;
+
+        let mut app = App::new();
+
+        // Test invalid expression in function body
+        let result = cmd_funcdef(&mut app, "bad_func", Some("x = x + "));
+        assert!(result.is_err());
+
+        // Check that no functions were added to AST
+        assert_eq!(app.ast.function_defines.len(), 0);
+    }
+
+    #[test]
+    fn test_cmd_funcdef_invalid_name() {
+        use crate::app::App;
+
+        let mut app = App::new();
+
+        // Test invalid function name (starts with number)
+        let result = cmd_funcdef(&mut app, "123func", Some("x = x * x"));
+        assert!(result.is_err());
+
+        // Check that no functions were added to AST
+        assert_eq!(app.ast.function_defines.len(), 0);
     }
 }
