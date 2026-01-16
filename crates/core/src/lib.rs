@@ -552,6 +552,9 @@ pub struct AstRoot {
 
     /// Used libraries
     pub uses: Vec<String>,
+
+    /// Loaded library files (JSON files that were used to load modules)
+    pub loaded_libraries: Vec<String>,
 }
 
 impl AstRoot {
@@ -564,6 +567,7 @@ impl AstRoot {
             modules: Vec::new(),
             includes: Vec::new(),
             uses: Vec::new(),
+            loaded_libraries: Vec::new(),
         }
     }
 

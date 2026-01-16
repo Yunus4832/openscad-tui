@@ -791,9 +791,23 @@ pub fn cmd_load(app: &mut crate::app::App, filename: &str) -> CommandResult<()> 
     // Replace AST
     app.ast = Arc::new(ast);
 
-    // Reload custom modules in library manager
+    // First, reload custom modules in library manager
     app.library
         .reload_custom_modules_from_ast(&app.ast.module_defines);
+
+    // Reload libraries that were used in the project
+    for library_file in &app.ast.loaded_libraries {
+        let path = Path::new(library_file);
+        if path.exists() {
+            if let Err(e) = app.library.load_library(path) {
+                // Log warning but continue loading other libraries
+                eprintln!("Warning: Could not load library '{}': {}", library_file, e);
+            }
+        } else {
+            // Library file doesn't exist anymore
+            eprintln!("Warning: Library file '{}' no longer exists", library_file);
+        }
+    }
 
     // Reset navigation state
     app.selected_nodes.clear();
@@ -838,6 +852,24 @@ pub fn cmd_load_library(app: &mut crate::app::App, filename: &str) -> CommandRes
 
     // Load library
     app.library.load_library(path)?;
+
+    // Read the library file to get the 'file' property
+    let library_content = std::fs::read_to_string(path).map_err(|e| {
+        CommandError::Custom(format!("Could not read library file '{}': {}", filename, e))
+    })?;
+
+    if let Ok(library_def) = serde_json::from_str::<openscad_library::LibraryDef>(&library_content)
+    {
+        // Add the .scad file to includes so it's available when modules from this library are used
+        if !app.ast.includes.contains(&library_def.file) {
+            app.ast_mut().includes.push(library_def.file);
+        }
+    }
+
+    // Record the library JSON file in the AST so it can be reloaded when the project is opened
+    if !app.ast.loaded_libraries.contains(&filename.to_string()) {
+        app.ast_mut().loaded_libraries.push(filename.to_string());
+    }
 
     Ok(())
 }
