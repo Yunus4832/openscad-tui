@@ -842,6 +842,78 @@ pub fn cmd_load_library(app: &mut crate::app::App, filename: &str) -> CommandRes
     Ok(())
 }
 
+/// Define a global variable
+/// Syntax: global <var_name>=<value>
+/// Example: global width=100
+///          global size=[10,20,30]
+///          global $fn=50  (special variable)
+pub fn cmd_global(app: &mut crate::app::App, var_spec: &str) -> CommandResult<()> {
+    use openscad_core::GlobalVariable;
+
+    let var_spec = var_spec.trim();
+
+    // Find the equals sign to separate name and value
+    let equals_pos = var_spec.find('=');
+
+    if equals_pos.is_none() {
+        return Err(CommandError::InvalidCommand(
+            "Invalid global variable syntax. Use: global <name>=<value>".to_string(),
+        ));
+    }
+
+    let pos = equals_pos.unwrap();
+    let name_part = var_spec[..pos].trim();
+    let value_part = var_spec[pos + 1..].trim();
+
+    // Check if this is a special variable (starts with $)
+    let (name, is_special) = if let Some(stripped) = name_part.strip_prefix('$') {
+        (stripped, true)
+    } else {
+        (name_part, false)
+    };
+
+    // Validate identifier
+    if !is_valid_identifier(name) {
+        return Err(CommandError::InvalidCommand(format!(
+            "Invalid variable name: {}",
+            name
+        )));
+    }
+
+    // Parse the value
+    let value = openscad_core::Expr::parse(value_part).map_err(|e| {
+        CommandError::ParameterError(format!("Invalid value expression: {} - {}", value_part, e))
+    })?;
+
+    // Create global variable
+    let global_var = if is_special {
+        GlobalVariable::new_special(name.to_string(), value)
+    } else {
+        GlobalVariable::new(name.to_string(), value)
+    };
+
+    // Add to AST
+    app.ast_mut()
+        .add_global_variable(global_var)
+        .map_err(CommandError::AstError)?;
+
+    Ok(())
+}
+
+/// Helper function to validate identifier names
+fn is_valid_identifier(name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+
+    let first = name.chars().next().unwrap();
+    if !first.is_alphabetic() && first != '_' {
+        return false;
+    }
+
+    name.chars().all(|c| c.is_alphanumeric() || c == '_')
+}
+
 /// Quit app command
 #[allow(dead_code)]
 pub fn cmd_quit(app: &mut crate::app::App) -> CommandResult<()> {
@@ -1751,5 +1823,171 @@ mod tests {
             _ => panic!("Unexpected error type"),
         };
         assert!(err_msg.contains("children module can only be used inside module definitions"));
+    }
+
+    #[test]
+    fn test_cmd_global_basic() {
+        use crate::app::App;
+
+        let mut app = App::new();
+
+        // Test basic variable assignment
+        let result = cmd_global(&mut app, "width=100");
+        assert!(result.is_ok(), "cmd_global should succeed");
+
+        // Check that variable was added to AST
+        assert_eq!(app.ast.global_variables().len(), 1);
+        let var = &app.ast.global_variables()[0];
+        assert_eq!(var.name, "width");
+        assert_eq!(var.value, openscad_core::Expr::Integer(100));
+        assert!(!var.is_special);
+    }
+
+    #[test]
+    fn test_cmd_global_special() {
+        use crate::app::App;
+
+        let mut app = App::new();
+
+        // Test special variable assignment
+        let result = cmd_global(&mut app, "$fn=50");
+        assert!(
+            result.is_ok(),
+            "cmd_global should succeed with special variable"
+        );
+
+        // Check that special variable was added to AST
+        assert_eq!(app.ast.global_variables().len(), 1);
+        let var = &app.ast.global_variables()[0];
+        assert_eq!(var.name, "fn");
+        assert_eq!(var.value, openscad_core::Expr::Integer(50));
+        assert!(var.is_special);
+    }
+
+    #[test]
+    fn test_cmd_global_with_list() {
+        use crate::app::App;
+
+        let mut app = App::new();
+
+        // Test variable with list value
+        let result = cmd_global(&mut app, "size=[10,20,30]");
+        assert!(result.is_ok(), "cmd_global should succeed with list value");
+
+        // Check that variable was added to AST
+        assert_eq!(app.ast.global_variables().len(), 1);
+        let var = &app.ast.global_variables()[0];
+        assert_eq!(var.name, "size");
+        assert!(!var.is_special);
+
+        // Check that value is a list
+        if let openscad_core::Expr::List(items) = &var.value {
+            assert_eq!(items.len(), 3);
+            assert_eq!(items[0], openscad_core::Expr::Integer(10));
+            assert_eq!(items[1], openscad_core::Expr::Integer(20));
+            assert_eq!(items[2], openscad_core::Expr::Integer(30));
+        } else {
+            panic!("Expected list expression");
+        }
+    }
+
+    #[test]
+    fn test_cmd_global_invalid_syntax() {
+        use crate::app::App;
+
+        let mut app = App::new();
+
+        // Test invalid syntax (no equals)
+        let result = cmd_global(&mut app, "width100");
+        assert!(
+            result.is_err(),
+            "cmd_global should fail with invalid syntax"
+        );
+
+        // Check that no variables were added to AST
+        assert_eq!(app.ast.global_variables().len(), 0);
+    }
+
+    #[test]
+    fn test_cmd_global_invalid_identifier() {
+        use crate::app::App;
+
+        let mut app = App::new();
+
+        // Test invalid identifier (starts with number)
+        let result = cmd_global(&mut app, "123width=100");
+        assert!(
+            result.is_err(),
+            "cmd_global should fail with invalid identifier"
+        );
+
+        // Check that no variables were added to AST
+        assert_eq!(app.ast.global_variables().len(), 0);
+    }
+
+    #[test]
+    fn test_cmd_global_duplicate() {
+        use crate::app::App;
+
+        let mut app = App::new();
+
+        // Add first variable
+        let result = cmd_global(&mut app, "width=100");
+        assert!(result.is_ok(), "First cmd_global should succeed");
+
+        // Try to add duplicate
+        let result = cmd_global(&mut app, "width=200");
+        assert!(
+            result.is_err(),
+            "Second cmd_global with same name should fail"
+        );
+
+        // Check that only one variable was added to AST
+        assert_eq!(app.ast.global_variables().len(), 1);
+    }
+
+    #[test]
+    fn test_cmd_global_string_value() {
+        use crate::app::App;
+
+        let mut app = App::new();
+
+        // Test variable with string value
+        let result = cmd_global(&mut app, "color=\"red\"");
+        assert!(
+            result.is_ok(),
+            "cmd_global should succeed with string value"
+        );
+
+        // Check that variable was added to AST
+        assert_eq!(app.ast.global_variables().len(), 1);
+        let var = &app.ast.global_variables()[0];
+        assert_eq!(var.name, "color");
+        assert_eq!(var.value, openscad_core::Expr::String("red".to_string()));
+        assert!(!var.is_special);
+    }
+
+    #[test]
+    fn test_cmd_global_float_value() {
+        use crate::app::App;
+
+        let mut app = App::new();
+
+        // Test variable with float value
+        let result = cmd_global(&mut app, "precision=3.14");
+        assert!(result.is_ok(), "cmd_global should succeed with float value");
+
+        // Check that variable was added to AST
+        assert_eq!(app.ast.global_variables().len(), 1);
+        let var = &app.ast.global_variables()[0];
+        assert_eq!(var.name, "precision");
+
+        // Compare floats by converting to string representation
+        if let openscad_core::Expr::Float(f) = var.value {
+            assert!((f - 3.14).abs() < 0.001);
+        } else {
+            panic!("Expected float expression");
+        }
+        assert!(!var.is_special);
     }
 }

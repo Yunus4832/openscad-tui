@@ -661,6 +661,27 @@ fn execute_command(app: &mut App, cmd: &str) {
             }
         }
 
+        // global <var_name>=<value> - define a global variable
+        Some(&"global") => {
+            if parts.len() < 2 {
+                app.set_error("Usage: global <name>=<value>");
+                app.input_mode = InputMode::Normal;
+                return;
+            }
+            let var_spec = parts[1];
+            app.push_undo();
+            match commands::cmd_global(app, var_spec) {
+                Ok(_) => {
+                    app.update_navigation_status();
+                    app.set_info(&format!(
+                        "Global variable '{}' defined",
+                        var_spec.split('=').next().unwrap_or("<invalid>")
+                    ));
+                }
+                Err(e) => app.set_error(&e.to_string()),
+            }
+        }
+
         _ => {
             app.set_error(&format!(
                 "Unknown command: '{}'. Type 'help' for commands.",
