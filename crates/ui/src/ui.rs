@@ -90,7 +90,7 @@ fn build_ast_tree_items(
             .enumerate()
             .map(|(i, inc)| {
                 let id = format!("__include_{}", i);
-                TreeItem::new(id, format!("  {}", inc), vec![]).expect("Failed to create TreeItem")
+                TreeItem::new(id, format!("{}", inc), vec![]).expect("Failed to create TreeItem")
             })
             .collect();
         items.push(
@@ -111,7 +111,7 @@ fn build_ast_tree_items(
             .enumerate()
             .map(|(i, u)| {
                 let id = format!("__use_{}", i);
-                TreeItem::new(id, format!("  {}", u), vec![]).expect("Failed to create TreeItem")
+                TreeItem::new(id, format!("{}", u), vec![]).expect("Failed to create TreeItem")
             })
             .collect();
         items.push(
@@ -132,9 +132,9 @@ fn build_ast_tree_items(
                     var.name
                 );
                 let display = if var.is_special {
-                    format!("  ${} = {}", var.name, var.value.to_scad())
+                    format!("${} = {}", var.name, var.value.to_scad())
                 } else {
-                    format!("  {} = {}", var.name, var.value.to_scad())
+                    format!("{} = {}", var.name, var.value.to_scad())
                 };
                 TreeItem::new(id, display, vec![]).expect("Failed to create TreeItem")
             })
@@ -162,7 +162,7 @@ fn build_ast_tree_items(
                     .map(|p| p.to_scad())
                     .collect::<Vec<_>>()
                     .join(", ");
-                let display = format!("  function {}({})", func.name, params);
+                let display = format!("function {}({})", func.name, params);
                 TreeItem::new(id, display, vec![]).expect("Failed to create TreeItem")
             })
             .collect();
@@ -189,7 +189,7 @@ fn build_ast_tree_items(
                     .map(|p| p.to_scad())
                     .collect::<Vec<_>>()
                     .join(", ");
-                let display = format!("  module {}({})", mod_def.name, params);
+                let display = format!("module {}({})", mod_def.name, params);
                 // Build children from module definition body
                 let body_children = build_tree_items(&mod_def.body, selected);
                 TreeItem::new(id, display, body_children).expect("Failed to create TreeItem")
@@ -240,10 +240,10 @@ fn build_tree_item(
     let marker = if selected.contains(&module.id) {
         "*"
     } else {
-        " "
+        ""
     };
 
-    let text = format!("{} {}", marker, module.get_display_name());
+    let text = format!("{}{}", marker, module.get_display_name());
     let id = module.id.clone();
 
     let children: Vec<TreeItem<String>> = module
