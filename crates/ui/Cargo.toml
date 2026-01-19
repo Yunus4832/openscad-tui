@@ -13,6 +13,7 @@ serde_json.workspace = true
 thiserror.workspace = true
 unicode-width.workspace = true
 tui-tree-widget.workspace = true
+dirs.workspace = true
 openscad-core = { path = "../core" }
 openscad-library = { path = "../library" }
 

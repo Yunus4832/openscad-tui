@@ -3,7 +3,7 @@
 use openscad_core::{Argument, AstError, Expr, ModuleNode};
 use openscad_library::{LibraryError, ModuleDef};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use thiserror::Error;
 
@@ -752,11 +752,18 @@ fn split_parameters(input: &str) -> CommandResult<Vec<String>> {
 
 /// Save AST to JSON file
 pub fn cmd_write(app: &crate::app::App, filename: &str) -> CommandResult<()> {
+    // Expand tilde in filename
+    let expanded_filepath = expand_tilde(filename);
+
     // Ensure filename ends with .json
-    let filepath = if !filename.ends_with(".json") {
-        format!("{}.json", filename)
+    let filepath = if !expanded_filepath
+        .extension()
+        .map(|ext| ext == "json")
+        .unwrap_or(false)
+    {
+        expanded_filepath.with_extension("json")
     } else {
-        filename.to_string()
+        expanded_filepath
     };
 
     // Serialize AST to JSON
@@ -764,25 +771,38 @@ pub fn cmd_write(app: &crate::app::App, filename: &str) -> CommandResult<()> {
         .map_err(|e| CommandError::Custom(format!("Failed to serialize AST: {}", e)))?;
 
     // Write to file
-    fs::write(&filepath, json)
-        .map_err(|e| CommandError::Custom(format!("Failed to write file '{}': {}", filepath, e)))?;
+    fs::write(&filepath, json).map_err(|e| {
+        CommandError::Custom(format!(
+            "Failed to write file '{}': {}",
+            filepath.display(),
+            e
+        ))
+    })?;
 
     Ok(())
 }
 
 /// Load AST from JSON file
 pub fn cmd_load(app: &mut crate::app::App, filename: &str) -> CommandResult<()> {
+    // Expand tilde in filename
+    let expanded_filename = expand_tilde(filename);
+
     // Check file exists
-    if !Path::new(filename).exists() {
+    if !expanded_filename.exists() {
         return Err(CommandError::Custom(format!(
             "File '{}' not found",
-            filename
+            expanded_filename.display()
         )));
     }
 
     // Read file
-    let content = fs::read_to_string(filename)
-        .map_err(|e| CommandError::Custom(format!("Failed to read file '{}': {}", filename, e)))?;
+    let content = fs::read_to_string(&expanded_filename).map_err(|e| {
+        CommandError::Custom(format!(
+            "Failed to read file '{}': {}",
+            expanded_filename.display(),
+            e
+        ))
+    })?;
 
     // Deserialize from JSON
     let ast = serde_json::from_str(&content)
@@ -797,9 +817,9 @@ pub fn cmd_load(app: &mut crate::app::App, filename: &str) -> CommandResult<()> 
 
     // Reload libraries that were used in the project
     for library_file in &app.ast.loaded_libraries {
-        let path = Path::new(library_file);
-        if path.exists() {
-            if let Err(e) = app.library.load_library(path) {
+        let expanded_path = expand_tilde(library_file);
+        if expanded_path.exists() {
+            if let Err(e) = app.library.load_library(&expanded_path) {
                 // Log warning but continue loading other libraries
                 eprintln!("Warning: Could not load library '{}': {}", library_file, e);
             }
@@ -818,19 +838,31 @@ pub fn cmd_load(app: &mut crate::app::App, filename: &str) -> CommandResult<()> 
 
 /// Export AST to OpenSCAD code file
 pub fn cmd_export(app: &crate::app::App, filename: &str) -> CommandResult<()> {
+    // Expand tilde in filename
+    let expanded_filepath = expand_tilde(filename);
+
     // Ensure filename ends with .scad
-    let filepath = if !filename.ends_with(".scad") {
-        format!("{}.scad", filename)
+    let filepath = if !expanded_filepath
+        .extension()
+        .map(|ext| ext == "scad")
+        .unwrap_or(false)
+    {
+        expanded_filepath.with_extension("scad")
     } else {
-        filename.to_string()
+        expanded_filepath
     };
 
     // Generate OpenSCAD code
     let code = app.ast.to_scad();
 
     // Write to file
-    fs::write(&filepath, code)
-        .map_err(|e| CommandError::Custom(format!("Failed to write file '{}': {}", filepath, e)))?;
+    fs::write(&filepath, code).map_err(|e| {
+        CommandError::Custom(format!(
+            "Failed to write file '{}': {}",
+            filepath.display(),
+            e
+        ))
+    })?;
 
     Ok(())
 }
@@ -839,23 +871,27 @@ pub fn cmd_export(app: &crate::app::App, filename: &str) -> CommandResult<()> {
 /// This command loads third-party module libraries into the LibraryManager
 /// Libraries should be in JSON format with the same schema as stdlib.json
 pub fn cmd_load_library(app: &mut crate::app::App, filename: &str) -> CommandResult<()> {
-    use std::path::Path;
+    // Expand tilde in filename
+    let expanded_path = expand_tilde(filename);
 
     // Check if file exists
-    let path = Path::new(filename);
-    if !path.exists() {
+    if !expanded_path.exists() {
         return Err(CommandError::Custom(format!(
             "Library file '{}' not found",
-            filename
+            expanded_path.display()
         )));
     }
 
     // Load library
-    app.library.load_library(path)?;
+    app.library.load_library(&expanded_path)?;
 
     // Read the library file to get the 'file' property
-    let library_content = std::fs::read_to_string(path).map_err(|e| {
-        CommandError::Custom(format!("Could not read library file '{}': {}", filename, e))
+    let library_content = std::fs::read_to_string(&expanded_path).map_err(|e| {
+        CommandError::Custom(format!(
+            "Could not read library file '{}': {}",
+            expanded_path.display(),
+            e
+        ))
     })?;
 
     if let Ok(library_def) = serde_json::from_str::<openscad_library::LibraryDef>(&library_content)
@@ -1059,6 +1095,31 @@ pub fn cmd_redo(app: &mut crate::app::App) -> CommandResult<()> {
 pub fn cmd_help(app: &mut crate::app::App) -> CommandResult<()> {
     app.input_mode = crate::app::InputMode::Help;
     Ok(())
+}
+
+/// Expand tilde (~) in file paths to the user's home directory
+fn expand_tilde<P: AsRef<Path>>(path: P) -> PathBuf {
+    let path = path.as_ref();
+
+    if path.starts_with("~") {
+        if let Some(home) = dirs::home_dir() {
+            // Replace ~ with home directory
+            let mut expanded = PathBuf::from(home);
+            if path.components().count() > 1 {
+                // Add remaining components after ~
+                for component in path.components().skip(1) {
+                    expanded.push(component);
+                }
+            }
+            expanded
+        } else {
+            // If no home directory found, return original path
+            path.to_path_buf()
+        }
+    } else {
+        // If path doesn't start with ~, return as-is
+        path.to_path_buf()
+    }
 }
 
 /// Define a new custom module
