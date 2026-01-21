@@ -1104,7 +1104,7 @@ fn expand_tilde<P: AsRef<Path>>(path: P) -> PathBuf {
     if path.starts_with("~") {
         if let Some(home) = dirs::home_dir() {
             // Replace ~ with home directory
-            let mut expanded = PathBuf::from(home);
+            let mut expanded = home;
             if path.components().count() > 1 {
                 // Add remaining components after ~
                 for component in path.components().skip(1) {
@@ -1459,6 +1459,732 @@ fn contains_children_module(nodes: &[openscad_core::ModuleNode]) -> bool {
     }
 
     false
+}
+
+/// Initialize the command registry with all available commands
+pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegistry) {
+    use crate::command_registry::CommandDef;
+
+    // Navigation commands (no arguments)
+    registry.register(CommandDef::new(
+        "next",
+        vec!["j", "down"],
+        |app, args| {
+            if !args.is_empty() {
+                return Err(CommandError::InvalidCommand(
+                    "next command takes no arguments".to_string(),
+                ));
+            }
+            cmd_next(app)
+        },
+        "Move cursor down",
+        0,
+        Some(0),
+        "next",
+        vec!["j", "next"],
+    ));
+
+    registry.register(CommandDef::new(
+        "prev",
+        vec!["k", "up"],
+        |app, args| {
+            if !args.is_empty() {
+                return Err(CommandError::InvalidCommand(
+                    "prev command takes no arguments".to_string(),
+                ));
+            }
+            cmd_prev(app)
+        },
+        "Move cursor up",
+        0,
+        Some(0),
+        "prev",
+        vec!["k", "prev"],
+    ));
+
+    registry.register(CommandDef::new(
+        "collapse",
+        vec!["h", "left"],
+        |app, args| {
+            if !args.is_empty() {
+                return Err(CommandError::InvalidCommand(
+                    "collapse command takes no arguments".to_string(),
+                ));
+            }
+            cmd_collapse(app)
+        },
+        "Collapse node or move left",
+        0,
+        Some(0),
+        "collapse",
+        vec!["h", "collapse"],
+    ));
+
+    registry.register(CommandDef::new(
+        "expand",
+        vec!["l", "right"],
+        |app, args| {
+            if !args.is_empty() {
+                return Err(CommandError::InvalidCommand(
+                    "expand command takes no arguments".to_string(),
+                ));
+            }
+            cmd_expand(app)
+        },
+        "Expand node or move right",
+        0,
+        Some(0),
+        "expand",
+        vec!["l", "expand"],
+    ));
+
+    registry.register(CommandDef::new(
+        "toggle",
+        vec![] as Vec<String>,
+        |app, args| {
+            if !args.is_empty() {
+                return Err(CommandError::InvalidCommand(
+                    "toggle command takes no arguments".to_string(),
+                ));
+            }
+            cmd_toggle(app)
+        },
+        "Toggle node expansion",
+        0,
+        Some(0),
+        "toggle",
+        vec!["toggle"],
+    ));
+
+    // Selection commands
+    registry.register(CommandDef::new(
+        "select",
+        vec!["v"],
+        |app, args| {
+            if !args.is_empty() {
+                return Err(CommandError::InvalidCommand(
+                    "select command takes no arguments".to_string(),
+                ));
+            }
+            cmd_select_toggle(app)
+        },
+        "Select/deselect current node",
+        0,
+        Some(0),
+        "select",
+        vec!["v", "select"],
+    ));
+
+    registry.register(CommandDef::new(
+        "deselect-all",
+        vec!["deselect_all", "clear-selection"],
+        |app, args| {
+            if !args.is_empty() {
+                return Err(CommandError::InvalidCommand(
+                    "deselect-all command takes no arguments".to_string(),
+                ));
+            }
+            cmd_deselect_all(app)
+        },
+        "Clear all selections",
+        0,
+        Some(0),
+        "deselect-all",
+        vec!["deselect-all"],
+    ));
+
+    // Edit commands
+    registry.register(CommandDef::new(
+        "undo",
+        vec!["u"],
+        |app, args| {
+            if !args.is_empty() {
+                return Err(CommandError::InvalidCommand(
+                    "undo command takes no arguments".to_string(),
+                ));
+            }
+            cmd_undo(app)
+        },
+        "Undo last operation",
+        0,
+        Some(0),
+        "undo",
+        vec!["u", "undo"],
+    ));
+
+    registry.register(CommandDef::new(
+        "redo",
+        vec!["r"],
+        |app, args| {
+            if !args.is_empty() {
+                return Err(CommandError::InvalidCommand(
+                    "redo command takes no arguments".to_string(),
+                ));
+            }
+            cmd_redo(app)
+        },
+        "Redo last undone operation",
+        0,
+        Some(0),
+        "redo",
+        vec!["r", "redo"],
+    ));
+
+    registry.register(CommandDef::new(
+        "delete",
+        vec!["d", "dd", "D"],
+        |app, args| {
+            if args.len() > 1 {
+                return Err(CommandError::InvalidCommand(
+                    "delete command takes at most 1 argument".to_string(),
+                ));
+            }
+
+            let node_id = if let Some(id) = args.first() {
+                (*id).to_string()
+            } else {
+                // Use current selection (handled in cmd_delete)
+                String::new()
+            };
+
+            cmd_delete(app, &node_id)
+        },
+        "Delete a node",
+        0,
+        Some(1),
+        "delete [node_id]",
+        vec!["delete", "d cube_1", "dd", "D"],
+    ));
+
+    // File operations
+    registry.register(CommandDef::new(
+        "write",
+        vec!["save", "w"],
+        |app, args| {
+            if args.len() != 1 {
+                return Err(CommandError::InvalidCommand(
+                    "write command requires a filename".to_string(),
+                ));
+            }
+            cmd_write(app, args[0])
+        },
+        "Save AST to JSON file",
+        1,
+        Some(1),
+        "write <filename>",
+        vec!["write test.json", "save project.json"],
+    ));
+
+    registry.register(CommandDef::new(
+        "edit",
+        vec!["e"],
+        |app, args| {
+            if args.len() != 1 {
+                return Err(CommandError::InvalidCommand(
+                    "edit command requires a filename".to_string(),
+                ));
+            }
+            cmd_load(app, args[0])
+        },
+        "Load AST from JSON file",
+        1,
+        Some(1),
+        "edit <filename>",
+        vec!["edit test.json", "e project.json"],
+    ));
+
+    registry.register(CommandDef::new(
+        "export",
+        vec![] as Vec<String>,
+        |app, args| {
+            if args.len() != 1 {
+                return Err(CommandError::InvalidCommand(
+                    "export command requires a filename".to_string(),
+                ));
+            }
+            cmd_export(app, args[0])
+        },
+        "Export AST to OpenSCAD file",
+        1,
+        Some(1),
+        "export <filename>",
+        vec!["export model.scad"],
+    ));
+
+    registry.register(CommandDef::new(
+        "library",
+        vec![] as Vec<String>,
+        |app, args| {
+            if args.len() != 1 {
+                return Err(CommandError::InvalidCommand(
+                    "library command requires a filename".to_string(),
+                ));
+            }
+            cmd_load_library(app, args[0])
+        },
+        "Load a library from JSON file",
+        1,
+        Some(1),
+        "library <filename>",
+        vec!["library mylib.json"],
+    ));
+
+    // System commands
+    registry.register(CommandDef::new(
+        "quit",
+        vec!["q"],
+        |app, args| {
+            if !args.is_empty() {
+                return Err(CommandError::InvalidCommand(
+                    "quit command takes no arguments".to_string(),
+                ));
+            }
+            cmd_quit(app)
+        },
+        "Exit the application",
+        0,
+        Some(0),
+        "quit",
+        vec!["quit", "q"],
+    ));
+
+    registry.register(CommandDef::new(
+        "help",
+        vec!["?"],
+        |app, args| {
+            if args.len() > 1 {
+                return Err(CommandError::InvalidCommand(
+                    "help command takes at most 1 argument".to_string(),
+                ));
+            }
+
+            // TODO: Implement detailed help with argument
+            cmd_help(app)
+        },
+        "Show help",
+        0,
+        Some(1),
+        "help [command]",
+        vec!["help", "help write", "?"],
+    ));
+
+    // Transform commands
+    registry.register(CommandDef::new(
+        "translate",
+        vec![] as Vec<String>,
+        |app, args| {
+            // Check if we have selected nodes
+            if app.selected_nodes.is_empty() {
+                return Err(CommandError::InvalidCommand(
+                    "No nodes selected. Select nodes with 'v' first".to_string(),
+                ));
+            }
+
+            // Get parameters if provided
+            let params = if !args.is_empty() {
+                Some(args.join(" "))
+            } else {
+                None
+            };
+
+            app.push_undo();
+            cmd_insert(app, "translate", None, params.as_deref()).map(|_| {
+                app.set_info("Applied translate to selected nodes");
+                app.update_navigation_status();
+            })
+        },
+        "Apply translate transformation to selected nodes",
+        0,
+        None, // Variable number of parameters (optional)
+        "translate [x,y,z]",
+        vec!["translate", "translate 10,0,0"],
+    ));
+
+    registry.register(CommandDef::new(
+        "rotate",
+        vec![] as Vec<String>,
+        |app, args| {
+            if app.selected_nodes.is_empty() {
+                return Err(CommandError::InvalidCommand(
+                    "No nodes selected. Select nodes with 'v' first".to_string(),
+                ));
+            }
+
+            let params = if !args.is_empty() {
+                Some(args.join(" "))
+            } else {
+                None
+            };
+
+            app.push_undo();
+            cmd_insert(app, "rotate", None, params.as_deref()).map(|_| {
+                app.set_info("Applied rotate to selected nodes");
+                app.update_navigation_status();
+            })
+        },
+        "Apply rotate transformation to selected nodes",
+        0,
+        None,
+        "rotate [a,vx,vy,vz]",
+        vec!["rotate", "rotate 45,0,0,1"],
+    ));
+
+    registry.register(CommandDef::new(
+        "scale",
+        vec![] as Vec<String>,
+        |app, args| {
+            if app.selected_nodes.is_empty() {
+                return Err(CommandError::InvalidCommand(
+                    "No nodes selected. Select nodes with 'v' first".to_string(),
+                ));
+            }
+
+            let params = if !args.is_empty() {
+                Some(args.join(" "))
+            } else {
+                None
+            };
+
+            app.push_undo();
+            cmd_insert(app, "scale", None, params.as_deref()).map(|_| {
+                app.set_info("Applied scale to selected nodes");
+                app.update_navigation_status();
+            })
+        },
+        "Apply scale transformation to selected nodes",
+        0,
+        None,
+        "scale [x,y,z]",
+        vec!["scale", "scale 2,2,2"],
+    ));
+
+    // Boolean commands
+    registry.register(CommandDef::new(
+        "union",
+        vec![] as Vec<String>,
+        |app, args| {
+            if app.selected_nodes.is_empty() {
+                return Err(CommandError::InvalidCommand(
+                    "No nodes selected. Select nodes with 'v' first".to_string(),
+                ));
+            }
+
+            if !args.is_empty() {
+                return Err(CommandError::InvalidCommand(
+                    "union command takes no arguments".to_string(),
+                ));
+            }
+
+            app.push_undo();
+            cmd_insert(app, "union", None, None).map(|_| {
+                app.set_info("Applied union to selected nodes");
+                app.update_navigation_status();
+            })
+        },
+        "Apply union operation to selected nodes",
+        0,
+        Some(0),
+        "union",
+        vec!["union"],
+    ));
+
+    registry.register(CommandDef::new(
+        "difference",
+        vec![] as Vec<String>,
+        |app, args| {
+            if app.selected_nodes.is_empty() {
+                return Err(CommandError::InvalidCommand(
+                    "No nodes selected. Select nodes with 'v' first".to_string(),
+                ));
+            }
+
+            if !args.is_empty() {
+                return Err(CommandError::InvalidCommand(
+                    "difference command takes no arguments".to_string(),
+                ));
+            }
+
+            app.push_undo();
+            cmd_insert(app, "difference", None, None).map(|_| {
+                app.set_info("Applied difference to selected nodes");
+                app.update_navigation_status();
+            })
+        },
+        "Apply difference operation to selected nodes",
+        0,
+        Some(0),
+        "difference",
+        vec!["difference"],
+    ));
+
+    registry.register(CommandDef::new(
+        "intersection",
+        vec![] as Vec<String>,
+        |app, args| {
+            if app.selected_nodes.is_empty() {
+                return Err(CommandError::InvalidCommand(
+                    "No nodes selected. Select nodes with 'v' first".to_string(),
+                ));
+            }
+
+            if !args.is_empty() {
+                return Err(CommandError::InvalidCommand(
+                    "intersection command takes no arguments".to_string(),
+                ));
+            }
+
+            app.push_undo();
+            cmd_insert(app, "intersection", None, None).map(|_| {
+                app.set_info("Applied intersection to selected nodes");
+                app.update_navigation_status();
+            })
+        },
+        "Apply intersection operation to selected nodes",
+        0,
+        Some(0),
+        "intersection",
+        vec!["intersection"],
+    ));
+
+    // Insert command with multi-stage parameter handling
+    registry.register(CommandDef::new(
+        "insert",
+        vec!["i"],
+        |app, args| {
+            if args.is_empty() {
+                return Err(CommandError::InvalidCommand(
+                    "Usage: insert <module_name> [params]".to_string(),
+                ));
+            }
+
+            let module_name = args[0];
+
+            // Get module definition to check parameters and children requirements
+            let module_def = app.library.get_module(module_name);
+            if module_def.is_none() {
+                return Err(CommandError::InvalidCommand(format!(
+                    "Unknown module: {}",
+                    module_name
+                )));
+            }
+            let module_def = module_def.unwrap();
+
+            // Check if this module accepts children
+            if module_def.accepts_children && app.selected_nodes.is_empty() {
+                return Err(CommandError::InvalidCommand(format!(
+                    "'{}' requires child modules. Select modules with 'v' first",
+                    module_name
+                )));
+            }
+
+            // Determine if module has parameters
+            let module_has_params = !module_def.parameters.is_empty();
+
+            // Get parameters if provided
+            let params = if args.len() > 1 {
+                Some(args[1..].join(" "))
+            } else {
+                None
+            };
+
+            // If params not provided and module has parameters, ask for them in next stage
+            if params.is_none() && module_has_params {
+                app.insert_module_name = Some(module_name.to_string());
+                app.input_mode = crate::app::InputMode::InsertEnterParams;
+                app.set_info(&format!(
+                    "Enter parameters for '{}' (or press Enter to skip):",
+                    module_name
+                ));
+                return Ok(());
+            }
+
+            // If no params provided and module has no parameters, use empty params
+            let final_params = params.or_else(|| Some(String::new()));
+
+            app.push_undo();
+            cmd_insert(app, module_name, None, final_params.as_deref()).map(|_| {
+                app.update_navigation_status();
+                app.set_info(&format!("Inserted: {}", module_name));
+            })
+        },
+        "Insert a module into the AST",
+        1,
+        None, // Variable number of parameters (optional)
+        "insert <module_name> [params]",
+        vec!["insert cube", "i sphere", "insert translate 10,0,0"],
+    ));
+
+    // Function definition command
+    registry.register(CommandDef::new(
+        "funcdef",
+        vec![] as Vec<String>,
+        |app, args| {
+            if args.is_empty() {
+                return Err(CommandError::InvalidCommand(
+                    "Usage: funcdef <function_name> [(param1, param2, ...)=expression]".to_string(),
+                ));
+            }
+            let func_name = args[0];
+            let params_body = if args.len() > 1 {
+                Some(args[1..].join(" "))
+            } else {
+                None
+            };
+            app.push_undo();
+            cmd_funcdef(app, func_name, params_body.as_deref()).map(|_| {
+                app.update_navigation_status();
+                app.set_info(&format!("Function '{}' defined", func_name));
+            })
+        },
+        "Define a new function",
+        1,
+        None, // Variable number of parameters (optional)
+        "funcdef <function_name> [(param1, param2, ...)=expression]",
+        vec!["funcdef myfunc", "funcdef add x,y = x + y"],
+    ));
+
+    // Module definition command
+    registry.register(CommandDef::new(
+        "moddef",
+        vec![] as Vec<String>,
+        |app, args| {
+            if args.is_empty() {
+                return Err(CommandError::InvalidCommand(
+                    "Usage: moddef <module_name> [params]".to_string(),
+                ));
+            }
+            let module_name = args[0];
+            let params = if args.len() > 1 {
+                Some(args[1..].join(" "))
+            } else {
+                None
+            };
+            app.push_undo();
+            cmd_moddef(app, module_name, params.as_deref()).map(|_| {
+                app.update_navigation_status();
+                app.set_info(&format!("Module '{}' defined", module_name));
+            })
+        },
+        "Define a new module",
+        1,
+        None,
+        "moddef <module_name> [params]",
+        vec!["moddef mymodule", "moddef mybox size=10, center=false"],
+    ));
+
+    // Global variable command
+    registry.register(CommandDef::new(
+        "global",
+        vec![] as Vec<String>,
+        |app, args| {
+            if args.is_empty() {
+                return Err(CommandError::InvalidCommand(
+                    "Usage: global <name>=<value>".to_string(),
+                ));
+            }
+            let var_spec = args[0];
+            // If there are more args, join them with space (though spec should be single token)
+            let full_spec = if args.len() > 1 {
+                args.join(" ")
+            } else {
+                var_spec.to_string()
+            };
+            app.push_undo();
+            cmd_global(app, &full_spec).map(|_| {
+                app.update_navigation_status();
+                app.set_info(&format!(
+                    "Global variable '{}' defined",
+                    full_spec.split('=').next().unwrap_or("<invalid>")
+                ));
+            })
+        },
+        "Define a global variable",
+        1,
+        None,
+        "global <name>=<value>",
+        vec!["global pi=3.14159", "global name=\"test\""],
+    ));
+
+    // Placeholder commands for unimplemented functionality
+    registry.register(CommandDef::new(
+        "yank",
+        vec!["y"],
+        |_app, args| {
+            if args.len() > 1 {
+                return Err(CommandError::InvalidCommand(
+                    "yank command takes at most 1 argument".to_string(),
+                ));
+            }
+            Err(CommandError::InvalidCommand(
+                "Yank command not implemented yet".to_string(),
+            ))
+        },
+        "Copy a node to clipboard (not implemented)",
+        0,
+        Some(1),
+        "yank [node_id]",
+        vec!["yank", "y cube_1"],
+    ));
+
+    registry.register(CommandDef::new(
+        "paste",
+        vec!["p"],
+        |_app, args| {
+            if !args.is_empty() {
+                return Err(CommandError::InvalidCommand(
+                    "paste command takes no arguments".to_string(),
+                ));
+            }
+            Err(CommandError::InvalidCommand(
+                "Paste command not implemented yet".to_string(),
+            ))
+        },
+        "Paste node from clipboard (not implemented)",
+        0,
+        Some(0),
+        "paste",
+        vec!["paste", "p"],
+    ));
+
+    registry.register(CommandDef::new(
+        "remove",
+        vec!["x"],
+        |_app, args| {
+            if args.len() > 1 {
+                return Err(CommandError::InvalidCommand(
+                    "remove command takes at most 1 argument".to_string(),
+                ));
+            }
+            Err(CommandError::InvalidCommand(
+                "Remove command not implemented yet".to_string(),
+            ))
+        },
+        "Remove a node (not implemented)",
+        0,
+        Some(1),
+        "remove [node_id]",
+        vec!["remove", "x cube_1"],
+    ));
+
+    registry.register(CommandDef::new(
+        "replace",
+        vec![] as Vec<String>,
+        |_app, args| {
+            if args.len() != 2 {
+                return Err(CommandError::InvalidCommand(
+                    "Usage: replace <node_id> <new_module_name>".to_string(),
+                ));
+            }
+            Err(CommandError::InvalidCommand(
+                "Replace command not implemented yet".to_string(),
+            ))
+        },
+        "Replace a node with another module (not implemented)",
+        2,
+        Some(2),
+        "replace <node_id> <new_module_name>",
+        vec!["replace cube_1 sphere"],
+    ));
 }
 
 #[cfg(test)]

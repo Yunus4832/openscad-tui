@@ -27,6 +27,12 @@ pub fn draw(f: &mut Frame, app: &App) {
     // 绘制各个组件
     draw_tree(f, app, content_chunks[0]);
     draw_preview(f, app, content_chunks[1]);
+
+    // Draw completion popup if active
+    if app.completion_active && !app.completion_candidates.is_empty() {
+        draw_completion_popup(f, app, main_chunks[1]);
+    }
+
     draw_input(f, app, main_chunks[1]);
 
     // 如果在帮助模式，绘制帮助弹窗
@@ -90,7 +96,7 @@ fn build_ast_tree_items(
             .enumerate()
             .map(|(i, inc)| {
                 let id = format!("__include_{}", i);
-                TreeItem::new(id, format!("{}", inc), vec![]).expect("Failed to create TreeItem")
+                TreeItem::new(id, inc.to_string(), vec![]).expect("Failed to create TreeItem")
             })
             .collect();
         items.push(
@@ -111,7 +117,7 @@ fn build_ast_tree_items(
             .enumerate()
             .map(|(i, u)| {
                 let id = format!("__use_{}", i);
-                TreeItem::new(id, format!("{}", u), vec![]).expect("Failed to create TreeItem")
+                TreeItem::new(id, u.to_string(), vec![]).expect("Failed to create TreeItem")
             })
             .collect();
         items.push(
@@ -467,6 +473,71 @@ fn draw_help_modal(f: &mut Frame, _app: &App) {
         .style(Style::default().fg(Color::White));
 
     f.render_widget(modal, modal_area);
+}
+
+/// Draw completion popup above the input area
+fn draw_completion_popup(f: &mut Frame, app: &App, input_area: Rect) {
+    use ratatui::widgets::{Clear, List, ListItem, ListState};
+
+    if app.completion_candidates.is_empty() {
+        return;
+    }
+
+    // Calculate popup dimensions
+    let max_width = 30;
+    let height = std::cmp::min(app.completion_candidates.len() as u16 + 2, 10); // Max 10 items
+
+    // Position popup above input area
+    let popup_width = std::cmp::min(max_width, input_area.width.saturating_sub(2));
+    let popup_x = input_area.x;
+    let popup_y = input_area.y.saturating_sub(height);
+
+    let popup_area = Rect {
+        x: popup_x,
+        y: popup_y,
+        width: popup_width,
+        height,
+    };
+
+    // Clear the area first
+    f.render_widget(Clear, popup_area);
+
+    // Create list items
+    let items: Vec<ListItem> = app
+        .completion_candidates
+        .iter()
+        .enumerate()
+        .map(|(i, candidate)| {
+            let prefix = if i == app.completion_index {
+                "> "
+            } else {
+                "  "
+            };
+            let content = format!("{}{}", prefix, candidate);
+            ListItem::new(content)
+        })
+        .collect();
+
+    // Create list widget
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .title(" Completions ")
+                .borders(Borders::ALL)
+                .style(Style::default().fg(Color::Cyan)),
+        )
+        .style(Style::default().fg(Color::White))
+        .highlight_style(
+            Style::default()
+                .bg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        );
+
+    // Create a temporary list state to highlight the selected item
+    let mut list_state = ListState::default();
+    list_state.select(Some(app.completion_index));
+
+    f.render_stateful_widget(list, popup_area, &mut list_state);
 }
 
 #[cfg(test)]

@@ -139,6 +139,26 @@ impl LibraryManager {
             .or_else(|| self.get_module_from_libraries(name))
     }
 
+    /// Get all available module names
+    pub fn get_module_names(&self) -> Vec<String> {
+        let mut names = std::collections::HashSet::new();
+
+        // Add builtin modules
+        names.extend(self.builtin_modules.keys().cloned());
+
+        // Add custom modules
+        names.extend(self.custom_modules.keys().cloned());
+
+        // Add modules from loaded libraries
+        for library in self.libraries.values() {
+            for module in &library.modules {
+                names.insert(module.name.clone());
+            }
+        }
+
+        names.into_iter().collect()
+    }
+
     /// Add a user-defined custom module
     pub fn add_custom_module(&mut self, module: ModuleDef) {
         self.custom_modules.insert(module.name.clone(), module);

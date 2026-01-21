@@ -3,6 +3,7 @@
 //! A command-driven OpenSCAD editor with real-time preview
 
 mod app;
+mod command_registry;
 mod commands;
 mod input;
 mod ui;

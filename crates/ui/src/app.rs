@@ -7,6 +7,8 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use tui_tree_widget::TreeState;
 
+use crate::command_registry::CommandRegistry;
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[allow(dead_code)]
 pub enum InputMode {
@@ -33,9 +35,33 @@ pub enum MessageType {
     Warning,
 }
 
+/// Context for tab completion
+#[derive(Debug, Clone, PartialEq)]
+pub enum CompletionContext {
+    /// Command completion (empty input or command prefix)
+    Command,
+    /// Module name completion (after "insert " or "i ")
+    Module,
+    /// Module parameter completion (after module name)
+    ModuleParam {
+        module_name: String,
+        param_index: usize,
+    },
+    /// File name completion (for write/edit/library commands)
+    File {
+        /// Current path being completed
+        current_path: String,
+        /// Current directory being listed (for navigation)
+        current_dir: String,
+        /// Whether we're at the end of a path (ready for /)
+        at_path_end: bool,
+    },
+}
+
 pub struct App {
     pub ast: Arc<AstRoot>,
     pub library: LibraryManager,
+    pub command_registry: CommandRegistry,
     pub selected_nodes: Vec<String>,
     pub undo_stack: VecDeque<Arc<AstRoot>>,
     pub redo_stack: VecDeque<Arc<AstRoot>>,
@@ -59,6 +85,12 @@ pub struct App {
     pub should_quit: bool,
     pub message: Option<String>,
     pub message_type: MessageType,
+
+    // Tab completion state
+    pub completion_candidates: Vec<String>,
+    pub completion_index: usize,
+    pub completion_context: CompletionContext,
+    pub completion_active: bool,
 }
 
 impl App {
@@ -66,6 +98,7 @@ impl App {
         let mut app = Self {
             ast: Arc::new(AstRoot::new()),
             library: LibraryManager::new(),
+            command_registry: CommandRegistry::new(),
             selected_nodes: Vec::new(),
             undo_stack: VecDeque::with_capacity(100),
             redo_stack: VecDeque::with_capacity(100),
@@ -80,12 +113,19 @@ impl App {
             should_quit: false,
             message: None,
             message_type: MessageType::Info,
+            completion_candidates: Vec::new(),
+            completion_index: 0,
+            completion_context: CompletionContext::Command,
+            completion_active: false,
         };
 
         // Load standard library (from config dir if exists, otherwise use embedded)
         if let Err(e) = app.library.load_stdlib_with_config() {
             eprintln!("Failed to load standard library: {}", e);
         }
+
+        // Initialize command registry
+        crate::commands::init_command_registry(&mut app.command_registry);
 
         // Initialize tree state: select the first module if it exists
         app.init_tree_selection();
