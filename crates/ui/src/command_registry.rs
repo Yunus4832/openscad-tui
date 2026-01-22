@@ -89,6 +89,7 @@ impl CommandDef {
     }
 
     /// Check if this command is of a specific type
+    #[allow(dead_code)]
     pub fn is_type(&self, cmd_type: &CommandType) -> bool {
         &self.cmd_type == cmd_type
     }
