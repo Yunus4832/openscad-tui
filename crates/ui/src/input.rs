@@ -4,6 +4,7 @@
 //! Command mode: Free text input for complex commands with parameter input
 
 use crate::app::{App, InputMode};
+use crate::command_registry::CommandType;
 use crate::commands;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::fs;
@@ -419,10 +420,11 @@ fn analyze_input_context(input: &str, app: &App) -> crate::app::CompletionContex
         // 在 InsertEnterParams 模式下，输入只包含参数字符串
         // 模块名存储在 app.insert_module_name 中
         if let Some(ref module_name) = app.insert_module_name {
-            return analyze_param_context(trimmed, module_name);
+            return analyze_param_context(trimmed, module_name, CommandType::ModuleCmd);
         } else {
             // 如果没有模块名，返回默认上下文
             return crate::app::CompletionContext::ModuleParam {
+                cmd_type: CommandType::ModuleCmd,
                 module_name: String::new(),
                 param_index: 0,
             };
@@ -447,7 +449,7 @@ fn analyze_input_context(input: &str, app: &App) -> crate::app::CompletionContex
     // 使用命令注册表查找命令类型
     if let Some(cmd_def) = app.command_registry.find(command) {
         match &cmd_def.cmd_type {
-            crate::command_registry::CommandType::FileCmd => {
+            CommandType::FileCmd => {
                 // 文件命令处理逻辑
                 if parts.len() == 1 {
                     if input.ends_with(' ') {
@@ -509,7 +511,7 @@ fn analyze_input_context(input: &str, app: &App) -> crate::app::CompletionContex
                     };
                 }
             }
-            crate::command_registry::CommandType::ModuleCmd => {
+            CommandType::ModuleCmd => {
                 // insert 命令的处理逻辑 (insert <module> [params])
                 if parts.len() == 1 {
                     if input.ends_with(' ') {
@@ -525,6 +527,7 @@ fn analyze_input_context(input: &str, app: &App) -> crate::app::CompletionContex
                         // 检查输入是否以空格结尾：如果是，则进入模块参数补全上下文
                         if input.ends_with(' ') {
                             return crate::app::CompletionContext::ModuleParam {
+                                cmd_type: CommandType::ModuleCmd,
                                 module_name: module_part.to_string(),
                                 param_index: 0,
                             };
@@ -534,17 +537,22 @@ fn analyze_input_context(input: &str, app: &App) -> crate::app::CompletionContex
                     } else {
                         // 有参数部分
                         let param_str = parts[2..].join(" ");
-                        return analyze_param_context(&param_str, module_part);
+                        return analyze_param_context(
+                            &param_str,
+                            module_part,
+                            CommandType::ModuleCmd,
+                        );
                     }
                 }
             }
-            crate::command_registry::CommandType::ParamCmd => {
+            CommandType::ParamCmd => {
                 // 参数命令的处理逻辑 (<transform_cmd> [params])
                 if parts.len() == 1 {
                     // 只有命令名
                     if input.ends_with(' ') {
                         // 命令后有空格，进入此命令的参数补全
                         return crate::app::CompletionContext::ModuleParam {
+                            cmd_type: CommandType::ParamCmd,
                             module_name: command.to_string(),
                             param_index: 0,
                         };
@@ -555,126 +563,29 @@ fn analyze_input_context(input: &str, app: &App) -> crate::app::CompletionContex
                 } else {
                     // 命令后有参数，将所有参数作为一个整体处理
                     let param_str = parts[1..].join(" ");
-                    return analyze_param_context(&param_str, command);
+                    return analyze_param_context(&param_str, command, CommandType::ParamCmd);
                 }
             }
-            crate::command_registry::CommandType::NoArgCmd => {
+            CommandType::NoArgCmd => {
                 // 无参数命令：无需补全
                 return crate::app::CompletionContext::Command;
             }
-            crate::command_registry::CommandType::DefinitionCmd => {
+            CommandType::DefinitionCmd => {
                 // 定义命令：无需补全
                 return crate::app::CompletionContext::Command;
             }
         }
+    } else {
+        return crate::app::CompletionContext::Command;
     }
-
-    // 默认情况：使用旧的逻辑（向后兼容）
-    // 检查是否为文件相关命令（硬编码的后备处理）
-    let file_commands = ["write", "w", "save", "edit", "e", "library"];
-    if file_commands.contains(&command) {
-        // 文件补全上下文
-        if parts.len() == 1 {
-            // 只输入了命令，没有路径
-            if input.ends_with(' ') {
-                // 命令后跟空格，等待文件路径
-                return crate::app::CompletionContext::File {
-                    current_path: String::new(),
-                    base_dir: ".".to_string(),
-                    partial_name: String::new(),
-                    ends_with_separator: false,
-                };
-            } else {
-                // 仍在命令补全上下文（但命令已确定，可能不需要补全）
-                return crate::app::CompletionContext::Command;
-            }
-        } else {
-            // 有路径部分
-            let path_part = parts[1..].join(" ").trim_end().to_string();
-            let ends_with_separator = path_part.ends_with('/');
-
-            // 解析路径，分离目录部分和文件名部分
-            let (base_dir, partial_name) = if path_part.contains('/') {
-                let last_slash = path_part.rfind('/').unwrap();
-                let base = &path_part[..last_slash + 1];
-                let partial = &path_part[last_slash + 1..];
-
-                // 处理相对路径
-                let normalized_base = if base.starts_with('/') {
-                    // 绝对路径
-                    base.to_string()
-                } else {
-                    // 相对路径，需要与当前目录结合
-                    if base == "./" || base.is_empty() {
-                        ".".to_string()
-                    } else {
-                        normalize_path(base)
-                    }
-                };
-
-                (normalized_base, partial.to_string())
-            } else {
-                // 没有分隔符，整个都是文件名部分
-                (".".to_string(), path_part.clone())
-            };
-
-            // 检查完整路径是否存在且为文件，如果是且输入以空格结尾，切换回命令上下文
-            let full_path = Path::new(&path_part);
-            if input.ends_with(' ')
-                && !input.ends_with("/ ")
-                && full_path.exists()
-                && full_path.is_file()
-            {
-                // 用户已指定一个存在的文件并添加了空格，意味着完成文件选择
-                return crate::app::CompletionContext::Command;
-            }
-
-            return crate::app::CompletionContext::File {
-                current_path: path_part,
-                base_dir,
-                partial_name,
-                ends_with_separator,
-            };
-        }
-    }
-
-    if parts.len() == 1 {
-        // 如果输入以空格结尾，则已经输入了命令，进入模块补全上下文
-        if input.ends_with(' ') {
-            return crate::app::CompletionContext::Module;
-        } else {
-            // 否则仍在命令补全上下文
-            return crate::app::CompletionContext::Command;
-        }
-    }
-
-    // 至少有命令和模块名（或部分模块名）
-    let module_part = parts[1];
-
-    // 如果只有命令和模块名，没有参数部分
-    if parts.len() == 2 {
-        // 检查输入是否以空格结尾：如果是，则进入模块参数补全上下文
-        if input.ends_with(' ') {
-            // 已经输入了模块名和空格，等待参数
-            return crate::app::CompletionContext::ModuleParam {
-                module_name: module_part.to_string(),
-                param_index: 0,
-            };
-        } else {
-            // 仍在模块补全上下文
-            return crate::app::CompletionContext::Module;
-        }
-    }
-
-    // 有参数部分（第三个及之后的单词）
-    // 参数部分是一个整体，用逗号分隔的 name=value 对
-    let param_str = parts[2..].join(" ");
-
-    analyze_param_context(&param_str, module_part)
 }
 
 /// 分析参数字符串上下文（用于正常模式和 InsertEnterParams 模式）
-fn analyze_param_context(param_str: &str, module_name: &str) -> crate::app::CompletionContext {
+fn analyze_param_context(
+    param_str: &str,
+    module_name: &str,
+    cmd_type: CommandType,
+) -> crate::app::CompletionContext {
     // 解析参数字符串以确定当前上下文
     // 查找最后一个逗号、等号的位置
     let last_comma = param_str.rfind(',');
@@ -685,6 +596,7 @@ fn analyze_param_context(param_str: &str, module_name: &str) -> crate::app::Comp
         (None, None) => {
             // 没有逗号也没有等号：正在输入第一个参数名
             crate::app::CompletionContext::ModuleParam {
+                cmd_type: cmd_type,
                 module_name: module_name.to_string(),
                 param_index: 0,
             }
@@ -694,6 +606,7 @@ fn analyze_param_context(param_str: &str, module_name: &str) -> crate::app::Comp
             // 计算已经输入了多少个参数（逗号数量）
             let param_count = param_str[..=comma_pos].matches(',').count();
             crate::app::CompletionContext::ModuleParam {
+                cmd_type: cmd_type,
                 module_name: module_name.to_string(),
                 param_index: param_count,
             }
@@ -703,6 +616,7 @@ fn analyze_param_context(param_str: &str, module_name: &str) -> crate::app::Comp
             // 提取参数名
             let param_name = param_str[..equal_pos].trim().to_string();
             crate::app::CompletionContext::ModuleParamValue {
+                cmd_type: cmd_type,
                 module_name: module_name.to_string(),
                 module_param_name: param_name,
                 value_index: 0,
@@ -713,6 +627,7 @@ fn analyze_param_context(param_str: &str, module_name: &str) -> crate::app::Comp
                 // 最后一个逗号在等号之后：参数值已输入完成，等待下一个参数
                 let param_count = param_str[..=comma_pos].matches(',').count();
                 crate::app::CompletionContext::ModuleParam {
+                    cmd_type: cmd_type,
                     module_name: module_name.to_string(),
                     param_index: param_count,
                 }
@@ -723,6 +638,7 @@ fn analyze_param_context(param_str: &str, module_name: &str) -> crate::app::Comp
                 if let Some(param_equal_pos) = after_last_comma.find('=') {
                     let param_name = after_last_comma[..param_equal_pos].trim().to_string();
                     crate::app::CompletionContext::ModuleParamValue {
+                        cmd_type: cmd_type,
                         module_name: module_name.to_string(),
                         module_param_name: param_name,
                         value_index: 0,
@@ -730,6 +646,7 @@ fn analyze_param_context(param_str: &str, module_name: &str) -> crate::app::Comp
                 } else {
                     // 应该不会发生这种情况
                     crate::app::CompletionContext::ModuleParam {
+                        cmd_type: cmd_type,
                         module_name: module_name.to_string(),
                         param_index: param_str.matches(',').count(),
                     }
@@ -870,7 +787,11 @@ fn is_last_parameter(app: &App, module_name: &str, input: &str) -> bool {
 }
 
 /// 根据输入模式和上下文提取模块名和参数字符串
-fn extract_module_and_param_str(app: &App, input: &str) -> (Option<String>, String) {
+fn extract_module_and_param_str(
+    app: &App,
+    input: &str,
+    cmd_type: &CommandType,
+) -> (Option<String>, String) {
     if app.input_mode == crate::app::InputMode::InsertEnterParams {
         // InsertEnterParams 模式：模块名在 app.insert_module_name 中
         // 整个输入就是参数字符串
@@ -880,14 +801,30 @@ fn extract_module_and_param_str(app: &App, input: &str) -> (Option<String>, Stri
     } else {
         // 正常命令模式：从输入中提取模块名和参数字符串
         let parts: Vec<&str> = input.split_whitespace().collect();
-        if parts.len() >= 2 {
-            let module_name = Some(parts[1].to_string());
-            let param_str = if parts.len() > 2 {
-                parts[2..].join(" ")
+        if cmd_type == &CommandType::ModuleCmd {
+            if parts.len() >= 2 {
+                let module_name = Some(parts[1].to_string());
+                let param_str = if parts.len() > 2 {
+                    parts[2..].join(" ")
+                } else {
+                    String::new()
+                };
+                (module_name, param_str)
             } else {
-                String::new()
-            };
-            (module_name, param_str)
+                (None, String::new())
+            }
+        } else if cmd_type == &CommandType::ParamCmd {
+            if parts.len() >= 1 {
+                let module_name = Some(parts[0].to_string());
+                let param_str = if parts.len() > 1 {
+                    parts[1..].join(" ")
+                } else {
+                    String::new()
+                };
+                (module_name, param_str)
+            } else {
+                (None, String::new())
+            }
         } else {
             (None, String::new())
         }
@@ -920,13 +857,14 @@ fn generate_completions(input: &str, app: &App) -> (Vec<String>, crate::app::Com
             filter_by_prefix(&all_modules, prefix)
         }
         crate::app::CompletionContext::ModuleParam {
+            cmd_type: _cmd_type,
             module_name,
             param_index: _param_index,
         } => {
             // 模块参数补全：获取模块的所有参数，过滤掉已输入的参数
             if let Some(module_def) = app.library.get_module(module_name) {
                 // 获取已输入的参数名
-                let (_, param_str) = extract_module_and_param_str(app, input);
+                let (_, param_str) = extract_module_and_param_str(app, input, &_cmd_type);
                 let entered_params = parse_parameter_names(&param_str);
 
                 // 过滤掉已输入的参数
@@ -950,6 +888,7 @@ fn generate_completions(input: &str, app: &App) -> (Vec<String>, crate::app::Com
             }
         }
         crate::app::CompletionContext::ModuleParamValue {
+            cmd_type: _cmd_type,
             module_name,
             module_param_name,
             value_index: _value_index,
@@ -976,7 +915,7 @@ fn generate_completions(input: &str, app: &App) -> (Vec<String>, crate::app::Com
             }
 
             // 如果有部分输入的值，进行过滤
-            let (_, param_str) = extract_module_and_param_str(app, input);
+            let (_, param_str) = extract_module_and_param_str(app, input, &_cmd_type);
             let current_value_part = get_current_param_value_part(&param_str, module_param_name);
             if !current_value_part.is_empty() {
                 candidates = filter_by_prefix(&candidates, &current_value_part);
@@ -1047,11 +986,12 @@ fn get_replacement_range(
             }
         }
         crate::app::CompletionContext::ModuleParam {
+            cmd_type: _cmd_type,
             module_name: _module_name,
             param_index: _param_index,
         } => {
             // 模块参数补全：替换当前正在输入的参数名部分
-            let (_, param_str) = extract_module_and_param_str(app, input);
+            let (_, param_str) = extract_module_and_param_str(app, input, &_cmd_type);
             let current_param_part = get_current_param_name_part(&param_str);
 
             // 在原始输入中找到参数部分的位置
@@ -1081,13 +1021,14 @@ fn get_replacement_range(
             }
         }
         crate::app::CompletionContext::ModuleParamValue {
+            cmd_type: _cmd_type,
             module_name: _module_name,
             module_param_name,
             value_index: _value_index,
         } => {
             // 模块参数值补全：替换当前参数的值部分
             // 使用 extract_module_and_param_str 获取参数字符串
-            let (_, param_str) = extract_module_and_param_str(app, input);
+            let (_, param_str) = extract_module_and_param_str(app, input, &_cmd_type);
 
             // 找到参数值部分的位置
             let pattern = format!("{}=", module_param_name);
@@ -1170,12 +1111,13 @@ fn apply_completion(app: &mut App) {
             new_input.push('=');
         }
         crate::app::CompletionContext::ModuleParamValue {
+            cmd_type: _cmd_type,
             module_name,
             module_param_name: _,
             value_index: _value_index,
         } => {
             // 检查当前参数是否是最后一个参数, 不是最后一个参数，追加逗号
-            let (_, param_str) = extract_module_and_param_str(app, &app.input_buffer);
+            let (_, param_str) = extract_module_and_param_str(app, &app.input_buffer, &_cmd_type);
             if !is_last_parameter(app, module_name, &param_str) {
                 new_input.push(',');
             }

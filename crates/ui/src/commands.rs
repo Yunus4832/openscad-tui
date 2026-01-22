@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use thiserror::Error;
 
+use crate::command_registry::CommandType;
+
 const MAX_RECURSION_DEPTH: usize = 1000;
 
 #[derive(Error, Debug)]
@@ -1482,7 +1484,7 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
         Some(0),
         "next",
         vec!["j", "next"],
-        crate::command_registry::CommandType::NoArgCmd,
+        CommandType::NoArgCmd,
     ));
 
     registry.register(CommandDef::new(
@@ -1501,7 +1503,7 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
         Some(0),
         "prev",
         vec!["k", "prev"],
-        crate::command_registry::CommandType::NoArgCmd,
+        CommandType::NoArgCmd,
     ));
 
     registry.register(CommandDef::new(
@@ -1520,7 +1522,7 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
         Some(0),
         "collapse",
         vec!["h", "collapse"],
-        crate::command_registry::CommandType::NoArgCmd,
+        CommandType::NoArgCmd,
     ));
 
     registry.register(CommandDef::new(
@@ -1539,7 +1541,7 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
         Some(0),
         "expand",
         vec!["l", "expand"],
-        crate::command_registry::CommandType::NoArgCmd,
+        CommandType::NoArgCmd,
     ));
 
     registry.register(CommandDef::new(
@@ -1558,7 +1560,7 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
         Some(0),
         "toggle",
         vec!["toggle"],
-        crate::command_registry::CommandType::NoArgCmd,
+        CommandType::NoArgCmd,
     ));
 
     // Selection commands
@@ -1578,7 +1580,7 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
         Some(0),
         "select",
         vec!["v", "select"],
-        crate::command_registry::CommandType::NoArgCmd,
+        CommandType::NoArgCmd,
     ));
 
     registry.register(CommandDef::new(
@@ -1597,7 +1599,7 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
         Some(0),
         "deselect-all",
         vec!["deselect-all"],
-        crate::command_registry::CommandType::NoArgCmd,
+        CommandType::NoArgCmd,
     ));
 
     // Edit commands
@@ -1617,7 +1619,7 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
         Some(0),
         "undo",
         vec!["u", "undo"],
-        crate::command_registry::CommandType::NoArgCmd,
+        CommandType::NoArgCmd,
     ));
 
     registry.register(CommandDef::new(
@@ -1636,7 +1638,7 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
         Some(0),
         "redo",
         vec!["r", "redo"],
-        crate::command_registry::CommandType::NoArgCmd,
+        CommandType::NoArgCmd,
     ));
 
     registry.register(CommandDef::new(
@@ -1663,7 +1665,7 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
         Some(1),
         "delete [node_id]",
         vec!["delete", "d cube_1", "dd", "D"],
-        crate::command_registry::CommandType::NoArgCmd,
+        CommandType::NoArgCmd,
     ));
 
     // File operations
@@ -1683,7 +1685,7 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
         Some(1),
         "write <filename>",
         vec!["write test.json", "save project.json"],
-        crate::command_registry::CommandType::FileCmd,
+        CommandType::FileCmd,
     ));
 
     registry.register(CommandDef::new(
@@ -1702,7 +1704,7 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
         Some(1),
         "edit <filename>",
         vec!["edit test.json", "e project.json"],
-        crate::command_registry::CommandType::FileCmd,
+        CommandType::FileCmd,
     ));
 
     registry.register(CommandDef::new(
@@ -1721,7 +1723,7 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
         Some(1),
         "export <filename>",
         vec!["export model.scad"],
-        crate::command_registry::CommandType::FileCmd,
+        CommandType::FileCmd,
     ));
 
     registry.register(CommandDef::new(
@@ -1740,7 +1742,7 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
         Some(1),
         "library <filename>",
         vec!["library mylib.json"],
-        crate::command_registry::CommandType::FileCmd,
+        CommandType::FileCmd,
     ));
 
     // System commands
@@ -1760,7 +1762,7 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
         Some(0),
         "quit",
         vec!["quit", "q"],
-        crate::command_registry::CommandType::NoArgCmd,
+        CommandType::NoArgCmd,
     ));
 
     registry.register(CommandDef::new(
@@ -1781,7 +1783,7 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
         Some(1),
         "help [command]",
         vec!["help", "help write", "?"],
-        crate::command_registry::CommandType::NoArgCmd,
+        CommandType::NoArgCmd,
     ));
 
     // Transform commands
@@ -1814,7 +1816,7 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
         None, // Variable number of parameters (optional)
         "translate [x,y,z]",
         vec!["translate", "translate 10,0,0"],
-        crate::command_registry::CommandType::ParamCmd,
+        CommandType::ParamCmd,
     ));
 
     registry.register(CommandDef::new(
@@ -1844,7 +1846,7 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
         None,
         "rotate [a,vx,vy,vz]",
         vec!["rotate", "rotate 45,0,0,1"],
-        crate::command_registry::CommandType::ParamCmd,
+        CommandType::ParamCmd,
     ));
 
     registry.register(CommandDef::new(
@@ -1874,7 +1876,7 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
         None,
         "scale [x,y,z]",
         vec!["scale", "scale 2,2,2"],
-        crate::command_registry::CommandType::ParamCmd,
+        CommandType::ParamCmd,
     ));
 
     // Boolean commands
@@ -1905,7 +1907,7 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
         Some(0),
         "union",
         vec!["union"],
-        crate::command_registry::CommandType::NoArgCmd,
+        CommandType::NoArgCmd,
     ));
 
     registry.register(CommandDef::new(
@@ -1935,7 +1937,7 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
         Some(0),
         "difference",
         vec!["difference"],
-        crate::command_registry::CommandType::NoArgCmd,
+        CommandType::NoArgCmd,
     ));
 
     registry.register(CommandDef::new(
@@ -1965,7 +1967,7 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
         Some(0),
         "intersection",
         vec!["intersection"],
-        crate::command_registry::CommandType::NoArgCmd,
+        CommandType::NoArgCmd,
     ));
 
     // Insert command with multi-stage parameter handling
@@ -2034,7 +2036,7 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
         None, // Variable number of parameters (optional)
         "insert <module_name> [params]",
         vec!["insert cube", "i sphere", "insert translate 10,0,0"],
-        crate::command_registry::CommandType::ModuleCmd,
+        CommandType::ModuleCmd,
     ));
 
     // Function definition command
@@ -2064,7 +2066,7 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
         None, // Variable number of parameters (optional)
         "funcdef <function_name> [(param1, param2, ...)=expression]",
         vec!["funcdef myfunc", "funcdef add x,y = x + y"],
-        crate::command_registry::CommandType::DefinitionCmd,
+        CommandType::DefinitionCmd,
     ));
 
     // Module definition command
@@ -2094,7 +2096,7 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
         None,
         "moddef <module_name> [params]",
         vec!["moddef mymodule", "moddef mybox size=10, center=false"],
-        crate::command_registry::CommandType::DefinitionCmd,
+        CommandType::DefinitionCmd,
     ));
 
     // Global variable command
@@ -2128,7 +2130,7 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
         None,
         "global <name>=<value>",
         vec!["global pi=3.14159", "global name=\"test\""],
-        crate::command_registry::CommandType::DefinitionCmd,
+        CommandType::DefinitionCmd,
     ));
 
     // Placeholder commands for unimplemented functionality
@@ -2150,7 +2152,7 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
         Some(1),
         "yank [node_id]",
         vec!["yank", "y cube_1"],
-        crate::command_registry::CommandType::NoArgCmd,
+        CommandType::NoArgCmd,
     ));
 
     registry.register(CommandDef::new(
@@ -2171,7 +2173,7 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
         Some(0),
         "paste",
         vec!["paste", "p"],
-        crate::command_registry::CommandType::NoArgCmd,
+        CommandType::NoArgCmd,
     ));
 
     registry.register(CommandDef::new(
@@ -2192,7 +2194,7 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
         Some(1),
         "remove [node_id]",
         vec!["remove", "x cube_1"],
-        crate::command_registry::CommandType::NoArgCmd,
+        CommandType::NoArgCmd,
     ));
 
     registry.register(CommandDef::new(
@@ -2213,7 +2215,7 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
         Some(2),
         "replace <node_id> <new_module_name>",
         vec!["replace cube_1 sphere"],
-        crate::command_registry::CommandType::NoArgCmd,
+        CommandType::NoArgCmd,
     ));
 }
 

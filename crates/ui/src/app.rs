@@ -7,7 +7,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use tui_tree_widget::TreeState;
 
-use crate::command_registry::CommandRegistry;
+use crate::command_registry::{CommandRegistry, CommandType};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[allow(dead_code)]
@@ -44,11 +44,13 @@ pub enum CompletionContext {
     Module,
     /// Module parameter completion (after module name)
     ModuleParam {
+        cmd_type: CommandType,
         module_name: String,
         param_index: usize,
     },
     /// Module parameter value completion (after module parameter name)
     ModuleParamValue {
+        cmd_type: CommandType,
         module_name: String,
         module_param_name: String,
         value_index: usize,
