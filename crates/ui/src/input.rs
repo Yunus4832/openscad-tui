@@ -429,8 +429,6 @@ fn analyze_input_context(input: &str, app: &App) -> crate::app::CompletionContex
         }
     }
 
-    // 正常命令模式（以下为原有逻辑）
-
     // 空输入或只有空白字符：命令补全
     if trimmed.is_empty() {
         return crate::app::CompletionContext::Command;
@@ -439,10 +437,176 @@ fn analyze_input_context(input: &str, app: &App) -> crate::app::CompletionContex
     // 按空白字符分割输入
     let parts: Vec<&str> = trimmed.split_whitespace().collect();
 
+    if parts.is_empty() {
+        return crate::app::CompletionContext::Command;
+    }
+
     // 第一部分是命令
     let command = parts[0];
 
-    // 检查是否为文件相关命令
+    // 使用命令注册表查找命令类型
+    if let Some(cmd_def) = app.command_registry.find(command) {
+        match &cmd_def.cmd_type {
+            crate::command_registry::CommandType::FileCmd => {
+                // 文件命令处理逻辑
+                if parts.len() == 1 {
+                    if input.ends_with(' ') {
+                        return crate::app::CompletionContext::File {
+                            current_path: String::new(),
+                            base_dir: ".".to_string(),
+                            partial_name: String::new(),
+                            ends_with_separator: false,
+                        };
+                    } else {
+                        return crate::app::CompletionContext::Command;
+                    }
+                } else {
+                    // 有路径部分
+                    let path_part = parts[1..].join(" ").trim_end().to_string();
+                    let ends_with_separator = path_part.ends_with('/');
+
+                    // 解析路径，分离目录部分和文件名部分
+                    let (base_dir, partial_name) = if path_part.contains('/') {
+                        let last_slash = path_part.rfind('/').unwrap();
+                        let base = &path_part[..last_slash + 1];
+                        let partial = &path_part[last_slash + 1..];
+
+                        // 处理相对路径
+                        let normalized_base = if base.starts_with('/') {
+                            // 绝对路径
+                            base.to_string()
+                        } else {
+                            // 相对路径，需要与当前目录结合
+                            if base == "./" || base.is_empty() {
+                                ".".to_string()
+                            } else {
+                                normalize_path(base)
+                            }
+                        };
+
+                        (normalized_base, partial.to_string())
+                    } else {
+                        // 没有分隔符，整个都是文件名部分
+                        (".".to_string(), path_part.clone())
+                    };
+
+                    // 检查完整路径是否存在且为文件，如果是且输入以空格结尾，切换回命令上下文
+                    let full_path = Path::new(&path_part);
+                    if input.ends_with(' ')
+                        && !input.ends_with("/ ")
+                        && full_path.exists()
+                        && full_path.is_file()
+                    {
+                        // 用户已指定一个存在的文件并添加了空格，意味着完成文件选择
+                        return crate::app::CompletionContext::Command;
+                    }
+
+                    return crate::app::CompletionContext::File {
+                        current_path: path_part,
+                        base_dir,
+                        partial_name,
+                        ends_with_separator,
+                    };
+                }
+            }
+            crate::command_registry::CommandType::ModuleCmd => {
+                // insert 命令的处理逻辑 (insert <module> [params])
+                if parts.len() == 1 {
+                    if input.ends_with(' ') {
+                        return crate::app::CompletionContext::Module;
+                    } else {
+                        return crate::app::CompletionContext::Command;
+                    }
+                } else {
+                    // 第二个参数应为模块名
+                    let module_part = parts[1];
+
+                    if parts.len() == 2 {
+                        // 检查输入是否以空格结尾：如果是，则进入模块参数补全上下文
+                        if input.ends_with(' ') {
+                            return crate::app::CompletionContext::ModuleParam {
+                                module_name: module_part.to_string(),
+                                param_index: 0,
+                            };
+                        } else {
+                            return crate::app::CompletionContext::Module;
+                        }
+                    } else {
+                        // 有参数部分
+                        let param_str = parts[2..].join(" ");
+                        return analyze_param_context(&param_str, module_part);
+                    }
+                }
+            }
+            crate::command_registry::CommandType::ParamCmd => {
+                // 参数命令的处理逻辑 (<transform_cmd> [params])
+                if parts.len() == 1 {
+                    // 只有命令名
+                    if input.ends_with(' ') {
+                        // 命令后有空格，进入此命令的参数补全
+                        return crate::app::CompletionContext::ModuleParam {
+                            module_name: command.to_string(),
+                            param_index: 0,
+                        };
+                    } else {
+                        // 只输入了命令，还在命令补全阶段
+                        return crate::app::CompletionContext::Command;
+                    }
+                } else {
+                    // 命令后有参数，将所有参数作为一个整体处理
+                    let param_str = parts[1..].join(" ");
+                    return analyze_param_context(&param_str, command);
+                }
+            }
+            crate::command_registry::CommandType::NoArgCmd => {
+                // 无参数命令：无需补全
+                return crate::app::CompletionContext::Command;
+            }
+            crate::command_registry::CommandType::DefinitionCmd => {
+                // 定义命令：无需补全
+                return crate::app::CompletionContext::Command;
+            }
+            crate::command_registry::CommandType::GenericCmd => {
+                // 通用命令：使用默认逻辑
+                if parts.len() == 1 {
+                    // 如果输入以空格结尾，则已经输入了命令，进入模块补全上下文
+                    if input.ends_with(' ') {
+                        return crate::app::CompletionContext::Module;
+                    } else {
+                        // 否则仍在命令补全上下文
+                        return crate::app::CompletionContext::Command;
+                    }
+                }
+
+                // 至少有命令和模块名（或部分模块名）
+                let module_part = parts[1];
+
+                // 如果只有命令和模块名，没有参数部分
+                if parts.len() == 2 {
+                    // 检查输入是否以空格结尾：如果是，则进入模块参数补全上下文
+                    if input.ends_with(' ') {
+                        // 已经输入了模块名和空格，等待参数
+                        return crate::app::CompletionContext::ModuleParam {
+                            module_name: module_part.to_string(),
+                            param_index: 0,
+                        };
+                    } else {
+                        // 仍在模块补全上下文
+                        return crate::app::CompletionContext::Module;
+                    }
+                }
+
+                // 有参数部分（第三个及之后的单词）
+                // 参数部分是一个整体，用逗号分隔的 name=value 对
+                let param_str = parts[2..].join(" ");
+
+                return analyze_param_context(&param_str, module_part);
+            }
+        }
+    }
+
+    // 默认情况：使用旧的逻辑（向后兼容）
+    // 检查是否为文件相关命令（硬编码的后备处理）
     let file_commands = ["write", "w", "save", "edit", "e", "library"];
     if file_commands.contains(&command) {
         // 文件补全上下文

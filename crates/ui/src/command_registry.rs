@@ -62,7 +62,7 @@ impl CommandDef {
         max_args: Option<usize>,
         usage: impl Into<String>,
         examples: Vec<impl Into<String>>,
-        cmd_type: crate::command_registry::CommandType
+        cmd_type: crate::command_registry::CommandType,
     ) -> Self {
         Self {
             name: name.into(),
