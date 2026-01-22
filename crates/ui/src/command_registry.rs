@@ -4,6 +4,24 @@ use crate::app::App;
 use crate::commands::CommandResult;
 use std::collections::HashMap;
 
+/// Command type - used for dynamic completion context analysis
+#[derive(Debug, Clone, PartialEq)]
+pub enum CommandType {
+    /// File command: next argument is file path (write, edit, library, export)
+    FileCmd,
+    /// Module command: next argument is module name (insert)
+    ModuleCmd,
+    /// Parameter command: command itself is a module, args are module parameters (translate, rotate, scale)
+    ParamCmd,
+    /// No-argument command: command requires no further arguments (difference, union, etc.)
+    NoArgCmd,
+    /// Definition command: for defining content, no completion needed (global, moddef, funcdef)
+    DefinitionCmd,
+    /// Generic command: standard command with no special completion needs
+    GenericCmd,
+}
+
+/// Command type - used for dynamic completion context analysis
 /// Command handler function signature
 pub type CommandHandler = fn(&mut App, &[&str]) -> CommandResult<()>;
 
@@ -28,6 +46,8 @@ pub struct CommandDef {
     /// Detailed examples
     #[allow(dead_code)]
     pub examples: Vec<String>,
+    /// Command type for dynamic completion context analysis
+    pub cmd_type: CommandType,
 }
 
 impl CommandDef {
@@ -42,6 +62,7 @@ impl CommandDef {
         max_args: Option<usize>,
         usage: impl Into<String>,
         examples: Vec<impl Into<String>>,
+        cmd_type: crate::command_registry::CommandType
     ) -> Self {
         Self {
             name: name.into(),
@@ -52,6 +73,7 @@ impl CommandDef {
             max_args,
             usage: usage.into(),
             examples: examples.into_iter().map(|s| s.into()).collect(),
+            cmd_type: cmd_type, // Default type
         }
     }
 
@@ -66,6 +88,11 @@ impl CommandDef {
     #[allow(dead_code)]
     pub fn matches_name(&self, name: &str) -> bool {
         self.name == name || self.aliases.iter().any(|alias| alias == name)
+    }
+
+    /// Check if this command is of a specific type
+    pub fn is_type(&self, cmd_type: &CommandType) -> bool {
+        &self.cmd_type == cmd_type
     }
 }
 
