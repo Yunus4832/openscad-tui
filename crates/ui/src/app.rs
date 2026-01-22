@@ -57,10 +57,12 @@ pub enum CompletionContext {
     File {
         /// Current path being completed
         current_path: String,
-        /// Current directory being listed (for navigation)
-        current_dir: String,
-        /// Whether we're at the end of a path (ready for /)
-        at_path_end: bool,
+        /// The directory part of the path (before the last /)
+        base_dir: String,
+        /// The file/part being completed (after the last /)
+        partial_name: String,
+        /// Whether the path ends with a separator (indicating directory)
+        ends_with_separator: bool,
     },
 }
 

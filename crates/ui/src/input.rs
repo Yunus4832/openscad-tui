@@ -7,7 +7,7 @@ use crate::app::{App, InputMode};
 use crate::commands;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::fs;
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 
 pub fn handle_key(key: KeyEvent, app: &mut App) {
     match app.input_mode {
@@ -452,8 +452,9 @@ fn analyze_input_context(input: &str, app: &App) -> crate::app::CompletionContex
                 // 命令后跟空格，等待文件路径
                 return crate::app::CompletionContext::File {
                     current_path: String::new(),
-                    current_dir: ".".to_string(),
-                    at_path_end: false,
+                    base_dir: ".".to_string(),
+                    partial_name: String::new(),
+                    ends_with_separator: false,
                 };
             } else {
                 // 仍在命令补全上下文（但命令已确定，可能不需要补全）
@@ -461,14 +462,50 @@ fn analyze_input_context(input: &str, app: &App) -> crate::app::CompletionContex
             }
         } else {
             // 有路径部分
-            let path_part = parts[1..].join(" ");
-            let current_dir = ".".to_string();
-            let at_path_end = input.ends_with(' ') || input.ends_with('/');
+            let path_part = parts[1..].join(" ").trim_end().to_string();
+            let ends_with_separator = path_part.ends_with('/');
+
+            // 解析路径，分离目录部分和文件名部分
+            let (base_dir, partial_name) = if path_part.contains('/') {
+                let last_slash = path_part.rfind('/').unwrap();
+                let base = &path_part[..last_slash + 1];
+                let partial = &path_part[last_slash + 1..];
+
+                // 处理相对路径
+                let normalized_base = if base.starts_with('/') {
+                    // 绝对路径
+                    base.to_string()
+                } else {
+                    // 相对路径，需要与当前目录结合
+                    if base == "./" || base.is_empty() {
+                        ".".to_string()
+                    } else {
+                        normalize_path(base)
+                    }
+                };
+
+                (normalized_base, partial.to_string())
+            } else {
+                // 没有分隔符，整个都是文件名部分
+                (".".to_string(), path_part.clone())
+            };
+
+            // 检查完整路径是否存在且为文件，如果是且输入以空格结尾，切换回命令上下文
+            let full_path = Path::new(&path_part);
+            if input.ends_with(' ')
+                && !input.ends_with("/ ")
+                && full_path.exists()
+                && full_path.is_file()
+            {
+                // 用户已指定一个存在的文件并添加了空格，意味着完成文件选择
+                return crate::app::CompletionContext::Command;
+            }
 
             return crate::app::CompletionContext::File {
                 current_path: path_part,
-                current_dir,
-                at_path_end,
+                base_dir,
+                partial_name,
+                ends_with_separator,
             };
         }
     }
@@ -572,6 +609,28 @@ fn analyze_param_context(param_str: &str, module_name: &str) -> crate::app::Comp
             }
         }
     }
+}
+
+/// 规范化路径，处理相对路径符号如 ./ 和 ../
+fn normalize_path(path: &str) -> String {
+    let path_buf = PathBuf::from(path)
+        .components()
+        .fold(PathBuf::new(), |mut acc, component| {
+            match component {
+                Component::ParentDir => {
+                    acc.pop();
+                }
+                Component::CurDir => {
+                    // 当前目录，不做任何操作
+                }
+                _ => {
+                    acc.push(component);
+                }
+            }
+            acc
+        });
+
+    path_buf.to_string_lossy().to_string()
 }
 
 /// 根据前缀过滤字符串列表
@@ -798,12 +857,12 @@ fn generate_completions(input: &str, app: &App) -> (Vec<String>, crate::app::Com
             candidates
         }
         crate::app::CompletionContext::File {
-            current_path,
-            current_dir,
-            at_path_end: _at_path_end,
+            base_dir,
+            partial_name,
+            ..
         } => {
-            // 文件补全
-            get_file_completions(current_dir, current_path)
+            // 文件补全 - 使用基础目录和部分名称
+            get_file_completions(&base_dir, &partial_name)
         }
     };
 
@@ -916,18 +975,42 @@ fn get_replacement_range(
             }
         }
         crate::app::CompletionContext::File {
-            current_path: _current_path,
-            current_dir: _current_dir,
-            at_path_end: _at_path_end,
+            current_path: _,
+            base_dir: _,
+            partial_name: _,
+            ends_with_separator,
         } => {
-            // 文件补全：替换路径部分
-            let parts: Vec<&str> = input.split_whitespace().collect();
-            if parts.len() < 2 {
-                (input.len(), input.len())
+            // 文件补全：替换路径部分的最后部分
+            // 根据上下文决定替换范围
+            // 查找最后一个 / 的位置
+            if let Some(slash_pos) = input.rfind('/') {
+                if *ends_with_separator {
+                    // 如果路径以 / 结尾，从 / 位置之后开始替换
+                    (slash_pos + 1, input.len())
+                } else {
+                    // 查找最后一个空格的位置
+                    if let Some(space_pos) = input.rfind(' ') {
+                        if slash_pos > space_pos {
+                            // 最后一个是 / 在最后的空格之后，从 / 位置之后开始替换
+                            (slash_pos + 1, input.len())
+                        } else {
+                            // 最后一个空格在最后的 / 之后，从空格之后开始替换
+                            (space_pos + 1, input.len())
+                        }
+                    } else {
+                        // 没有空格，从 / 之后开始替换
+                        (slash_pos + 1, input.len())
+                    }
+                }
             } else {
-                let path_part = parts[1..].join(" ");
-                let path_start = input.find(&path_part).unwrap_or(input.len());
-                (path_start, path_start + path_part.len())
+                // 没有 /，按原逻辑处理（查找空格）
+                let space_pos = input.rfind(' ');
+                let path_start = if let Some(pos) = space_pos {
+                    pos + 1 // 从空格后开始
+                } else {
+                    0 // 如果没有空格，从开头开始
+                };
+                (path_start, input.len()) // 替换从路径开始到末尾的所有内容
             }
         }
     }
@@ -971,13 +1054,25 @@ fn apply_completion(app: &mut App) {
         }
         crate::app::CompletionContext::File {
             current_path: _current_path,
-            current_dir: _current_dir,
-            at_path_end: _at_path_end,
+            base_dir: _base_dir,
+            partial_name: _partial_name,
+            ends_with_separator: _ends_with_separator,
         } => {
-            // 如果是目录，追加 "/"，否则追加空格
-            // 这里简化处理：如果候选以 "/" 结尾或者是目录，则追加 "/"，否则追加空格
-            // 暂时先追加空格
-            new_input.push(' ');
+            // 需要检查实际文件系统来确定是否是目录
+            // 构建完整路径来检查文件类型
+            let full_path = Path::new(&_base_dir).join(candidate);
+            if let Ok(metadata) = full_path.metadata() {
+                if metadata.is_dir() {
+                    // 对于目录，追加 "/"
+                    new_input.push('/');
+                } else {
+                    // 对于文件，追加空格
+                    new_input.push(' ');
+                }
+            } else {
+                // 如果无法获取元数据，默认追加空格
+                new_input.push(' ');
+            }
         }
     }
 
@@ -1000,40 +1095,57 @@ fn get_module_list(app: &App) -> Vec<String> {
 }
 
 /// Get file completions for a given directory and path prefix
-/// Returns entries in the directory that match the prefix
+/// Returns entries in the directory that match the prefix (without trailing '/')
 fn get_file_completions(dir_path: &str, prefix: &str) -> Vec<String> {
     let mut completions = Vec::new();
 
     // Parse the directory path
     let dir = Path::new(dir_path);
 
-    // Extract the partial filename to match from the prefix
-    // If prefix ends with /, we're matching empty string (showing all entries)
-    let partial_name = if prefix.ends_with('/') {
-        String::new()
-    } else {
-        // Get the last component of the prefix
-        let prefix_path = Path::new(prefix);
-        prefix_path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default()
-    };
-
     // Try to read the directory
     if let Ok(entries) = fs::read_dir(dir) {
         for entry in entries.flatten() {
-            if let Ok(file_name) = entry.file_name().into_string() {
-                // Check if it matches the partial name
-                if file_name.starts_with(&partial_name) {
-                    // Add the file/directory name (not full path)
-                    completions.push(file_name);
+            if let Ok(_file_type) = entry.file_type() {
+                // Using underscore to indicate unused
+                if let Ok(file_name) = entry.file_name().into_string() {
+                    // Check if it matches the partial name
+                    if file_name.starts_with(prefix) {
+                        // Add the file/directory name (without trailing '/')
+                        completions.push(file_name);
+                    }
                 }
             }
         }
     }
 
-    // Sort alphabetically
-    completions.sort();
-    completions
+    // Sort alphabetically (directories first)
+    // We need to get file types again to sort properly
+    let mut sorted_completions = Vec::new();
+    for name in completions {
+        let full_path = Path::new(dir_path).join(&name);
+        if let Ok(metadata) = full_path.metadata() {
+            if metadata.is_dir() {
+                sorted_completions.push((name, true)); // directory
+            } else {
+                sorted_completions.push((name, false)); // file
+            }
+        } else {
+            sorted_completions.push((name, false)); // default to file if we can't determine
+        }
+    }
+
+    sorted_completions.sort_by(|a, b| {
+        // Sort directories first, then alphabetically
+        match (a.1, b.1) {
+            (true, false) => std::cmp::Ordering::Less, // directory first
+            (false, true) => std::cmp::Ordering::Greater, // then file
+            _ => a.0.cmp(&b.0),                        // both same type, alphabetical
+        }
+    });
+
+    // Extract just the names
+    sorted_completions
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect()
 }
