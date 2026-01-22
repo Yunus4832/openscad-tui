@@ -443,7 +443,7 @@ fn analyze_input_context(input: &str, app: &App) -> crate::app::CompletionContex
     let command = parts[0];
 
     // 检查是否为文件相关命令
-    let file_commands = ["write", "edit", "library"];
+    let file_commands = ["write", "w", "save", "edit", "e", "library"];
     if file_commands.contains(&command) {
         // 文件补全上下文
         if parts.len() == 1 {
