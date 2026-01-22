@@ -47,6 +47,11 @@ pub enum CompletionContext {
         module_name: String,
         param_index: usize,
     },
+    /// Module parameter value completion (after module parameter name)
+    ModuleParamValue {
+        module_param_name: String,
+        value_index: usize,
+    },
     /// File name completion (for write/edit/library commands)
     File {
         /// Current path being completed

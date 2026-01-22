@@ -166,25 +166,10 @@ fn handle_command_input(key: KeyEvent, app: &mut App) {
             app.input_buffer.pop();
         }
 
-        // Enter to execute command
         KeyCode::Enter => {
             if app.completion_active {
-                // Unified behavior: only accept completion, do not execute command
-                app.completion_active = false;
-                app.completion_candidates.clear();
-
-                // Special handling: if file completion and path is directory, add "/"
-                if let crate::app::CompletionContext::File { current_path, .. } =
-                    &app.completion_context
-                {
-                    if !current_path.ends_with('/') && Path::new(current_path).is_dir() {
-                        app.input_buffer.push('/');
-                    }
-                }
-
-                // Note: User needs to press Enter again to execute the command
+                apply_completion(app);
             } else {
-                // Not in completion mode: execute command
                 let cmd = app.input_buffer.clone();
                 execute_command(app, &cmd);
             }
@@ -349,485 +334,12 @@ fn execute_command_registry(app: &mut App, cmd: &str) -> bool {
 }
 
 fn execute_command(app: &mut App, cmd: &str) {
-    // Try the new command registry first
-    if execute_command_registry(app, cmd) {
-        // Command was handled by registry
-        // Return to Normal mode if we're in Command mode
-        if app.input_mode == InputMode::Command {
-            app.input_mode = InputMode::Normal;
-        }
-        return;
-    }
+    execute_command_registry(app, cmd);
 
-    // Fall back to old implementation for commands not yet migrated
-    app.input_buffer.clear();
-
-    if cmd.is_empty() {
-        return;
-    }
-
-    let parts: Vec<&str> = cmd.split_whitespace().collect();
-
-    // Handle shorthand commands first
-    match parts.first() {
-        // === Shorthand single-character commands ===
-
-        // q or quit
-        Some(&"q") | Some(&"quit") => {
-            if let Err(e) = commands::cmd_quit(app) {
-                app.set_error(&e.to_string());
-            }
-        }
-
-        // j/k/down/up - navigate down/up
-        Some(&"j") | Some(&"next") | Some(&"down") => {
-            if let Err(e) = commands::cmd_next(app) {
-                app.set_error(&e.to_string());
-            }
-        }
-        Some(&"k") | Some(&"prev") | Some(&"up") => {
-            if let Err(e) = commands::cmd_prev(app) {
-                app.set_error(&e.to_string());
-            }
-        }
-
-        // h/l - collapse/expand
-        Some(&"h") | Some(&"collapse") | Some(&"left") => {
-            if let Err(e) = commands::cmd_collapse(app) {
-                app.set_error(&e.to_string());
-            }
-        }
-        Some(&"l") | Some(&"expand") | Some(&"right") => {
-            if let Err(e) = commands::cmd_expand(app) {
-                app.set_error(&e.to_string());
-            }
-        }
-        Some(&"toggle") => {
-            if let Err(e) = commands::cmd_toggle(app) {
-                app.set_error(&e.to_string());
-            }
-        }
-
-        // v - select/toggle node
-        Some(&"v") | Some(&"select") => {
-            if let Err(e) = commands::cmd_select_toggle(app) {
-                app.set_error(&e.to_string());
-            }
-        }
-
-        // u - undo
-        Some(&"u") | Some(&"undo") => {
-            if let Err(e) = commands::cmd_undo(app) {
-                app.set_error(&e.to_string());
-            }
-        }
-
-        // r - redo
-        Some(&"r") | Some(&"redo") => {
-            if let Err(e) = commands::cmd_redo(app) {
-                app.set_error(&e.to_string());
-            }
-        }
-
-        // === Full commands ===
-
-        // insert <module_name> [params]
-        // Shorthand: i <module_name> [params]
-        Some(&"insert") | Some(&"i") => {
-            if parts.len() < 2 {
-                app.set_error("Usage: insert <module_name> [params]");
-                app.input_mode = InputMode::Normal;
-                return;
-            }
-            let module_name = parts[1];
-
-            // Get module definition to check parameters and children requirements
-            let module_def = app.library.get_module(module_name);
-
-            // Check if this module accepts children
-            if let Some(ref mdef) = module_def {
-                if mdef.accepts_children && app.selected_nodes.is_empty() {
-                    // This module requires child nodes but none are selected
-                    app.set_error(&format!(
-                        "'{}' requires child modules. Select modules with 'v' first",
-                        module_name
-                    ));
-                    app.input_mode = InputMode::Normal;
-                    return;
-                }
-            }
-
-            let params = if parts.len() > 2 {
-                Some(parts[2..].join(" "))
-            } else {
-                None
-            };
-
-            // Check if module has parameters
-            let module_has_params = module_def
-                .as_ref()
-                .is_some_and(|mdef| !mdef.parameters.is_empty());
-
-            // If params not provided and module has parameters, ask for them in next stage
-            if params.is_none() && module_has_params {
-                app.insert_module_name = Some(module_name.to_string());
-                app.input_mode = InputMode::InsertEnterParams;
-                app.set_info(&format!(
-                    "Enter parameters for '{}' (or press Enter to skip):",
-                    module_name
-                ));
-                return;
-            }
-
-            // If no params provided and module has no parameters, use empty params
-            let final_params = params.or_else(|| Some(String::new()));
-
-            app.push_undo();
-            match commands::cmd_insert(app, module_name, None, final_params.as_deref()) {
-                Ok(_) => {
-                    app.update_navigation_status();
-                    app.set_info(&format!("Inserted: {}", module_name));
-                }
-                Err(e) => app.set_error(&e.to_string()),
-            }
-        }
-
-        // funcdef <function_name> [params=body]
-        Some(&"funcdef") => {
-            if parts.len() < 2 {
-                app.set_error("Usage: funcdef <function_name> [(param1, param2, ...)=expression]");
-                app.input_mode = InputMode::Normal;
-                return;
-            }
-            let func_name = parts[1];
-            let params_body = if parts.len() > 2 {
-                Some(parts[2..].join(" "))
-            } else {
-                None
-            };
-            app.push_undo();
-            match commands::cmd_funcdef(app, func_name, params_body.as_deref()) {
-                Ok(_) => {
-                    app.update_navigation_status();
-                    app.set_info(&format!("Function '{}' defined", func_name));
-                }
-                Err(e) => app.set_error(&e.to_string()),
-            }
-        }
-
-        // moddef <module_name> [params]
-        Some(&"moddef") => {
-            if parts.len() < 2 {
-                app.set_error("Usage: moddef <module_name> [params]");
-                app.input_mode = InputMode::Normal;
-                return;
-            }
-            let module_name = parts[1];
-            let params = if parts.len() > 2 {
-                Some(parts[2..].join(" "))
-            } else {
-                None
-            };
-            app.push_undo();
-            match commands::cmd_moddef(app, module_name, params.as_deref()) {
-                Ok(_) => {
-                    app.update_navigation_status();
-                    app.set_info(&format!("Module '{}' defined", module_name));
-                }
-                Err(e) => app.set_error(&e.to_string()),
-            }
-        }
-
-        // delete [node_id]
-        // Shorthand: d [node_id] or dd or D
-        Some(&"delete") | Some(&"d") | Some(&"dd") | Some(&"D") => {
-            let node_id = if parts.len() > 1 {
-                parts[1].to_string()
-            } else {
-                // Use current cursor position
-                let selected = { app.tree_state.borrow().selected().last().cloned() };
-                match selected {
-                    Some(id) => id,
-                    None => {
-                        app.set_error("No node selected");
-                        app.input_mode = InputMode::Normal;
-                        return;
-                    }
-                }
-            };
-
-            app.push_undo();
-            if let Err(e) = commands::cmd_delete(app, &node_id) {
-                app.set_error(&e.to_string());
-            } else {
-                app.set_info(&format!("Deleted: {}", node_id));
-                app.update_navigation_status();
-            }
-        }
-
-        // translate [params] - apply translate to selected nodes
-        Some(&"translate") => {
-            // Check if we have selected nodes
-            if app.selected_nodes.is_empty() {
-                app.set_error("No nodes selected. Select nodes with 'v' first");
-                app.input_mode = InputMode::Normal;
-                return;
-            }
-
-            // Get parameters if provided
-            let params = if parts.len() > 1 {
-                Some(parts[1..].join(" "))
-            } else {
-                None
-            };
-
-            app.push_undo();
-            match commands::cmd_insert(app, "translate", None, params.as_deref()) {
-                Ok(_) => {
-                    app.set_info("Applied translate to selected nodes");
-                    app.update_navigation_status();
-                }
-                Err(e) => app.set_error(&e.to_string()),
-            }
-        }
-
-        // rotate [params] - apply rotate to selected nodes
-        Some(&"rotate") => {
-            // Check if we have selected nodes
-            if app.selected_nodes.is_empty() {
-                app.set_error("No nodes selected. Select nodes with 'v' first");
-                app.input_mode = InputMode::Normal;
-                return;
-            }
-
-            // Get parameters if provided
-            let params = if parts.len() > 1 {
-                Some(parts[1..].join(" "))
-            } else {
-                None
-            };
-
-            app.push_undo();
-            match commands::cmd_insert(app, "rotate", None, params.as_deref()) {
-                Ok(_) => {
-                    app.set_info("Applied rotate to selected nodes");
-                    app.update_navigation_status();
-                }
-                Err(e) => app.set_error(&e.to_string()),
-            }
-        }
-
-        // scale [params] - apply scale to selected nodes
-        Some(&"scale") => {
-            // Check if we have selected nodes
-            if app.selected_nodes.is_empty() {
-                app.set_error("No nodes selected. Select nodes with 'v' first");
-                app.input_mode = InputMode::Normal;
-                return;
-            }
-
-            // Get parameters if provided
-            let params = if parts.len() > 1 {
-                Some(parts[1..].join(" "))
-            } else {
-                None
-            };
-
-            app.push_undo();
-            match commands::cmd_insert(app, "scale", None, params.as_deref()) {
-                Ok(_) => {
-                    app.set_info("Applied scale to selected nodes");
-                    app.update_navigation_status();
-                }
-                Err(e) => app.set_error(&e.to_string()),
-            }
-        }
-
-        // union - apply union to selected nodes
-        Some(&"union") => {
-            // Check if we have selected nodes
-            if app.selected_nodes.is_empty() {
-                app.set_error("No nodes selected. Select nodes with 'v' first");
-                app.input_mode = InputMode::Normal;
-                return;
-            }
-
-            app.push_undo();
-            match commands::cmd_insert(app, "union", None, None) {
-                Ok(_) => {
-                    app.set_info("Applied union to selected nodes");
-                    app.update_navigation_status();
-                }
-                Err(e) => app.set_error(&e.to_string()),
-            }
-        }
-
-        // difference - apply difference to selected nodes
-        Some(&"difference") => {
-            // Check if we have selected nodes
-            if app.selected_nodes.is_empty() {
-                app.set_error("No nodes selected. Select nodes with 'v' first");
-                app.input_mode = InputMode::Normal;
-                return;
-            }
-
-            app.push_undo();
-            match commands::cmd_insert(app, "difference", None, None) {
-                Ok(_) => {
-                    app.set_info("Applied difference to selected nodes");
-                    app.update_navigation_status();
-                }
-                Err(e) => app.set_error(&e.to_string()),
-            }
-        }
-
-        // intersection - apply intersection to selected nodes
-        Some(&"intersection") => {
-            // Check if we have selected nodes
-            if app.selected_nodes.is_empty() {
-                app.set_error("No nodes selected. Select nodes with 'v' first");
-                app.input_mode = InputMode::Normal;
-                return;
-            }
-
-            app.push_undo();
-            match commands::cmd_insert(app, "intersection", None, None) {
-                Ok(_) => {
-                    app.set_info("Applied intersection to selected nodes");
-                    app.update_navigation_status();
-                }
-                Err(e) => app.set_error(&e.to_string()),
-            }
-        }
-
-        // deselect-all or clear-selection
-        Some(&"deselect-all") | Some(&"deselect_all") | Some(&"clear-selection") => {
-            if let Err(e) = commands::cmd_deselect_all(app) {
-                app.set_error(&e.to_string());
-            }
-        }
-
-        // yank/copy - y [node_id]
-        Some(&"yank") | Some(&"y") => {
-            app.set_error("Yank command not implemented yet");
-        }
-
-        // paste - p
-        Some(&"paste") | Some(&"p") => {
-            app.set_error("Paste command not implemented yet");
-        }
-
-        // remove - x [node_id]
-        Some(&"remove") | Some(&"x") => {
-            app.set_error("Remove command not implemented yet");
-        }
-
-        // replace - r <node_id> <new_module>
-        Some(&"replace") => {
-            if parts.len() < 2 {
-                app.set_error("Usage: replace <node_id> <new_module_name>");
-                app.input_mode = InputMode::Normal;
-                return;
-            }
-            app.set_error("Replace command not implemented yet");
-        }
-
-        // write/save - w <filename>.json
-        Some(&"write") | Some(&"save") | Some(&"w") => {
-            if parts.len() < 2 {
-                app.set_error("Usage: write <filename>.json");
-                app.input_mode = InputMode::Normal;
-                return;
-            }
-            let filename = parts[1];
-            match commands::cmd_write(app, filename) {
-                Ok(_) => app.set_info(&format!("✓ Saved to {}", filename)),
-                Err(e) => app.set_error(&e.to_string()),
-            }
-        }
-
-        // edit - edit <filename>.json
-        Some(&"edit") | Some(&"e") => {
-            if parts.len() < 2 {
-                app.set_error("Usage: edit <filename>.json");
-                app.input_mode = InputMode::Normal;
-                return;
-            }
-            let filename = parts[1];
-            match commands::cmd_load(app, filename) {
-                Ok(_) => app.set_info(&format!("Loaded from {}", filename)),
-                Err(e) => app.set_error(&e.to_string()),
-            }
-        }
-
-        // export - export <filename>.scad
-        Some(&"export") => {
-            if parts.len() < 2 {
-                app.set_error("Usage: export <filename>.scad");
-                app.input_mode = InputMode::Normal;
-                return;
-            }
-            let filename = parts[1];
-            match commands::cmd_export(app, filename) {
-                Ok(_) => app.set_info(&format!("Exported to {}", filename)),
-                Err(e) => app.set_error(&e.to_string()),
-            }
-        }
-
-        // library - library <filename>.json
-        Some(&"library") => {
-            if parts.len() < 2 {
-                app.set_error("Usage: library <filename>.json");
-                app.input_mode = InputMode::Normal;
-                return;
-            }
-            let filename = parts[1];
-            match commands::cmd_load_library(app, filename) {
-                Ok(_) => app.set_info(&format!("Loaded library from {}", filename)),
-                Err(e) => app.set_error(&e.to_string()),
-            }
-        }
-
-        // help - ?
-        Some(&"help") | Some(&"?") => {
-            if let Err(e) = commands::cmd_help(app) {
-                app.set_error(&e.to_string());
-            }
-        }
-
-        // global <var_name>=<value> - define a global variable
-        Some(&"global") => {
-            if parts.len() < 2 {
-                app.set_error("Usage: global <name>=<value>");
-                app.input_mode = InputMode::Normal;
-                return;
-            }
-            let var_spec = parts[1];
-            app.push_undo();
-            match commands::cmd_global(app, var_spec) {
-                Ok(_) => {
-                    app.update_navigation_status();
-                    app.set_info(&format!(
-                        "Global variable '{}' defined",
-                        var_spec.split('=').next().unwrap_or("<invalid>")
-                    ));
-                }
-                Err(e) => app.set_error(&e.to_string()),
-            }
-        }
-
-        _ => {
-            app.set_error(&format!(
-                "Unknown command: '{}'. Type 'help' for commands.",
-                parts.first().unwrap_or(&"")
-            ));
-        }
-    }
-
-    // Return to Normal mode if we're in Command mode
     if app.input_mode == InputMode::Command {
         app.input_mode = InputMode::Normal;
     }
+    return;
 }
 
 /// Handle Tab key for autocompletion
@@ -844,21 +356,12 @@ fn handle_tab_completion(app: &mut App) {
         app.completion_index = 0;
         app.completion_active = true;
 
-        // Apply the first completion
-        apply_completion(app);
+        // preview the first completion
+        preview_completion(app);
     } else {
         // Already in completion mode: cycle to next candidate
         app.completion_index = (app.completion_index + 1) % app.completion_candidates.len();
-        apply_completion(app);
-
-        // New: if we completed to a directory, automatically add "/"
-        if let crate::app::CompletionContext::File { current_path, .. } = &app.completion_context {
-            if !current_path.ends_with('/') && Path::new(current_path).is_dir() {
-                app.input_buffer.push('/');
-                // Clear candidates so next Tab will show directory contents
-                app.completion_candidates.clear();
-            }
-        }
+        preview_completion(app);
     }
 }
 
@@ -902,353 +405,469 @@ fn parse_parameter_names(param_str: &str) -> Vec<String> {
     names
 }
 
-/// Generate completion candidates based on current input buffer
-fn generate_completions(input: &str, app: &App) -> (Vec<String>, crate::app::CompletionContext) {
-    // Check if we're in InsertEnterParams mode
-    if app.input_mode == crate::app::InputMode::InsertEnterParams {
-        // Completing parameters for a module
-        if let Some(ref module_name) = app.insert_module_name {
-            if let Some(module_def) = app.library.get_module(module_name) {
-                // Parse already entered parameters
-                let entered_names = parse_parameter_names(input);
+/// 分析输入字符串，确定当前补全上下文
+fn analyze_input_context(input: &str, _app: &App) -> crate::app::CompletionContext {
+    let trimmed = input.trim();
 
-                // Filter out already entered parameters
-                let candidates: Vec<String> = module_def
-                    .parameters
-                    .iter()
-                    .filter(|p| !entered_names.contains(&p.name))
-                    .map(|p| p.name.clone())
-                    .collect();
-
-                return (
-                    candidates,
-                    crate::app::CompletionContext::ModuleParam {
-                        module_name: module_name.clone(),
-                        param_index: entered_names.len(),
-                    },
-                );
-            }
-        }
-        return (Vec::new(), crate::app::CompletionContext::Command);
+    // 空输入或只有空白字符：命令补全
+    if trimmed.is_empty() {
+        return crate::app::CompletionContext::Command;
     }
 
-    // Empty input: complete commands
-    if input.trim().is_empty() {
-        let commands = get_command_list(app);
-        let mut candidates: Vec<String> = commands;
+    // 按空白字符分割输入
+    let parts: Vec<&str> = trimmed.split_whitespace().collect();
 
-        candidates.sort();
-        return (candidates, crate::app::CompletionContext::Command);
-    }
+    // 第一部分是命令
+    let command = parts[0];
 
-    // Check if input starts with "insert " or "i "
-    if input.starts_with("insert ") || input.starts_with("i ") {
-        let cmd_len = if input.starts_with("insert ") { 7 } else { 2 };
-
-        let after_cmd = &input[cmd_len..];
-
-        // Check if after_cmd is empty or just whitespace
-        if after_cmd.trim().is_empty() {
-            // Just "insert " or "i " with nothing after: complete module names
-            let modules = get_module_list(app);
-            let mut candidates: Vec<String> = modules.iter().map(|s| s.to_string()).collect();
-
-            candidates.sort();
-            return (candidates, crate::app::CompletionContext::Module);
-        }
-
-        // Find the module name (first word after command)
-        let after_cmd_trimmed = after_cmd.trim_start(); // Keep trailing spaces
-        let mut module_end = 0;
-        let mut in_module_name = true;
-
-        for (i, ch) in after_cmd_trimmed.char_indices() {
-            if in_module_name {
-                if ch.is_whitespace() {
-                    // End of module name
-                    in_module_name = false;
-                } else {
-                    module_end = i + ch.len_utf8();
-                }
-            }
-        }
-
-        let module_name_part = &after_cmd_trimmed[..module_end];
-        let after_module = &after_cmd_trimmed[module_end..];
-
-        if module_name_part.is_empty() {
-            // No module name typed yet
-            let prefix = after_cmd_trimmed;
-            let modules = get_module_list(app);
-            let candidates: Vec<String> = modules
-                .iter()
-                .filter(|module| module.starts_with(prefix))
-                .map(|s| s.to_string())
-                .collect();
-
-            let mut sorted = candidates;
-            sorted.sort();
-            return (sorted, crate::app::CompletionContext::Module);
-        }
-
-        // We have a module name, check if it exists
-        if let Some(module_def) = app.library.get_module(module_name_part) {
-            // Check if there's already content after module name
-            if after_module.trim().is_empty() {
-                // Just module name, no parameters yet: complete first parameter
-                let candidates: Vec<String> = module_def
-                    .parameters
-                    .iter()
-                    .map(|p| p.name.clone())
-                    .collect();
-
-                return (
-                    candidates,
-                    crate::app::CompletionContext::ModuleParam {
-                        module_name: module_name_part.to_string(),
-                        param_index: 0,
-                    },
-                );
+    // 检查是否为文件相关命令
+    let file_commands = ["write", "edit", "library"];
+    if file_commands.contains(&command) {
+        // 文件补全上下文
+        if parts.len() == 1 {
+            // 只输入了命令，没有路径
+            if input.ends_with(' ') {
+                // 命令后跟空格，等待文件路径
+                return crate::app::CompletionContext::File {
+                    current_path: String::new(),
+                    current_dir: ".".to_string(),
+                    at_path_end: false,
+                };
             } else {
-                // Has some content after module name: could be partial parameters
-                // Parse parameter names from after_module
-                let entered_names = parse_parameter_names(after_module);
-
-                // Filter out already entered parameters
-                let candidates: Vec<String> = module_def
-                    .parameters
-                    .iter()
-                    .filter(|p| !entered_names.contains(&p.name))
-                    .map(|p| p.name.clone())
-                    .collect();
-
-                return (
-                    candidates,
-                    crate::app::CompletionContext::ModuleParam {
-                        module_name: module_name_part.to_string(),
-                        param_index: entered_names.len(),
-                    },
-                );
+                // 仍在命令补全上下文（但命令已确定，可能不需要补全）
+                return crate::app::CompletionContext::Command;
             }
         } else {
-            // Module not found, try to complete module name
-            let prefix = module_name_part;
-            let modules = get_module_list(app);
-            let candidates: Vec<String> = modules
-                .iter()
-                .filter(|module| module.starts_with(prefix))
-                .map(|s| s.to_string())
-                .collect();
+            // 有路径部分
+            let path_part = parts[1..].join(" ");
+            let current_dir = ".".to_string();
+            let at_path_end = input.ends_with(' ') || input.ends_with('/');
 
-            let mut sorted = candidates;
-            sorted.sort();
-            return (sorted, crate::app::CompletionContext::Module);
-        }
-    }
-
-    // Check for file commands: write/save/w, edit/e, export, library
-    let file_commands = ["write", "save", "w", "edit", "e", "export", "library"];
-    for cmd in &file_commands {
-        if input.starts_with(&format!("{} ", cmd)) {
-            // Extract the path part after the command
-            let after_cmd = &input[cmd.len() + 1..]; // +1 for space
-            let path_prefix = after_cmd.trim();
-
-            // Determine current directory for file completion
-            let path = Path::new(path_prefix);
-            let (current_dir, at_path_end) = if path.is_dir() || path_prefix.ends_with('/') {
-                // If it's a directory or ends with /, we're listing this directory
-                (path_prefix.to_string(), true)
-            } else if let Some(parent) = path.parent() {
-                // If it has a parent, we're listing the parent directory
-                (parent.to_string_lossy().into_owned(), false)
-            } else {
-                // No parent, use current directory
-                (".".to_string(), false)
+            return crate::app::CompletionContext::File {
+                current_path: path_part,
+                current_dir,
+                at_path_end,
             };
-
-            let candidates = get_file_completions(&current_dir, path_prefix);
-            return (
-                candidates,
-                crate::app::CompletionContext::File {
-                    current_path: path_prefix.to_string(),
-                    current_dir,
-                    at_path_end,
-                },
-            );
         }
     }
 
-    // Other cases: command completion for the first word
-    let first_word = input.split_whitespace().next().unwrap_or("");
-    let commands = get_command_list(app);
-    let candidates: Vec<String> = commands
-        .iter()
-        .filter(|cmd| cmd.starts_with(first_word))
-        .map(|s| s.to_string())
-        .collect();
+    if parts.len() == 1 {
+        // 如果输入以空格结尾，则已经输入了命令，进入模块补全上下文
+        if input.ends_with(' ') {
+            return crate::app::CompletionContext::Module;
+        } else {
+            // 否则仍在命令补全上下文
+            return crate::app::CompletionContext::Command;
+        }
+    }
 
-    let mut sorted = candidates;
-    sorted.sort();
-    (sorted, crate::app::CompletionContext::Command)
+    // 至少有命令和模块名（或部分模块名）
+    let module_part = parts[1];
+
+    // 如果只有命令和模块名，没有参数部分
+    if parts.len() == 2 {
+        // 检查输入是否以空格结尾：如果是，则进入模块参数补全上下文
+        if input.ends_with(' ') {
+            // 已经输入了模块名和空格，等待参数
+            return crate::app::CompletionContext::ModuleParam {
+                module_name: module_part.to_string(),
+                param_index: 0,
+            };
+        } else {
+            // 仍在模块补全上下文
+            return crate::app::CompletionContext::Module;
+        }
+    }
+
+    // 有参数部分（第三个及之后的单词）
+    // 参数部分是一个整体，用逗号分隔的 name=value 对
+    let param_str = parts[2..].join(" ");
+
+    // 解析参数字符串以确定当前上下文
+    // 查找最后一个逗号、等号的位置
+    let last_comma = param_str.rfind(',');
+    let last_equal = param_str.rfind('=');
+
+    // 确定当前是在参数名、等号后，还是值之后
+    match (last_comma, last_equal) {
+        (None, None) => {
+            // 没有逗号也没有等号：正在输入第一个参数名
+            crate::app::CompletionContext::ModuleParam {
+                module_name: module_part.to_string(),
+                param_index: 0,
+            }
+        }
+        (Some(comma_pos), None) => {
+            // 有逗号但没有等号（在逗号之后）：正在输入下一个参数名
+            // 计算已经输入了多少个参数（逗号数量）
+            let param_count = param_str[..=comma_pos].matches(',').count();
+            crate::app::CompletionContext::ModuleParam {
+                module_name: module_part.to_string(),
+                param_index: param_count,
+            }
+        }
+        (None, Some(equal_pos)) => {
+            // 有等号但没有逗号：正在输入第一个参数的值
+            // 提取参数名
+            let param_name = param_str[..equal_pos].trim().to_string();
+            crate::app::CompletionContext::ModuleParamValue {
+                module_param_name: param_name,
+                value_index: 0,
+            }
+        }
+        (Some(comma_pos), Some(equal_pos)) => {
+            if comma_pos > equal_pos {
+                // 最后一个逗号在等号之后：参数值已输入完成，等待下一个参数
+                let param_count = param_str[..=comma_pos].matches(',').count();
+                crate::app::CompletionContext::ModuleParam {
+                    module_name: module_part.to_string(),
+                    param_index: param_count,
+                }
+            } else {
+                // 最后一个等号在逗号之后：正在输入当前参数的值
+                // 提取最后一个等号之后的参数名
+                let after_last_comma = param_str[comma_pos + 1..].trim();
+                if let Some(param_equal_pos) = after_last_comma.find('=') {
+                    let param_name = after_last_comma[..param_equal_pos].trim().to_string();
+                    crate::app::CompletionContext::ModuleParamValue {
+                        module_param_name: param_name,
+                        value_index: 0,
+                    }
+                } else {
+                    // 应该不会发生这种情况
+                    crate::app::CompletionContext::ModuleParam {
+                        module_name: module_part.to_string(),
+                        param_index: param_str.matches(',').count(),
+                    }
+                }
+            }
+        }
+    }
 }
 
-/// Apply the current completion to the input buffer
-fn apply_completion(app: &mut App) {
-    if app.completion_candidates.is_empty()
-        || app.completion_index >= app.completion_candidates.len()
-    {
-        return;
+/// 根据前缀过滤字符串列表
+fn filter_by_prefix(items: &[String], prefix: &str) -> Vec<String> {
+    if prefix.is_empty() {
+        return items.to_vec();
     }
+    items
+        .iter()
+        .filter(|item| item.starts_with(prefix))
+        .cloned()
+        .collect()
+}
 
-    let completion = &app.completion_candidates[app.completion_index];
+/// 从参数字符串中提取当前正在输入的参数名部分
+fn get_current_param_name_part(param_str: &str) -> String {
+    // 查找最后一个逗号之后的部分，如果没有逗号则从头开始
+    let after_last_comma = if let Some(pos) = param_str.rfind(',') {
+        &param_str[pos + 1..]
+    } else {
+        param_str
+    };
 
-    // Determine what to replace based on context and current input
-    match &app.completion_context {
+    // 如果包含等号，则等号之前的部分是参数名
+    if let Some(equal_pos) = after_last_comma.find('=') {
+        after_last_comma[..equal_pos].trim().to_string()
+    } else {
+        after_last_comma.trim().to_string()
+    }
+}
+
+/// 从参数字符串中提取当前正在输入的参数值部分
+fn get_current_param_value_part(param_str: &str, param_name: &str) -> String {
+    // 查找指定参数名的等号之后的部分
+    // 参数格式可能是 "size=10, height=20" 或者 "size=10"
+    // 我们需要找到 param_name= 之后的部分，直到下一个逗号或字符串结束
+
+    let pattern = format!("{}=", param_name);
+    if let Some(start) = param_str.find(&pattern) {
+        let value_start = start + pattern.len();
+        // 查找下一个逗号或字符串结束
+        let end = param_str[value_start..]
+            .find(',')
+            .map(|pos| value_start + pos)
+            .unwrap_or(param_str.len());
+        param_str[value_start..end].trim().to_string()
+    } else {
+        String::new()
+    }
+}
+
+/// 生成候选列表
+/// 对于命令，从命令列表读取，对于模块，从模块列表读取，对于模块参数名解析模块获取，对于模块参数值，从模块参数默认值和全局变量
+/// AstRoot.global_variables 中获取
+fn generate_completions(input: &str, app: &App) -> (Vec<String>, crate::app::CompletionContext) {
+    let context = analyze_input_context(input, app);
+
+    let candidates = match &context {
         crate::app::CompletionContext::Command => {
-            // Replace the current word (or whole buffer if empty)
-            if app.input_buffer.trim().is_empty() {
-                app.input_buffer = completion.clone();
-            } else {
-                // Find the current word being typed
-                let current = app.input_buffer.clone();
-                if let Some(last_space) = current.rfind(' ') {
-                    // Replace from last space to end
-                    app.input_buffer = current[..last_space + 1].to_string() + completion;
-                } else {
-                    // No space, replace entire buffer
-                    app.input_buffer = completion.clone();
-                }
-            }
+            // 命令补全：获取所有命令，过滤以匹配输入前缀
+            let all_commands = get_command_list(app);
+            let prefix = input.trim();
+            filter_by_prefix(&all_commands, prefix)
         }
         crate::app::CompletionContext::Module => {
-            // For module completion, we're after "insert " or "i "
-            // Replace the module name part
-            let current = app.input_buffer.clone();
-            if current.starts_with("insert ") {
-                // Keep "insert " prefix
-                app.input_buffer = "insert ".to_string() + completion;
-            } else if current.starts_with("i ") {
-                // Keep "i " prefix
-                app.input_buffer = "i ".to_string() + completion;
+            // 模块补全：获取所有模块，过滤以匹配输入中的模块部分
+            let all_modules = get_module_list(app);
+            // 提取可能已输入的部分模块名
+            let parts: Vec<&str> = input.split_whitespace().collect();
+            let prefix = if parts.len() > 1 {
+                parts[1] // 已经输入的部分模块名
             } else {
-                // Fallback: just replace the current word
-                if let Some(last_space) = current.rfind(' ') {
-                    app.input_buffer = current[..last_space + 1].to_string() + completion;
-                } else {
-                    app.input_buffer = completion.clone();
-                }
-            }
+                "" // 还没有输入模块名
+            };
+            filter_by_prefix(&all_modules, prefix)
         }
         crate::app::CompletionContext::ModuleParam {
             module_name,
-            param_index: _,
+            param_index: _param_index,
         } => {
-            // For parameter completion, handle comma-separated parameters
-            let current = &app.input_buffer;
-
-            // Find the module name in the input
-            // The input could be "insert cube" or "i cube" or "insert cube size=[1,2,3],"
-            // We need to find where the module name ends
-            let (module_pos, after_module) = if let Some(pos) = current.find(module_name.as_str()) {
-                (pos, &current[pos + module_name.len()..])
-            } else {
-                // Module name not found (shouldn't happen), fallback to end
-                (current.len(), "")
-            };
-
-            // Find the last comma in after_module (if any)
-            let last_comma_pos = after_module.rfind(',');
-
-            // Check if user is typing a parameter name (partial word after last comma)
-            let is_typing_param_name = if let Some(comma_pos) = last_comma_pos {
-                // There is a comma, check text after last comma for '='
-                let after_last_comma = &after_module[comma_pos + 1..];
-                !after_last_comma.trim().is_empty() && !after_last_comma.contains('=')
-            } else {
-                // No comma, check entire after_module for '='
-                !after_module.trim().is_empty() && !after_module.contains('=')
-            };
-
-            if is_typing_param_name {
-                // User is typing a parameter name (partial)
-                // Replace everything after the last comma (or entire after_module) with new param
-                let replace_start = if let Some(comma_pos) = last_comma_pos {
-                    module_pos + module_name.len() + comma_pos + 1
+            // 模块参数补全：获取模块的所有参数，过滤掉已输入的参数
+            if let Some(module_def) = app.library.get_module(module_name) {
+                // 获取已输入的参数名
+                let parts: Vec<&str> = input.split_whitespace().collect();
+                let param_str = if parts.len() > 2 {
+                    parts[2..].join(" ")
                 } else {
-                    module_pos + module_name.len()
+                    String::new()
                 };
-                // Keep everything up to replace_start, add space if needed, then param with =
-                let prefix = &current[..replace_start];
-                // Ensure there's a space before param if not already present
-                let needs_space = !prefix.ends_with(' ') && !prefix.ends_with(',');
-                app.input_buffer = prefix.to_string();
-                if needs_space {
-                    app.input_buffer.push(' ');
+                let entered_params = parse_parameter_names(&param_str);
+
+                // 过滤掉已输入的参数
+                let mut candidates: Vec<String> = module_def
+                    .parameters
+                    .iter()
+                    .map(|p| p.name.clone())
+                    .filter(|name| !entered_params.contains(name))
+                    .collect();
+
+                // 如果有部分输入的参数名，进行过滤
+                // 查找当前正在输入的参数名部分
+                let current_param_part = get_current_param_name_part(&param_str);
+                if !current_param_part.is_empty() {
+                    candidates = filter_by_prefix(&candidates, &current_param_part);
                 }
-                app.input_buffer.push_str(completion);
-                app.input_buffer.push('=');
-            } else if after_module.trim().ends_with(',') {
-                // Ends with comma, ready for next parameter
-                // Add space and new parameter
-                app.input_buffer.push(' ');
-                app.input_buffer.push_str(completion);
-                app.input_buffer.push('=');
-            } else if after_module.trim().is_empty() {
-                // No parameters yet, just module name
-                // Add parameter with "="
-                app.input_buffer.push_str(completion);
-                app.input_buffer.push('=');
+
+                candidates
             } else {
-                // Has parameters but doesn't end with comma
-                // Add comma, space, and new parameter
-                app.input_buffer.push_str(", ");
-                app.input_buffer.push_str(completion);
-                app.input_buffer.push('=');
+                Vec::new()
             }
         }
+        crate::app::CompletionContext::ModuleParamValue {
+            module_param_name,
+            value_index: _value_index,
+        } => {
+            // 模块参数值补全：获取参数的默认值（如果存在）和全局变量
+            let mut candidates = Vec::new();
 
+            // 首先，尝试获取参数的默认值
+            // 需要知道是哪个模块的参数
+            // 从输入中提取模块名
+            let parts: Vec<&str> = input.split_whitespace().collect();
+            if parts.len() >= 2 {
+                let module_name = parts[1];
+                if let Some(module_def) = app.library.get_module(module_name) {
+                    if let Some(param_def) = module_def
+                        .parameters
+                        .iter()
+                        .find(|p| p.name == *module_param_name)
+                    {
+                        if let Some(default_val) = &param_def.default {
+                            candidates.push(default_val.clone());
+                        }
+                    }
+                }
+            }
+
+            // 添加全局变量
+            for var in &app.ast.global_variables {
+                candidates.push(var.name.clone());
+            }
+
+            // 如果有部分输入的值，进行过滤
+            let param_str = if parts.len() > 2 {
+                parts[2..].join(" ")
+            } else {
+                String::new()
+            };
+            let current_value_part = get_current_param_value_part(&param_str, module_param_name);
+            if !current_value_part.is_empty() {
+                candidates = filter_by_prefix(&candidates, &current_value_part);
+            }
+
+            candidates
+        }
         crate::app::CompletionContext::File {
             current_path,
-            current_dir: _,
-            at_path_end,
+            current_dir,
+            at_path_end: _at_path_end,
         } => {
-            // For file completion, we need to update the path based on the selected completion
-            let current = &app.input_buffer;
+            // 文件补全
+            get_file_completions(current_dir, current_path)
+        }
+    };
 
-            // Find the command (first word) and the path part after it
-            let first_space = current.find(' ');
-            if let Some(space_pos) = first_space {
-                let command = &current[..space_pos];
+    (candidates, context)
+}
 
-                // Build new path using Path::join to handle slashes correctly
-                let new_path = if *at_path_end {
-                    // We're at the end of current path, append completion
-                    if current_path.is_empty() {
-                        completion.to_string()
-                    } else {
-                        // Use Path::join to properly handle path separators
-                        Path::new(current_path)
-                            .join(completion)
-                            .to_string_lossy()
-                            .into_owned()
-                    }
+/// 预览选中的候选项, 替换缓冲区中的补全内容
+fn preview_completion(app: &mut App) {
+    if app.completion_candidates.is_empty() {
+        return;
+    }
+
+    let candidate = &app.completion_candidates[app.completion_index];
+    let (start, end) = get_replacement_range(&app.input_buffer, &app.completion_context);
+
+    // 替换输入缓冲区中的范围
+    let mut new_input = app.input_buffer.clone();
+    new_input.replace_range(start..end, candidate);
+    app.input_buffer = new_input;
+}
+
+/// 获取输入缓冲区中需要替换的范围（起始索引和结束索引）
+fn get_replacement_range(input: &str, context: &crate::app::CompletionContext) -> (usize, usize) {
+    match context {
+        crate::app::CompletionContext::Command => {
+            // 命令补全：替换第一个单词（或部分单词）
+            let trimmed = input.trim();
+            if trimmed.is_empty() {
+                (input.len(), input.len())
+            } else {
+                // 找到第一个单词的结束位置
+                let first_word_end = trimmed.find(' ').unwrap_or(trimmed.len());
+                let first_word = &trimmed[..first_word_end];
+                // 在原始输入中找到第一个单词的位置
+                let offset = input.len() - trimmed.len();
+                (offset, offset + first_word.len())
+            }
+        }
+        crate::app::CompletionContext::Module => {
+            // 模块补全：替换第二个单词（模块名部分）
+            let parts: Vec<&str> = input.split_whitespace().collect();
+            if parts.len() < 2 {
+                // 没有模块名，在末尾替换
+                (input.len(), input.len())
+            } else {
+                // 找到第二个单词在原始输入中的位置
+                let module_part = parts[1];
+                let module_start = input.find(module_part).unwrap_or(input.len());
+                (module_start, module_start + module_part.len())
+            }
+        }
+        crate::app::CompletionContext::ModuleParam {
+            module_name: _module_name,
+            param_index: _param_index,
+        } => {
+            // 模块参数补全：替换当前正在输入的参数名部分
+            let parts: Vec<&str> = input.split_whitespace().collect();
+            if parts.len() < 3 {
+                // 没有参数部分，在末尾替换
+                (input.len(), input.len())
+            } else {
+                let param_str = parts[2..].join(" ");
+                let current_param_part = get_current_param_name_part(&param_str);
+                // 在原始输入中找到参数部分的位置
+                let param_start = input.find(&param_str).unwrap_or(input.len());
+                let current_part_start = param_str.find(&current_param_part).unwrap_or(0);
+                (
+                    param_start + current_part_start,
+                    param_start + current_part_start + current_param_part.len(),
+                )
+            }
+        }
+        crate::app::CompletionContext::ModuleParamValue {
+            module_param_name,
+            value_index: _value_index,
+        } => {
+            // 模块参数值补全：替换当前参数的值部分
+            let parts: Vec<&str> = input.split_whitespace().collect();
+            if parts.len() < 3 {
+                (input.len(), input.len())
+            } else {
+                let param_str = parts[2..].join(" ");
+                let _current_value_part =
+                    get_current_param_value_part(&param_str, module_param_name);
+                // 找到参数值部分的位置
+                let pattern = format!("{}=", module_param_name);
+                if let Some(start) = param_str.find(&pattern) {
+                    let value_start = start + pattern.len();
+                    let end = param_str[value_start..]
+                        .find(',')
+                        .map(|pos| value_start + pos)
+                        .unwrap_or(param_str.len());
+                    let param_start = input.find(&param_str).unwrap_or(input.len());
+                    (param_start + value_start, param_start + end)
                 } else {
-                    // Replace the last component of the path
-                    let path = Path::new(current_path);
-                    if let Some(parent) = path.parent() {
-                        parent.join(completion).to_string_lossy().into_owned()
-                    } else {
-                        completion.to_string()
-                    }
-                };
-
-                // Don't add trailing slash here - let Enter do that
-                // Update the input buffer with command and new path
-                app.input_buffer = format!("{} {}", command, new_path);
+                    (input.len(), input.len())
+                }
+            }
+        }
+        crate::app::CompletionContext::File {
+            current_path: _current_path,
+            current_dir: _current_dir,
+            at_path_end: _at_path_end,
+        } => {
+            // 文件补全：替换路径部分
+            let parts: Vec<&str> = input.split_whitespace().collect();
+            if parts.len() < 2 {
+                (input.len(), input.len())
+            } else {
+                let path_part = parts[1..].join(" ");
+                let path_start = input.find(&path_part).unwrap_or(input.len());
+                (path_start, path_start + path_part.len())
             }
         }
     }
+}
+
+/// 应用选中的候选项，并退出补全模式, 对于命令补全，需要追加空格，对于模块补全，需要追加空格
+/// 对于模块参数名补全需要追加 "=" 等号，对于模块参数值补全需要追加 "," 逗号
+fn apply_completion(app: &mut App) {
+    if app.completion_candidates.is_empty() {
+        return;
+    }
+
+    let candidate = &app.completion_candidates[app.completion_index];
+    let (start, end) = get_replacement_range(&app.input_buffer, &app.completion_context);
+
+    // 替换输入缓冲区中的范围
+    let mut new_input = app.input_buffer.clone();
+    new_input.replace_range(start..end, candidate);
+
+    // 根据上下文追加分隔符
+    match &app.completion_context {
+        crate::app::CompletionContext::Command => {
+            new_input.push(' ');
+        }
+        crate::app::CompletionContext::Module => {
+            new_input.push(' ');
+        }
+        crate::app::CompletionContext::ModuleParam { .. } => {
+            new_input.push('=');
+        }
+        crate::app::CompletionContext::ModuleParamValue { .. } => {
+            new_input.push(',');
+        }
+        crate::app::CompletionContext::File {
+            current_path: _current_path,
+            current_dir: _current_dir,
+            at_path_end: _at_path_end,
+        } => {
+            // 如果是目录，追加 "/"，否则追加空格
+            // 这里简化处理：如果候选以 "/" 结尾或者是目录，则追加 "/"，否则追加空格
+            // 暂时先追加空格
+            new_input.push(' ');
+        }
+    }
+
+    app.input_buffer = new_input;
+
+    // 退出补全模式
+    app.completion_active = false;
+    app.completion_candidates.clear();
+    app.completion_index = 0;
 }
 
 /// Get list of available commands from the command registry
