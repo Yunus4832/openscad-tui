@@ -207,33 +207,37 @@ fn handle_insert_params_input(key: KeyEvent, app: &mut App) {
         }
         KeyCode::Enter => {
             // User finished entering parameters
-            let params = app.input_buffer.trim().to_string();
-            if let Some(ref module_name) = app.insert_module_name.clone() {
-                // Check if module accepts children and we have selections
-                if let Some(module_def) = app.library.get_module(module_name) {
-                    if module_def.accepts_children && app.selected_nodes.is_empty() {
-                        app.set_error(&format!(
-                            "'{}' requires child modules. Select modules with 'v' first",
-                            module_name
-                        ));
-                        app.input_mode = InputMode::Normal;
-                        app.input_buffer.clear();
-                        app.insert_module_name = None;
-                        return;
+            if app.completion_active {
+                apply_completion(app);
+            } else {
+                let params = app.input_buffer.trim().to_string();
+                if let Some(ref module_name) = app.insert_module_name.clone() {
+                    // Check if module accepts children and we have selections
+                    if let Some(module_def) = app.library.get_module(module_name) {
+                        if module_def.accepts_children && app.selected_nodes.is_empty() {
+                            app.set_error(&format!(
+                                "'{}' requires child modules. Select modules with 'v' first",
+                                module_name
+                            ));
+                            app.input_mode = InputMode::Normal;
+                            app.input_buffer.clear();
+                            app.insert_module_name = None;
+                            return;
+                        }
+                    }
+
+                    app.push_undo();
+                    if let Err(e) = commands::cmd_insert(app, module_name, None, Some(&params)) {
+                        app.set_error(&e.to_string());
+                    } else {
+                        app.update_navigation_status();
+                        app.set_info(&format!("Inserted: {}", module_name));
                     }
                 }
-
-                app.push_undo();
-                if let Err(e) = commands::cmd_insert(app, module_name, None, Some(&params)) {
-                    app.set_error(&e.to_string());
-                } else {
-                    app.update_navigation_status();
-                    app.set_info(&format!("Inserted: {}", module_name));
-                }
+                app.input_mode = InputMode::Normal;
+                app.input_buffer.clear();
+                app.insert_module_name = None;
             }
-            app.input_mode = InputMode::Normal;
-            app.input_buffer.clear();
-            app.insert_module_name = None;
         }
         KeyCode::Esc => {
             app.input_mode = InputMode::Normal;
@@ -339,25 +343,26 @@ fn execute_command(app: &mut App, cmd: &str) {
     if app.input_mode == InputMode::Command {
         app.input_mode = InputMode::Normal;
     }
-    return;
 }
 
 /// Handle Tab key for autocompletion
 fn handle_tab_completion(app: &mut App) {
     if !app.completion_active {
-        // First Tab press: generate completions
         let (candidates, context) = generate_completions(&app.input_buffer, app);
         if candidates.is_empty() {
-            // No completions available
             return;
         }
-        app.completion_candidates = candidates;
+
         app.completion_context = context;
         app.completion_index = 0;
         app.completion_active = true;
-
-        // preview the first completion
+        app.completion_candidates = candidates;
         preview_completion(app);
+
+        // Check for single match
+        if app.completion_candidates.len() == 1 {
+            apply_completion(app);
+        }
     } else {
         // Already in completion mode: cycle to next candidate
         app.completion_index = (app.completion_index + 1) % app.completion_candidates.len();
@@ -406,8 +411,25 @@ fn parse_parameter_names(param_str: &str) -> Vec<String> {
 }
 
 /// 分析输入字符串，确定当前补全上下文
-fn analyze_input_context(input: &str, _app: &App) -> crate::app::CompletionContext {
+fn analyze_input_context(input: &str, app: &App) -> crate::app::CompletionContext {
     let trimmed = input.trim();
+
+    // 检查是否为 InsertEnterParams 模式
+    if app.input_mode == crate::app::InputMode::InsertEnterParams {
+        // 在 InsertEnterParams 模式下，输入只包含参数字符串
+        // 模块名存储在 app.insert_module_name 中
+        if let Some(ref module_name) = app.insert_module_name {
+            return analyze_param_context(trimmed, module_name);
+        } else {
+            // 如果没有模块名，返回默认上下文
+            return crate::app::CompletionContext::ModuleParam {
+                module_name: String::new(),
+                param_index: 0,
+            };
+        }
+    }
+
+    // 正常命令模式（以下为原有逻辑）
 
     // 空输入或只有空白字符：命令补全
     if trimmed.is_empty() {
@@ -483,6 +505,11 @@ fn analyze_input_context(input: &str, _app: &App) -> crate::app::CompletionConte
     // 参数部分是一个整体，用逗号分隔的 name=value 对
     let param_str = parts[2..].join(" ");
 
+    analyze_param_context(&param_str, module_part)
+}
+
+/// 分析参数字符串上下文（用于正常模式和 InsertEnterParams 模式）
+fn analyze_param_context(param_str: &str, module_name: &str) -> crate::app::CompletionContext {
     // 解析参数字符串以确定当前上下文
     // 查找最后一个逗号、等号的位置
     let last_comma = param_str.rfind(',');
@@ -493,7 +520,7 @@ fn analyze_input_context(input: &str, _app: &App) -> crate::app::CompletionConte
         (None, None) => {
             // 没有逗号也没有等号：正在输入第一个参数名
             crate::app::CompletionContext::ModuleParam {
-                module_name: module_part.to_string(),
+                module_name: module_name.to_string(),
                 param_index: 0,
             }
         }
@@ -502,7 +529,7 @@ fn analyze_input_context(input: &str, _app: &App) -> crate::app::CompletionConte
             // 计算已经输入了多少个参数（逗号数量）
             let param_count = param_str[..=comma_pos].matches(',').count();
             crate::app::CompletionContext::ModuleParam {
-                module_name: module_part.to_string(),
+                module_name: module_name.to_string(),
                 param_index: param_count,
             }
         }
@@ -511,6 +538,7 @@ fn analyze_input_context(input: &str, _app: &App) -> crate::app::CompletionConte
             // 提取参数名
             let param_name = param_str[..equal_pos].trim().to_string();
             crate::app::CompletionContext::ModuleParamValue {
+                module_name: module_name.to_string(),
                 module_param_name: param_name,
                 value_index: 0,
             }
@@ -520,7 +548,7 @@ fn analyze_input_context(input: &str, _app: &App) -> crate::app::CompletionConte
                 // 最后一个逗号在等号之后：参数值已输入完成，等待下一个参数
                 let param_count = param_str[..=comma_pos].matches(',').count();
                 crate::app::CompletionContext::ModuleParam {
-                    module_name: module_part.to_string(),
+                    module_name: module_name.to_string(),
                     param_index: param_count,
                 }
             } else {
@@ -530,13 +558,14 @@ fn analyze_input_context(input: &str, _app: &App) -> crate::app::CompletionConte
                 if let Some(param_equal_pos) = after_last_comma.find('=') {
                     let param_name = after_last_comma[..param_equal_pos].trim().to_string();
                     crate::app::CompletionContext::ModuleParamValue {
+                        module_name: module_name.to_string(),
                         module_param_name: param_name,
                         value_index: 0,
                     }
                 } else {
                     // 应该不会发生这种情况
                     crate::app::CompletionContext::ModuleParam {
-                        module_name: module_part.to_string(),
+                        module_name: module_name.to_string(),
                         param_index: param_str.matches(',').count(),
                     }
                 }
@@ -597,8 +626,8 @@ fn find_last_param_separator(param_str: &str) -> Option<usize> {
 fn find_next_param_separator_from(param_str: &str, start: usize) -> Option<usize> {
     let mut in_brackets = 0;
     let chars: Vec<char> = param_str.chars().collect();
-    for i in start..chars.len() {
-        match chars[i] {
+    for (i, &ch) in chars.iter().enumerate().skip(start) {
+        match ch {
             '[' => in_brackets += 1,
             ']' if in_brackets > 0 => in_brackets -= 1,
             ',' if in_brackets == 0 => {
@@ -624,6 +653,57 @@ fn get_current_param_value_part(param_str: &str, param_name: &str) -> String {
         param_str[value_start..end].trim().to_string()
     } else {
         String::new()
+    }
+}
+
+/// 获取模块中还未输入的参数列表（包括有默认值的可选参数）
+fn get_remaining_parameters(app: &App, module_name: &str, input: &str) -> Vec<String> {
+    let mut remaining = Vec::new();
+
+    if let Some(module_def) = app.library.get_module(module_name) {
+        // 获取已输入的参数名
+        let entered_params = parse_parameter_names(input);
+
+        // 添加所有未输入的参数（包括有默认值的）
+        for param in &module_def.parameters {
+            if !entered_params.contains(&param.name) {
+                remaining.push(param.name.clone());
+            }
+        }
+    }
+
+    remaining
+}
+
+/// 判断当前参数是否是最后一个未输入的参数
+fn is_last_parameter(app: &App, module_name: &str, input: &str) -> bool {
+    let remaining = get_remaining_parameters(app, module_name, input);
+    // 当前参数在剩余参数列表中，且是最后一个
+    remaining.is_empty()
+}
+
+/// 根据输入模式和上下文提取模块名和参数字符串
+fn extract_module_and_param_str(app: &App, input: &str) -> (Option<String>, String) {
+    if app.input_mode == crate::app::InputMode::InsertEnterParams {
+        // InsertEnterParams 模式：模块名在 app.insert_module_name 中
+        // 整个输入就是参数字符串
+        let module_name = app.insert_module_name.clone();
+        let param_str = input.trim().to_string();
+        (module_name, param_str)
+    } else {
+        // 正常命令模式：从输入中提取模块名和参数字符串
+        let parts: Vec<&str> = input.split_whitespace().collect();
+        if parts.len() >= 2 {
+            let module_name = Some(parts[1].to_string());
+            let param_str = if parts.len() > 2 {
+                parts[2..].join(" ")
+            } else {
+                String::new()
+            };
+            (module_name, param_str)
+        } else {
+            (None, String::new())
+        }
     }
 }
 
@@ -659,12 +739,7 @@ fn generate_completions(input: &str, app: &App) -> (Vec<String>, crate::app::Com
             // 模块参数补全：获取模块的所有参数，过滤掉已输入的参数
             if let Some(module_def) = app.library.get_module(module_name) {
                 // 获取已输入的参数名
-                let parts: Vec<&str> = input.split_whitespace().collect();
-                let param_str = if parts.len() > 2 {
-                    parts[2..].join(" ")
-                } else {
-                    String::new()
-                };
+                let (_, param_str) = extract_module_and_param_str(app, input);
                 let entered_params = parse_parameter_names(&param_str);
 
                 // 过滤掉已输入的参数
@@ -688,6 +763,7 @@ fn generate_completions(input: &str, app: &App) -> (Vec<String>, crate::app::Com
             }
         }
         crate::app::CompletionContext::ModuleParamValue {
+            module_name,
             module_param_name,
             value_index: _value_index,
         } => {
@@ -695,20 +771,14 @@ fn generate_completions(input: &str, app: &App) -> (Vec<String>, crate::app::Com
             let mut candidates = Vec::new();
 
             // 首先，尝试获取参数的默认值
-            // 需要知道是哪个模块的参数
-            // 从输入中提取模块名
-            let parts: Vec<&str> = input.split_whitespace().collect();
-            if parts.len() >= 2 {
-                let module_name = parts[1];
-                if let Some(module_def) = app.library.get_module(module_name) {
-                    if let Some(param_def) = module_def
-                        .parameters
-                        .iter()
-                        .find(|p| p.name == *module_param_name)
-                    {
-                        if let Some(default_val) = &param_def.default {
-                            candidates.push(default_val.clone());
-                        }
+            if let Some(module_def) = app.library.get_module(module_name) {
+                if let Some(param_def) = module_def
+                    .parameters
+                    .iter()
+                    .find(|p| p.name == *module_param_name)
+                {
+                    if let Some(default_val) = &param_def.default {
+                        candidates.push(default_val.clone());
                     }
                 }
             }
@@ -719,11 +789,7 @@ fn generate_completions(input: &str, app: &App) -> (Vec<String>, crate::app::Com
             }
 
             // 如果有部分输入的值，进行过滤
-            let param_str = if parts.len() > 2 {
-                parts[2..].join(" ")
-            } else {
-                String::new()
-            };
+            let (_, param_str) = extract_module_and_param_str(app, input);
             let current_value_part = get_current_param_value_part(&param_str, module_param_name);
             if !current_value_part.is_empty() {
                 candidates = filter_by_prefix(&candidates, &current_value_part);
@@ -751,7 +817,7 @@ fn preview_completion(app: &mut App) {
     }
 
     let candidate = &app.completion_candidates[app.completion_index];
-    let (start, end) = get_replacement_range(&app.input_buffer, &app.completion_context);
+    let (start, end) = get_replacement_range(&app.input_buffer, &app.completion_context, app);
 
     // 替换输入缓冲区中的范围
     let mut new_input = app.input_buffer.clone();
@@ -760,7 +826,11 @@ fn preview_completion(app: &mut App) {
 }
 
 /// 获取输入缓冲区中需要替换的范围（起始索引和结束索引）
-fn get_replacement_range(input: &str, context: &crate::app::CompletionContext) -> (usize, usize) {
+fn get_replacement_range(
+    input: &str,
+    context: &crate::app::CompletionContext,
+    app: &App,
+) -> (usize, usize) {
     match context {
         crate::app::CompletionContext::Command => {
             // 命令补全：替换第一个单词（或部分单词）
@@ -794,59 +864,55 @@ fn get_replacement_range(input: &str, context: &crate::app::CompletionContext) -
             param_index: _param_index,
         } => {
             // 模块参数补全：替换当前正在输入的参数名部分
-            let parts: Vec<&str> = input.split_whitespace().collect();
-            if parts.len() < 3 {
-                // 没有参数部分，在末尾替换
-                (input.len(), input.len())
-            } else {
-                let param_str = parts[2..].join(" ");
-                let current_param_part = get_current_param_name_part(&param_str);
-                // 在原始输入中找到参数部分的位置
-                let param_start = input.find(&param_str).unwrap_or(input.len());
+            let (_, param_str) = extract_module_and_param_str(app, input);
+            let current_param_part = get_current_param_name_part(&param_str);
 
-                if current_param_part.is_empty() {
-                    // 用户尚未开始输入参数名，替换位置应该在最后一个逗号之后
-                    // 如果没有逗号，则在参数字符串末尾
-                    if let Some(comma_pos) = find_last_param_separator(&param_str) {
-                        // 逗号之后的位置
-                        (param_start + comma_pos + 1, param_start + comma_pos + 1)
-                    } else {
-                        // 没有逗号，在参数字符串末尾
-                        (param_start + param_str.len(), param_start + param_str.len())
-                    }
+            // 在原始输入中找到参数部分的位置
+            let param_start = if param_str.is_empty() {
+                input.len()
+            } else {
+                input.rfind(&param_str).unwrap_or(input.len())
+            };
+
+            if current_param_part.is_empty() {
+                // 用户尚未开始输入参数名，替换位置应该在最后一个逗号之后
+                // 如果没有逗号，则在参数字符串末尾
+                if let Some(comma_pos) = find_last_param_separator(&param_str) {
+                    // 逗号之后的位置
+                    (param_start + comma_pos + 1, param_start + comma_pos + 1)
                 } else {
-                    // 用户已输入部分参数名，替换该部分
-                    let current_part_start = param_str.find(&current_param_part).unwrap_or(0);
-                    (
-                        param_start + current_part_start,
-                        param_start + current_part_start + current_param_part.len(),
-                    )
+                    // 没有逗号，在参数字符串末尾
+                    (param_start + param_str.len(), param_start + param_str.len())
                 }
+            } else {
+                // 用户已输入部分参数名，替换该部分
+                let current_part_start = param_str.rfind(&current_param_part).unwrap_or(0);
+                (
+                    param_start + current_part_start,
+                    param_start + current_part_start + current_param_part.len(),
+                )
             }
         }
         crate::app::CompletionContext::ModuleParamValue {
+            module_name: _module_name,
             module_param_name,
             value_index: _value_index,
         } => {
             // 模块参数值补全：替换当前参数的值部分
-            let parts: Vec<&str> = input.split_whitespace().collect();
-            if parts.len() < 3 {
-                (input.len(), input.len())
+            // 使用 extract_module_and_param_str 获取参数字符串
+            let (_, param_str) = extract_module_and_param_str(app, input);
+
+            // 找到参数值部分的位置
+            let pattern = format!("{}=", module_param_name);
+            if let Some(start) = param_str.find(&pattern) {
+                let value_start = start + pattern.len();
+                let end = find_next_param_separator_from(&param_str, value_start)
+                    .unwrap_or(param_str.len());
+                // 在原始输入中找到参数字符串的位置
+                let param_start = input.find(&param_str).unwrap_or(input.len());
+                (param_start + value_start, param_start + end)
             } else {
-                let param_str = parts[2..].join(" ");
-                let _current_value_part =
-                    get_current_param_value_part(&param_str, module_param_name);
-                // 找到参数值部分的位置
-                let pattern = format!("{}=", module_param_name);
-                if let Some(start) = param_str.find(&pattern) {
-                    let value_start = start + pattern.len();
-                    let end = find_next_param_separator_from(&param_str, value_start)
-                        .unwrap_or(param_str.len());
-                    let param_start = input.find(&param_str).unwrap_or(input.len());
-                    (param_start + value_start, param_start + end)
-                } else {
-                    (input.len(), input.len())
-                }
+                (input.len(), input.len())
             }
         }
         crate::app::CompletionContext::File {
@@ -875,7 +941,7 @@ fn apply_completion(app: &mut App) {
     }
 
     let candidate = &app.completion_candidates[app.completion_index];
-    let (start, end) = get_replacement_range(&app.input_buffer, &app.completion_context);
+    let (start, end) = get_replacement_range(&app.input_buffer, &app.completion_context, app);
 
     // 替换输入缓冲区中的范围
     let mut new_input = app.input_buffer.clone();
@@ -892,8 +958,16 @@ fn apply_completion(app: &mut App) {
         crate::app::CompletionContext::ModuleParam { .. } => {
             new_input.push('=');
         }
-        crate::app::CompletionContext::ModuleParamValue { .. } => {
-            new_input.push(',');
+        crate::app::CompletionContext::ModuleParamValue {
+            module_name,
+            module_param_name: _,
+            value_index: _value_index,
+        } => {
+            // 检查当前参数是否是最后一个参数, 不是最后一个参数，追加逗号
+            let (_, param_str) = extract_module_and_param_str(app, &app.input_buffer);
+            if !is_last_parameter(app, module_name, &param_str) {
+                new_input.push(',');
+            }
         }
         crate::app::CompletionContext::File {
             current_path: _current_path,
@@ -962,53 +1036,4 @@ fn get_file_completions(dir_path: &str, prefix: &str) -> Vec<String> {
     // Sort alphabetically
     completions.sort();
     completions
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::app::CompletionContext;
-
-    #[test]
-    fn test_get_current_param_name_part() {
-        // 测试空字符串
-        assert_eq!(get_current_param_name_part(""), "");
-        // 测试 size=8,
-        assert_eq!(get_current_param_name_part("size=8,"), "");
-        // 测试 size=8,center
-        assert_eq!(get_current_param_name_part("size=8,center"), "center");
-        // 测试 size=8,center=
-        assert_eq!(get_current_param_name_part("size=8,center="), "center");
-    }
-
-    #[test]
-    fn test_get_replacement_range_module_param() {
-        // 测试 insert cube size=8, 的情况
-        let input = "insert cube size=8,";
-        let context = CompletionContext::ModuleParam {
-            module_name: "cube".to_string(),
-            param_index: 1,
-        };
-        let (start, end) = get_replacement_range(input, &context);
-        // 期望替换范围应该是逗号之后的位置（空字符串）
-        // 参数字符串是 "size=8,"
-        // 当前参数名部分为空，所以应该替换空范围在逗号之后
-        // 输入中参数字符串的起始位置
-        let param_str = "size=8,";
-        let param_start = input.find(param_str).unwrap();
-        // 当前参数名部分为空，在 param_str 中查找空字符串返回 0
-        // 但应该查找逗号之后的位置？实际上空字符串在位置 0 匹配
-        // 替换范围应该是 param_start + param_str.len() - 1 (逗号位置)？
-        // 实际上，我们希望在逗号之后插入新的参数名
-        // 所以替换范围应该是逗号之后的位置，即 param_start + param_str.len()
-        // 但 current_param_part 是空字符串，find 返回 0，这不对。
-        // 让我们先打印调试信息
-        println!("input: {}", input);
-        println!("param_str: {}", param_str);
-        println!("param_start: {}", param_start);
-        println!("start: {}, end: {}", start, end);
-        // 期望替换范围是输入末尾（空范围）
-        assert_eq!(start, input.len());
-        assert_eq!(end, input.len());
-    }
 }

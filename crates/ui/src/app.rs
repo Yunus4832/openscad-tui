@@ -49,6 +49,7 @@ pub enum CompletionContext {
     },
     /// Module parameter value completion (after module parameter name)
     ModuleParamValue {
+        module_name: String,
         module_param_name: String,
         value_index: usize,
     },
