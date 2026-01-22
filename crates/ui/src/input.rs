@@ -559,8 +559,9 @@ fn filter_by_prefix(items: &[String], prefix: &str) -> Vec<String> {
 
 /// 从参数字符串中提取当前正在输入的参数名部分
 fn get_current_param_name_part(param_str: &str) -> String {
-    // 查找最后一个逗号之后的部分，如果没有逗号则从头开始
-    let after_last_comma = if let Some(pos) = param_str.rfind(',') {
+    // 查找最后一个参数分隔符逗号之后的部分，如果没有逗号则从头开始
+    // 忽略括号内的逗号
+    let after_last_comma = if let Some(pos) = find_last_param_separator(param_str) {
         &param_str[pos + 1..]
     } else {
         param_str
@@ -574,6 +575,41 @@ fn get_current_param_name_part(param_str: &str) -> String {
     }
 }
 
+/// 查找最后一个参数分隔符逗号的位置（忽略括号内的逗号）
+fn find_last_param_separator(param_str: &str) -> Option<usize> {
+    let mut in_brackets = 0;
+    let mut last_comma = None;
+
+    for (i, ch) in param_str.chars().enumerate() {
+        match ch {
+            '[' => in_brackets += 1,
+            ']' if in_brackets > 0 => in_brackets -= 1,
+            ',' if in_brackets == 0 => {
+                last_comma = Some(i);
+            }
+            _ => {}
+        }
+    }
+    last_comma
+}
+
+/// 从指定位置开始查找下一个参数分隔符逗号的位置（忽略括号内的逗号）
+fn find_next_param_separator_from(param_str: &str, start: usize) -> Option<usize> {
+    let mut in_brackets = 0;
+    let chars: Vec<char> = param_str.chars().collect();
+    for i in start..chars.len() {
+        match chars[i] {
+            '[' => in_brackets += 1,
+            ']' if in_brackets > 0 => in_brackets -= 1,
+            ',' if in_brackets == 0 => {
+                return Some(i);
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 /// 从参数字符串中提取当前正在输入的参数值部分
 fn get_current_param_value_part(param_str: &str, param_name: &str) -> String {
     // 查找指定参数名的等号之后的部分
@@ -583,11 +619,8 @@ fn get_current_param_value_part(param_str: &str, param_name: &str) -> String {
     let pattern = format!("{}=", param_name);
     if let Some(start) = param_str.find(&pattern) {
         let value_start = start + pattern.len();
-        // 查找下一个逗号或字符串结束
-        let end = param_str[value_start..]
-            .find(',')
-            .map(|pos| value_start + pos)
-            .unwrap_or(param_str.len());
+        // 查找下一个逗号或字符串结束，忽略括号内的逗号
+        let end = find_next_param_separator_from(param_str, value_start).unwrap_or(param_str.len());
         param_str[value_start..end].trim().to_string()
     } else {
         String::new()
@@ -770,11 +803,25 @@ fn get_replacement_range(input: &str, context: &crate::app::CompletionContext) -
                 let current_param_part = get_current_param_name_part(&param_str);
                 // 在原始输入中找到参数部分的位置
                 let param_start = input.find(&param_str).unwrap_or(input.len());
-                let current_part_start = param_str.find(&current_param_part).unwrap_or(0);
-                (
-                    param_start + current_part_start,
-                    param_start + current_part_start + current_param_part.len(),
-                )
+
+                if current_param_part.is_empty() {
+                    // 用户尚未开始输入参数名，替换位置应该在最后一个逗号之后
+                    // 如果没有逗号，则在参数字符串末尾
+                    if let Some(comma_pos) = find_last_param_separator(&param_str) {
+                        // 逗号之后的位置
+                        (param_start + comma_pos + 1, param_start + comma_pos + 1)
+                    } else {
+                        // 没有逗号，在参数字符串末尾
+                        (param_start + param_str.len(), param_start + param_str.len())
+                    }
+                } else {
+                    // 用户已输入部分参数名，替换该部分
+                    let current_part_start = param_str.find(&current_param_part).unwrap_or(0);
+                    (
+                        param_start + current_part_start,
+                        param_start + current_part_start + current_param_part.len(),
+                    )
+                }
             }
         }
         crate::app::CompletionContext::ModuleParamValue {
@@ -793,9 +840,7 @@ fn get_replacement_range(input: &str, context: &crate::app::CompletionContext) -
                 let pattern = format!("{}=", module_param_name);
                 if let Some(start) = param_str.find(&pattern) {
                     let value_start = start + pattern.len();
-                    let end = param_str[value_start..]
-                        .find(',')
-                        .map(|pos| value_start + pos)
+                    let end = find_next_param_separator_from(&param_str, value_start)
                         .unwrap_or(param_str.len());
                     let param_start = input.find(&param_str).unwrap_or(input.len());
                     (param_start + value_start, param_start + end)
@@ -917,4 +962,53 @@ fn get_file_completions(dir_path: &str, prefix: &str) -> Vec<String> {
     // Sort alphabetically
     completions.sort();
     completions
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::CompletionContext;
+
+    #[test]
+    fn test_get_current_param_name_part() {
+        // 测试空字符串
+        assert_eq!(get_current_param_name_part(""), "");
+        // 测试 size=8,
+        assert_eq!(get_current_param_name_part("size=8,"), "");
+        // 测试 size=8,center
+        assert_eq!(get_current_param_name_part("size=8,center"), "center");
+        // 测试 size=8,center=
+        assert_eq!(get_current_param_name_part("size=8,center="), "center");
+    }
+
+    #[test]
+    fn test_get_replacement_range_module_param() {
+        // 测试 insert cube size=8, 的情况
+        let input = "insert cube size=8,";
+        let context = CompletionContext::ModuleParam {
+            module_name: "cube".to_string(),
+            param_index: 1,
+        };
+        let (start, end) = get_replacement_range(input, &context);
+        // 期望替换范围应该是逗号之后的位置（空字符串）
+        // 参数字符串是 "size=8,"
+        // 当前参数名部分为空，所以应该替换空范围在逗号之后
+        // 输入中参数字符串的起始位置
+        let param_str = "size=8,";
+        let param_start = input.find(param_str).unwrap();
+        // 当前参数名部分为空，在 param_str 中查找空字符串返回 0
+        // 但应该查找逗号之后的位置？实际上空字符串在位置 0 匹配
+        // 替换范围应该是 param_start + param_str.len() - 1 (逗号位置)？
+        // 实际上，我们希望在逗号之后插入新的参数名
+        // 所以替换范围应该是逗号之后的位置，即 param_start + param_str.len()
+        // 但 current_param_part 是空字符串，find 返回 0，这不对。
+        // 让我们先打印调试信息
+        println!("input: {}", input);
+        println!("param_str: {}", param_str);
+        println!("param_start: {}", param_start);
+        println!("start: {}, end: {}", start, end);
+        // 期望替换范围是输入末尾（空范围）
+        assert_eq!(start, input.len());
+        assert_eq!(end, input.len());
+    }
 }
