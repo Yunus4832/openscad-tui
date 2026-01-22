@@ -17,8 +17,6 @@ pub enum CommandType {
     NoArgCmd,
     /// Definition command: for defining content, no completion needed (global, moddef, funcdef)
     DefinitionCmd,
-    /// Generic command: standard command with no special completion needs
-    GenericCmd,
 }
 
 /// Command type - used for dynamic completion context analysis

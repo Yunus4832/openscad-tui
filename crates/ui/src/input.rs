@@ -566,42 +566,6 @@ fn analyze_input_context(input: &str, app: &App) -> crate::app::CompletionContex
                 // 定义命令：无需补全
                 return crate::app::CompletionContext::Command;
             }
-            crate::command_registry::CommandType::GenericCmd => {
-                // 通用命令：使用默认逻辑
-                if parts.len() == 1 {
-                    // 如果输入以空格结尾，则已经输入了命令，进入模块补全上下文
-                    if input.ends_with(' ') {
-                        return crate::app::CompletionContext::Module;
-                    } else {
-                        // 否则仍在命令补全上下文
-                        return crate::app::CompletionContext::Command;
-                    }
-                }
-
-                // 至少有命令和模块名（或部分模块名）
-                let module_part = parts[1];
-
-                // 如果只有命令和模块名，没有参数部分
-                if parts.len() == 2 {
-                    // 检查输入是否以空格结尾：如果是，则进入模块参数补全上下文
-                    if input.ends_with(' ') {
-                        // 已经输入了模块名和空格，等待参数
-                        return crate::app::CompletionContext::ModuleParam {
-                            module_name: module_part.to_string(),
-                            param_index: 0,
-                        };
-                    } else {
-                        // 仍在模块补全上下文
-                        return crate::app::CompletionContext::Module;
-                    }
-                }
-
-                // 有参数部分（第三个及之后的单词）
-                // 参数部分是一个整体，用逗号分隔的 name=value 对
-                let param_str = parts[2..].join(" ");
-
-                return analyze_param_context(&param_str, module_part);
-            }
         }
     }
 
