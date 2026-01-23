@@ -473,10 +473,23 @@ fn analyze_input_context(input: &str, app: &App) -> crate::app::CompletionContex
                         let base = &path_part[..last_slash + 1];
                         let partial = &path_part[last_slash + 1..];
 
-                        // 处理相对路径
+                        // 处理相对路径和波浪号（~）
                         let normalized_base = if base.starts_with('/') {
                             // 绝对路径
                             base.to_string()
+                        } else if base.starts_with("~/") || base == "~/" || base == "~" {
+                            // 处理波浪号（~）表示 home 目录
+                            if let Some(home_dir) = std::env::var("HOME").ok() {
+                                if base == "~/" || base == "~" {
+                                    home_dir
+                                } else {
+                                    // 替换 ~ 为 home 目录路径
+                                    format!("{}/", home_dir)
+                                }
+                            } else {
+                                // 如果无法获取 home 目录，保持原样
+                                base.to_string()
+                            }
                         } else {
                             // 相对路径，需要与当前目录结合
                             if base == "./" || base.is_empty() {
@@ -489,7 +502,22 @@ fn analyze_input_context(input: &str, app: &App) -> crate::app::CompletionContex
                         (normalized_base, partial.to_string())
                     } else {
                         // 没有分隔符，整个都是文件名部分
-                        (".".to_string(), path_part.clone())
+                        if path_part.starts_with("~/") || path_part == "~" {
+                            // 如果整个路径是 ~ 或以 ~/ 開始，转换为 home 目录
+                            if let Some(home_dir) = std::env::var("HOME").ok() {
+                                if path_part == "~" {
+                                    (home_dir, String::new())
+                                } else {
+                                    // 移除 ~/
+                                    let rest = &path_part[2..];
+                                    (home_dir, rest.to_string())
+                                }
+                            } else {
+                                (".".to_string(), path_part.clone())
+                            }
+                        } else {
+                            (".".to_string(), path_part.clone())
+                        }
                     };
 
                     // 检查完整路径是否存在且为文件，如果是且输入以空格结尾，切换回命令上下文
