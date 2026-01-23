@@ -639,11 +639,11 @@ impl App {
         find_recursive(modules, node_id, 0)
     }
 
-    pub fn mark_dirty(&mut self) -> () {
+    pub fn mark_dirty(&mut self) {
         self.saved = false;
     }
 
-    pub fn mark_saved(&mut self) -> () {
+    pub fn mark_saved(&mut self) {
         self.saved = true;
     }
 }

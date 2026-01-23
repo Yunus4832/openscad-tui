@@ -8,15 +8,15 @@ use std::collections::HashMap;
 #[derive(Debug, Clone, PartialEq)]
 pub enum CommandType {
     /// File command: next argument is file path (write, edit, library, export)
-    FileCmd,
+    File,
     /// Module command: next argument is module name (insert)
-    ModuleCmd,
+    Module,
     /// Parameter command: command itself is a module, args are module parameters (translate, rotate, scale)
-    ParamCmd,
+    Param,
     /// No-argument command: command requires no further arguments (difference, union, etc.)
-    NoArgCmd,
+    NoArg,
     /// Definition command: for defining content, no completion needed (global, moddef, funcdef)
-    DefinitionCmd,
+    Definition,
 }
 
 /// Command type - used for dynamic completion context analysis
@@ -74,8 +74,8 @@ impl CommandDef {
             max_args,
             usage: usage.into(),
             examples: examples.into_iter().map(|s| s.into()).collect(),
-            cmd_type: cmd_type,
-            change_ast: change_ast
+            cmd_type,
+            change_ast
         }
     }
 

@@ -428,11 +428,11 @@ fn analyze_input_context(input: &str, app: &App) -> CompletionContext {
         // 在 InsertEnterParams 模式下，输入只包含参数字符串
         // 模块名存储在 app.insert_module_name 中
         if let Some(ref module_name) = app.insert_module_name {
-            return analyze_param_context(trimmed, module_name, CommandType::ModuleCmd);
+            return analyze_param_context(trimmed, module_name, CommandType::Module);
         } else {
             // 如果没有模块名，返回默认上下文
             return CompletionContext::ModuleParam {
-                cmd_type: CommandType::ModuleCmd,
+                cmd_type: CommandType::Module,
                 module_name: String::new(),
                 param_index: 0,
             };
@@ -457,18 +457,18 @@ fn analyze_input_context(input: &str, app: &App) -> CompletionContext {
     // 使用命令注册表查找命令类型
     if let Some(cmd_def) = app.command_registry.find(command) {
         match &cmd_def.cmd_type {
-            CommandType::FileCmd => {
+            CommandType::File => {
                 // 文件命令处理逻辑
                 if parts.len() == 1 {
                     if input.ends_with(' ') {
-                        return CompletionContext::File {
+                        CompletionContext::File {
                             current_path: String::new(),
                             base_dir: ".".to_string(),
                             partial_name: String::new(),
                             ends_with_separator: false,
-                        };
+                        }
                     } else {
-                        return CompletionContext::Command;
+                        CompletionContext::Command
                     }
                 } else {
                     // 有路径部分
@@ -485,10 +485,10 @@ fn analyze_input_context(input: &str, app: &App) -> CompletionContext {
                         let normalized_base = if base.starts_with('/') {
                             // 绝对路径
                             base.to_string()
-                        } else if base.starts_with("~/") {
+                        } else if let Some(stripped) = base.strip_prefix("~/") {
                             // 处理波浪号（~）表示 home 目录
-                            if let Some(home_dir) = std::env::var("HOME").ok() {
-                                format!("{}/{}", home_dir, &base[2..])
+                            if let Ok(home_dir) = std::env::var("HOME") {
+                                format!("{}/{}", home_dir, stripped)
                             } else {
                                 // 如果无法获取 home 目录，保持原样
                                 base.to_string()
@@ -507,7 +507,7 @@ fn analyze_input_context(input: &str, app: &App) -> CompletionContext {
                         // 没有分隔符，整个都是文件名部分
                         if path_part == "~" {
                             // 如果整个路径是 ~，转换为 home 目录
-                            if let Some(home_dir) = std::env::var("HOME").ok() {
+                            if let Ok(home_dir) = std::env::var("HOME") {
                                 (home_dir, String::new())
                             } else {
                                 (".".to_string(), path_part.clone())
@@ -528,21 +528,21 @@ fn analyze_input_context(input: &str, app: &App) -> CompletionContext {
                         return CompletionContext::Command;
                     }
 
-                    return CompletionContext::File {
+                    CompletionContext::File {
                         current_path: path_part,
                         base_dir,
                         partial_name,
                         ends_with_separator,
-                    };
+                    }
                 }
             }
-            CommandType::ModuleCmd => {
+            CommandType::Module => {
                 // insert 命令的处理逻辑 (insert <module> [params])
                 if parts.len() == 1 {
                     if input.ends_with(' ') {
-                        return CompletionContext::Module;
+                        CompletionContext::Module
                     } else {
-                        return CompletionContext::Command;
+                        CompletionContext::Command
                     }
                 } else {
                     // 第二个参数应为模块名
@@ -551,57 +551,57 @@ fn analyze_input_context(input: &str, app: &App) -> CompletionContext {
                     if parts.len() == 2 {
                         // 检查输入是否以空格结尾：如果是，则进入模块参数补全上下文
                         if input.ends_with(' ') {
-                            return CompletionContext::ModuleParam {
-                                cmd_type: CommandType::ModuleCmd,
+                            CompletionContext::ModuleParam {
+                                cmd_type: CommandType::Module,
                                 module_name: module_part.to_string(),
                                 param_index: 0,
-                            };
+                            }
                         } else {
-                            return CompletionContext::Module;
+                            CompletionContext::Module
                         }
                     } else {
                         // 有参数部分
                         let param_str = parts[2..].join(" ");
-                        return analyze_param_context(
+                        analyze_param_context(
                             &param_str,
                             module_part,
-                            CommandType::ModuleCmd,
-                        );
+                            CommandType::Module,
+                        )
                     }
                 }
             }
-            CommandType::ParamCmd => {
+            CommandType::Param => {
                 // 参数命令的处理逻辑 (<transform_cmd> [params])
                 if parts.len() == 1 {
                     // 只有命令名
                     if input.ends_with(' ') {
                         // 命令后有空格，进入此命令的参数补全
-                        return CompletionContext::ModuleParam {
-                            cmd_type: CommandType::ParamCmd,
+                        CompletionContext::ModuleParam {
+                            cmd_type: CommandType::Param,
                             module_name: command.to_string(),
                             param_index: 0,
-                        };
+                        }
                     } else {
                         // 只输入了命令，还在命令补全阶段
-                        return CompletionContext::Command;
+                        CompletionContext::Command
                     }
                 } else {
                     // 命令后有参数，将所有参数作为一个整体处理
                     let param_str = parts[1..].join(" ");
-                    return analyze_param_context(&param_str, command, CommandType::ParamCmd);
+                    analyze_param_context(&param_str, command, CommandType::Param)
                 }
             }
-            CommandType::NoArgCmd => {
+            CommandType::NoArg => {
                 // 无参数命令：无需补全
-                return CompletionContext::Command;
+                CompletionContext::Command
             }
-            CommandType::DefinitionCmd => {
+            CommandType::Definition => {
                 // 定义命令：无需补全
-                return CompletionContext::Command;
+                CompletionContext::Command
             }
         }
     } else {
-        return CompletionContext::Command;
+        CompletionContext::Command
     }
 }
 
@@ -621,7 +621,7 @@ fn analyze_param_context(
         (None, None) => {
             // 没有逗号也没有等号：正在输入第一个参数名
             CompletionContext::ModuleParam {
-                cmd_type: cmd_type,
+                cmd_type,
                 module_name: module_name.to_string(),
                 param_index: 0,
             }
@@ -631,7 +631,7 @@ fn analyze_param_context(
             // 计算已经输入了多少个参数（逗号数量）
             let param_count = param_str[..=comma_pos].matches(',').count();
             CompletionContext::ModuleParam {
-                cmd_type: cmd_type,
+                cmd_type,
                 module_name: module_name.to_string(),
                 param_index: param_count,
             }
@@ -641,7 +641,7 @@ fn analyze_param_context(
             // 提取参数名
             let param_name = param_str[..equal_pos].trim().to_string();
             CompletionContext::ModuleParamValue {
-                cmd_type: cmd_type,
+                cmd_type,
                 module_name: module_name.to_string(),
                 module_param_name: param_name,
                 value_index: 0,
@@ -652,7 +652,7 @@ fn analyze_param_context(
                 // 最后一个逗号在等号之后：参数值已输入完成，等待下一个参数
                 let param_count = param_str[..=comma_pos].matches(',').count();
                 CompletionContext::ModuleParam {
-                    cmd_type: cmd_type,
+                    cmd_type,
                     module_name: module_name.to_string(),
                     param_index: param_count,
                 }
@@ -663,7 +663,7 @@ fn analyze_param_context(
                 if let Some(param_equal_pos) = after_last_comma.find('=') {
                     let param_name = after_last_comma[..param_equal_pos].trim().to_string();
                     CompletionContext::ModuleParamValue {
-                        cmd_type: cmd_type,
+                        cmd_type,
                         module_name: module_name.to_string(),
                         module_param_name: param_name,
                         value_index: 0,
@@ -671,7 +671,7 @@ fn analyze_param_context(
                 } else {
                     // 应该不会发生这种情况
                     CompletionContext::ModuleParam {
-                        cmd_type: cmd_type,
+                        cmd_type,
                         module_name: module_name.to_string(),
                         param_index: param_str.matches(',').count(),
                     }
@@ -826,7 +826,7 @@ fn extract_module_and_param_str(
     } else {
         // 正常命令模式：从输入中提取模块名和参数字符串
         let parts: Vec<&str> = input.split_whitespace().collect();
-        if cmd_type == &CommandType::ModuleCmd {
+        if cmd_type == &CommandType::Module {
             if parts.len() >= 2 {
                 let module_name = Some(parts[1].to_string());
                 let param_str = if parts.len() > 2 {
@@ -838,8 +838,8 @@ fn extract_module_and_param_str(
             } else {
                 (None, String::new())
             }
-        } else if cmd_type == &CommandType::ParamCmd {
-            if parts.len() >= 1 {
+        } else if cmd_type == &CommandType::Param {
+            if !parts.is_empty() {
                 let module_name = Some(parts[0].to_string());
                 let param_str = if parts.len() > 1 {
                     parts[1..].join(" ")
@@ -889,7 +889,7 @@ fn generate_completions(input: &str, app: &App) -> (Vec<String>, CompletionConte
             // 模块参数补全：获取模块的所有参数，过滤掉已输入的参数
             if let Some(module_def) = app.library.get_module(module_name) {
                 // 获取已输入的参数名
-                let (_, param_str) = extract_module_and_param_str(app, input, &_cmd_type);
+                let (_, param_str) = extract_module_and_param_str(app, input, _cmd_type);
                 let entered_params = parse_parameter_names(&param_str);
 
                 // 过滤掉已输入的参数
@@ -940,7 +940,7 @@ fn generate_completions(input: &str, app: &App) -> (Vec<String>, CompletionConte
             }
 
             // 如果有部分输入的值，进行过滤
-            let (_, param_str) = extract_module_and_param_str(app, input, &_cmd_type);
+            let (_, param_str) = extract_module_and_param_str(app, input, _cmd_type);
             let current_value_part = get_current_param_value_part(&param_str, module_param_name);
             if !current_value_part.is_empty() {
                 candidates = filter_by_prefix(&candidates, &current_value_part);
@@ -954,7 +954,7 @@ fn generate_completions(input: &str, app: &App) -> (Vec<String>, CompletionConte
             ..
         } => {
             // 文件补全 - 使用基础目录和部分名称
-            get_file_completions(&base_dir, &partial_name)
+            get_file_completions(base_dir, partial_name)
         }
     };
 
@@ -976,7 +976,7 @@ fn preview_completion(app: &mut App) {
             partial_name: _,
             ends_with_separator: _,
         } => {
-            if *&app.input_buffer.trim().ends_with("~") {
+            if app.input_buffer.trim().ends_with("~") {
                 let candidate_clone = &app.completion_candidates[app.completion_index].clone();
                 &format!("{}{}", "~/", candidate_clone)
             } else {
@@ -1027,7 +1027,7 @@ fn get_replacement_range(input: &str, context: &CompletionContext, app: &App) ->
             param_index: _param_index,
         } => {
             // 模块参数补全：替换当前正在输入的参数名部分
-            let (_, param_str) = extract_module_and_param_str(app, input, &_cmd_type);
+            let (_, param_str) = extract_module_and_param_str(app, input, _cmd_type);
             let current_param_part = get_current_param_name_part(&param_str);
 
             // 在原始输入中找到参数部分的位置
@@ -1064,7 +1064,7 @@ fn get_replacement_range(input: &str, context: &CompletionContext, app: &App) ->
         } => {
             // 模块参数值补全：替换当前参数的值部分
             // 使用 extract_module_and_param_str 获取参数字符串
-            let (_, param_str) = extract_module_and_param_str(app, input, &_cmd_type);
+            let (_, param_str) = extract_module_and_param_str(app, input, _cmd_type);
 
             // 找到参数值部分的位置
             let pattern = format!("{}=", module_param_name);
@@ -1153,7 +1153,7 @@ fn apply_completion(app: &mut App) {
             value_index: _value_index,
         } => {
             // 检查当前参数是否是最后一个参数, 不是最后一个参数，追加逗号
-            let (_, param_str) = extract_module_and_param_str(app, &app.input_buffer, &_cmd_type);
+            let (_, param_str) = extract_module_and_param_str(app, &app.input_buffer, _cmd_type);
             if !is_last_parameter(app, module_name, &param_str) {
                 new_input.push(',');
             }
