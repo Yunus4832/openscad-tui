@@ -477,14 +477,14 @@ fn analyze_input_context(input: &str, app: &App) -> crate::app::CompletionContex
                         let normalized_base = if base.starts_with('/') {
                             // 绝对路径
                             base.to_string()
-                        } else if base.starts_with("~/") || base == "~/" || base == "~" {
+                        } else if base.starts_with("~/") || base == "~" {
                             // 处理波浪号（~）表示 home 目录
                             if let Some(home_dir) = std::env::var("HOME").ok() {
-                                if base == "~/" || base == "~" {
-                                    home_dir
-                                } else {
-                                    // 替换 ~ 为 home 目录路径
+                                if base == "~" {
                                     format!("{}/", home_dir)
+                                } else {
+                                    // 替换 ~ 为 home 目录路径，并保留其后的路径部分
+                                    format!("{}{}", home_dir, &base[2..]) // 跳过 "~/"
                                 }
                             } else {
                                 // 如果无法获取 home 目录，保持原样
