@@ -3,7 +3,7 @@
 //! Normal mode: Quick keybindings for common operations (i/j/k/h/l/v)
 //! Command mode: Free text input for complex commands with parameter input
 
-use crate::app::{App, InputMode};
+use crate::app::{App, CompletionContext, InputMode};
 use crate::command_registry::CommandType;
 use crate::commands;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -412,18 +412,18 @@ fn parse_parameter_names(param_str: &str) -> Vec<String> {
 }
 
 /// 分析输入字符串，确定当前补全上下文
-fn analyze_input_context(input: &str, app: &App) -> crate::app::CompletionContext {
+fn analyze_input_context(input: &str, app: &App) -> CompletionContext {
     let trimmed = input.trim();
 
     // 检查是否为 InsertEnterParams 模式
-    if app.input_mode == crate::app::InputMode::InsertEnterParams {
+    if app.input_mode == InputMode::InsertEnterParams {
         // 在 InsertEnterParams 模式下，输入只包含参数字符串
         // 模块名存储在 app.insert_module_name 中
         if let Some(ref module_name) = app.insert_module_name {
             return analyze_param_context(trimmed, module_name, CommandType::ModuleCmd);
         } else {
             // 如果没有模块名，返回默认上下文
-            return crate::app::CompletionContext::ModuleParam {
+            return CompletionContext::ModuleParam {
                 cmd_type: CommandType::ModuleCmd,
                 module_name: String::new(),
                 param_index: 0,
@@ -433,14 +433,14 @@ fn analyze_input_context(input: &str, app: &App) -> crate::app::CompletionContex
 
     // 空输入或只有空白字符：命令补全
     if trimmed.is_empty() {
-        return crate::app::CompletionContext::Command;
+        return CompletionContext::Command;
     }
 
     // 按空白字符分割输入
     let parts: Vec<&str> = trimmed.split_whitespace().collect();
 
     if parts.is_empty() {
-        return crate::app::CompletionContext::Command;
+        return CompletionContext::Command;
     }
 
     // 第一部分是命令
@@ -453,14 +453,14 @@ fn analyze_input_context(input: &str, app: &App) -> crate::app::CompletionContex
                 // 文件命令处理逻辑
                 if parts.len() == 1 {
                     if input.ends_with(' ') {
-                        return crate::app::CompletionContext::File {
+                        return CompletionContext::File {
                             current_path: String::new(),
                             base_dir: ".".to_string(),
                             partial_name: String::new(),
                             ends_with_separator: false,
                         };
                     } else {
-                        return crate::app::CompletionContext::Command;
+                        return CompletionContext::Command;
                     }
                 } else {
                     // 有路径部分
@@ -477,15 +477,10 @@ fn analyze_input_context(input: &str, app: &App) -> crate::app::CompletionContex
                         let normalized_base = if base.starts_with('/') {
                             // 绝对路径
                             base.to_string()
-                        } else if base.starts_with("~/") || base == "~" {
+                        } else if base.starts_with("~/") {
                             // 处理波浪号（~）表示 home 目录
                             if let Some(home_dir) = std::env::var("HOME").ok() {
-                                if base == "~" {
-                                    format!("{}/", home_dir)
-                                } else {
-                                    // 替换 ~ 为 home 目录路径，并保留其后的路径部分
-                                    format!("{}{}", home_dir, &base[2..]) // 跳过 "~/"
-                                }
+                                format!("{}/{}", home_dir, &base[2..])
                             } else {
                                 // 如果无法获取 home 目录，保持原样
                                 base.to_string()
@@ -502,16 +497,10 @@ fn analyze_input_context(input: &str, app: &App) -> crate::app::CompletionContex
                         (normalized_base, partial.to_string())
                     } else {
                         // 没有分隔符，整个都是文件名部分
-                        if path_part.starts_with("~/") || path_part == "~" {
-                            // 如果整个路径是 ~ 或以 ~/ 開始，转换为 home 目录
+                        if path_part == "~" {
+                            // 如果整个路径是 ~，转换为 home 目录
                             if let Some(home_dir) = std::env::var("HOME").ok() {
-                                if path_part == "~" {
-                                    (home_dir, String::new())
-                                } else {
-                                    // 移除 ~/
-                                    let rest = &path_part[2..];
-                                    (home_dir, rest.to_string())
-                                }
+                                (home_dir, String::new())
                             } else {
                                 (".".to_string(), path_part.clone())
                             }
@@ -528,10 +517,10 @@ fn analyze_input_context(input: &str, app: &App) -> crate::app::CompletionContex
                         && full_path.is_file()
                     {
                         // 用户已指定一个存在的文件并添加了空格，意味着完成文件选择
-                        return crate::app::CompletionContext::Command;
+                        return CompletionContext::Command;
                     }
 
-                    return crate::app::CompletionContext::File {
+                    return CompletionContext::File {
                         current_path: path_part,
                         base_dir,
                         partial_name,
@@ -543,9 +532,9 @@ fn analyze_input_context(input: &str, app: &App) -> crate::app::CompletionContex
                 // insert 命令的处理逻辑 (insert <module> [params])
                 if parts.len() == 1 {
                     if input.ends_with(' ') {
-                        return crate::app::CompletionContext::Module;
+                        return CompletionContext::Module;
                     } else {
-                        return crate::app::CompletionContext::Command;
+                        return CompletionContext::Command;
                     }
                 } else {
                     // 第二个参数应为模块名
@@ -554,13 +543,13 @@ fn analyze_input_context(input: &str, app: &App) -> crate::app::CompletionContex
                     if parts.len() == 2 {
                         // 检查输入是否以空格结尾：如果是，则进入模块参数补全上下文
                         if input.ends_with(' ') {
-                            return crate::app::CompletionContext::ModuleParam {
+                            return CompletionContext::ModuleParam {
                                 cmd_type: CommandType::ModuleCmd,
                                 module_name: module_part.to_string(),
                                 param_index: 0,
                             };
                         } else {
-                            return crate::app::CompletionContext::Module;
+                            return CompletionContext::Module;
                         }
                     } else {
                         // 有参数部分
@@ -579,14 +568,14 @@ fn analyze_input_context(input: &str, app: &App) -> crate::app::CompletionContex
                     // 只有命令名
                     if input.ends_with(' ') {
                         // 命令后有空格，进入此命令的参数补全
-                        return crate::app::CompletionContext::ModuleParam {
+                        return CompletionContext::ModuleParam {
                             cmd_type: CommandType::ParamCmd,
                             module_name: command.to_string(),
                             param_index: 0,
                         };
                     } else {
                         // 只输入了命令，还在命令补全阶段
-                        return crate::app::CompletionContext::Command;
+                        return CompletionContext::Command;
                     }
                 } else {
                     // 命令后有参数，将所有参数作为一个整体处理
@@ -596,15 +585,15 @@ fn analyze_input_context(input: &str, app: &App) -> crate::app::CompletionContex
             }
             CommandType::NoArgCmd => {
                 // 无参数命令：无需补全
-                return crate::app::CompletionContext::Command;
+                return CompletionContext::Command;
             }
             CommandType::DefinitionCmd => {
                 // 定义命令：无需补全
-                return crate::app::CompletionContext::Command;
+                return CompletionContext::Command;
             }
         }
     } else {
-        return crate::app::CompletionContext::Command;
+        return CompletionContext::Command;
     }
 }
 
@@ -613,7 +602,7 @@ fn analyze_param_context(
     param_str: &str,
     module_name: &str,
     cmd_type: CommandType,
-) -> crate::app::CompletionContext {
+) -> CompletionContext {
     // 解析参数字符串以确定当前上下文
     // 查找最后一个逗号、等号的位置
     let last_comma = param_str.rfind(',');
@@ -623,7 +612,7 @@ fn analyze_param_context(
     match (last_comma, last_equal) {
         (None, None) => {
             // 没有逗号也没有等号：正在输入第一个参数名
-            crate::app::CompletionContext::ModuleParam {
+            CompletionContext::ModuleParam {
                 cmd_type: cmd_type,
                 module_name: module_name.to_string(),
                 param_index: 0,
@@ -633,7 +622,7 @@ fn analyze_param_context(
             // 有逗号但没有等号（在逗号之后）：正在输入下一个参数名
             // 计算已经输入了多少个参数（逗号数量）
             let param_count = param_str[..=comma_pos].matches(',').count();
-            crate::app::CompletionContext::ModuleParam {
+            CompletionContext::ModuleParam {
                 cmd_type: cmd_type,
                 module_name: module_name.to_string(),
                 param_index: param_count,
@@ -643,7 +632,7 @@ fn analyze_param_context(
             // 有等号但没有逗号：正在输入第一个参数的值
             // 提取参数名
             let param_name = param_str[..equal_pos].trim().to_string();
-            crate::app::CompletionContext::ModuleParamValue {
+            CompletionContext::ModuleParamValue {
                 cmd_type: cmd_type,
                 module_name: module_name.to_string(),
                 module_param_name: param_name,
@@ -654,7 +643,7 @@ fn analyze_param_context(
             if comma_pos > equal_pos {
                 // 最后一个逗号在等号之后：参数值已输入完成，等待下一个参数
                 let param_count = param_str[..=comma_pos].matches(',').count();
-                crate::app::CompletionContext::ModuleParam {
+                CompletionContext::ModuleParam {
                     cmd_type: cmd_type,
                     module_name: module_name.to_string(),
                     param_index: param_count,
@@ -665,7 +654,7 @@ fn analyze_param_context(
                 let after_last_comma = param_str[comma_pos + 1..].trim();
                 if let Some(param_equal_pos) = after_last_comma.find('=') {
                     let param_name = after_last_comma[..param_equal_pos].trim().to_string();
-                    crate::app::CompletionContext::ModuleParamValue {
+                    CompletionContext::ModuleParamValue {
                         cmd_type: cmd_type,
                         module_name: module_name.to_string(),
                         module_param_name: param_name,
@@ -673,7 +662,7 @@ fn analyze_param_context(
                     }
                 } else {
                     // 应该不会发生这种情况
-                    crate::app::CompletionContext::ModuleParam {
+                    CompletionContext::ModuleParam {
                         cmd_type: cmd_type,
                         module_name: module_name.to_string(),
                         param_index: param_str.matches(',').count(),
@@ -820,7 +809,7 @@ fn extract_module_and_param_str(
     input: &str,
     cmd_type: &CommandType,
 ) -> (Option<String>, String) {
-    if app.input_mode == crate::app::InputMode::InsertEnterParams {
+    if app.input_mode == InputMode::InsertEnterParams {
         // InsertEnterParams 模式：模块名在 app.insert_module_name 中
         // 整个输入就是参数字符串
         let module_name = app.insert_module_name.clone();
@@ -862,17 +851,17 @@ fn extract_module_and_param_str(
 /// 生成候选列表
 /// 对于命令，从命令列表读取，对于模块，从模块列表读取，对于模块参数名解析模块获取，对于模块参数值，从模块参数默认值和全局变量
 /// AstRoot.global_variables 中获取
-fn generate_completions(input: &str, app: &App) -> (Vec<String>, crate::app::CompletionContext) {
+fn generate_completions(input: &str, app: &App) -> (Vec<String>, CompletionContext) {
     let context = analyze_input_context(input, app);
 
     let candidates = match &context {
-        crate::app::CompletionContext::Command => {
+        CompletionContext::Command => {
             // 命令补全：获取所有命令，过滤以匹配输入前缀
             let all_commands = get_command_list(app);
             let prefix = input.trim();
             filter_by_prefix(&all_commands, prefix)
         }
-        crate::app::CompletionContext::Module => {
+        CompletionContext::Module => {
             // 模块补全：获取所有模块，过滤以匹配输入中的模块部分
             let all_modules = get_module_list(app);
             // 提取可能已输入的部分模块名
@@ -884,7 +873,7 @@ fn generate_completions(input: &str, app: &App) -> (Vec<String>, crate::app::Com
             };
             filter_by_prefix(&all_modules, prefix)
         }
-        crate::app::CompletionContext::ModuleParam {
+        CompletionContext::ModuleParam {
             cmd_type: _cmd_type,
             module_name,
             param_index: _param_index,
@@ -915,7 +904,7 @@ fn generate_completions(input: &str, app: &App) -> (Vec<String>, crate::app::Com
                 Vec::new()
             }
         }
-        crate::app::CompletionContext::ModuleParamValue {
+        CompletionContext::ModuleParamValue {
             cmd_type: _cmd_type,
             module_name,
             module_param_name,
@@ -951,7 +940,7 @@ fn generate_completions(input: &str, app: &App) -> (Vec<String>, crate::app::Com
 
             candidates
         }
-        crate::app::CompletionContext::File {
+        CompletionContext::File {
             base_dir,
             partial_name,
             ..
@@ -970,23 +959,34 @@ fn preview_completion(app: &mut App) {
         return;
     }
 
-    let candidate = &app.completion_candidates[app.completion_index];
-    let (start, end) = get_replacement_range(&app.input_buffer, &app.completion_context, app);
-
     // 替换输入缓冲区中的范围
+    let (start, end) = get_replacement_range(&app.input_buffer, &app.completion_context, app);
+    let candidate = match &app.completion_context {
+        CompletionContext::File {
+            current_path: _,
+            base_dir: _,
+            partial_name: _,
+            ends_with_separator: _,
+        } => {
+            if *&app.input_buffer.trim().ends_with("~") {
+                let candidate_clone = &app.completion_candidates[app.completion_index].clone();
+                &format!("{}{}", "~/", candidate_clone)
+            } else {
+                &app.completion_candidates[app.completion_index]
+            }
+        }
+        _ => &app.completion_candidates[app.completion_index]
+    };
+
     let mut new_input = app.input_buffer.clone();
     new_input.replace_range(start..end, candidate);
     app.input_buffer = new_input;
 }
 
 /// 获取输入缓冲区中需要替换的范围（起始索引和结束索引）
-fn get_replacement_range(
-    input: &str,
-    context: &crate::app::CompletionContext,
-    app: &App,
-) -> (usize, usize) {
+fn get_replacement_range(input: &str, context: &CompletionContext, app: &App) -> (usize, usize) {
     match context {
-        crate::app::CompletionContext::Command => {
+        CompletionContext::Command => {
             // 命令补全：替换第一个单词（或部分单词）
             let trimmed = input.trim();
             if trimmed.is_empty() {
@@ -1000,7 +1000,7 @@ fn get_replacement_range(
                 (offset, offset + first_word.len())
             }
         }
-        crate::app::CompletionContext::Module => {
+        CompletionContext::Module => {
             // 模块补全：替换第二个单词（模块名部分）
             let parts: Vec<&str> = input.split_whitespace().collect();
             if parts.len() < 2 {
@@ -1013,7 +1013,7 @@ fn get_replacement_range(
                 (module_start, module_start + module_part.len())
             }
         }
-        crate::app::CompletionContext::ModuleParam {
+        CompletionContext::ModuleParam {
             cmd_type: _cmd_type,
             module_name: _module_name,
             param_index: _param_index,
@@ -1048,7 +1048,7 @@ fn get_replacement_range(
                 )
             }
         }
-        crate::app::CompletionContext::ModuleParamValue {
+        CompletionContext::ModuleParamValue {
             cmd_type: _cmd_type,
             module_name: _module_name,
             module_param_name,
@@ -1071,7 +1071,7 @@ fn get_replacement_range(
                 (input.len(), input.len())
             }
         }
-        crate::app::CompletionContext::File {
+        CompletionContext::File {
             current_path: _,
             base_dir: _,
             partial_name: _,
@@ -1129,16 +1129,16 @@ fn apply_completion(app: &mut App) {
 
     // 根据上下文追加分隔符
     match &app.completion_context {
-        crate::app::CompletionContext::Command => {
+        CompletionContext::Command => {
             new_input.push(' ');
         }
-        crate::app::CompletionContext::Module => {
+        CompletionContext::Module => {
             new_input.push(' ');
         }
-        crate::app::CompletionContext::ModuleParam { .. } => {
+        CompletionContext::ModuleParam { .. } => {
             new_input.push('=');
         }
-        crate::app::CompletionContext::ModuleParamValue {
+        CompletionContext::ModuleParamValue {
             cmd_type: _cmd_type,
             module_name,
             module_param_name: _,
@@ -1150,7 +1150,7 @@ fn apply_completion(app: &mut App) {
                 new_input.push(',');
             }
         }
-        crate::app::CompletionContext::File {
+        CompletionContext::File {
             current_path: _current_path,
             base_dir: _base_dir,
             partial_name: _partial_name,
