@@ -82,11 +82,6 @@ pub fn cmd_insert(
 
     // Check if this module accepts children
     if module_def.accepts_children {
-        // For container modules, we need selected child nodes
-        if app.selected_nodes.is_empty() {
-            return Err(CommandError::NoChildrenSelected);
-        }
-
         // Create container module with source library info
         let mut container =
             ModuleNode::new_container(node_id.clone(), module_name.to_string(), args);
@@ -100,7 +95,22 @@ pub fn cmd_insert(
         }
 
         // Use the shared implementation for inserting container with selected nodes
-        let selected_nodes = app.selected_nodes.clone();
+        let selected_nodes = if app.selected_nodes.is_empty() {
+            if let Some(last_selected) = app.tree_state.borrow().selected().last() {
+                let mut vec_from_tree = vec![last_selected.clone()];
+                vec_from_tree.retain(|item| !item.starts_with("__"));
+                vec_from_tree
+            } else {
+                Vec::new()
+            }
+        } else {
+            app.selected_nodes.clone()
+        };
+
+        // For container modules, we need selected child nodes
+        if selected_nodes.is_empty() {
+            return Err(CommandError::NoChildrenSelected);
+        }
         insert_container_with_selected_nodes(app, container, &selected_nodes)
     } else {
         // For leaf modules, create with source library info
@@ -265,19 +275,30 @@ fn insert_after_node(
 /// Delete command
 pub fn cmd_delete(app: &mut crate::app::App, node_id: &str) -> CommandResult<()> {
     // Prevent deletion of section headers
-    if node_id.starts_with("__") {
+    let final_node_id = if node_id.is_empty() {
+        &app.tree_state
+            .borrow()
+            .selected()
+            .last()
+            .cloned()
+            .unwrap_or_else(|| String::new())
+    } else {
+        &node_id.to_string()
+    };
+
+    if final_node_id.starts_with("__") {
         return Err(CommandError::Custom(format!(
             "Cannot delete section header: {}",
-            node_id
+            final_node_id
         )));
     }
 
-    app.ast_mut().delete_node(node_id)?;
-    app.selected_nodes.retain(|id| id != node_id);
+    app.ast_mut().delete_node(final_node_id)?;
+    app.selected_nodes.retain(|id| id != final_node_id);
 
     // Clear tree state selection if the deleted node was selected
     let mut tree_state = app.tree_state.borrow_mut();
-    if tree_state.selected() == [node_id.to_string()] {
+    if tree_state.selected() == [final_node_id.to_string()] {
         tree_state.select(vec![]);
     }
     drop(tree_state); // Explicitly drop the borrow
@@ -1658,6 +1679,7 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
                 String::new()
             };
 
+            app.push_undo();
             cmd_delete(app, &node_id)
         },
         "Delete a node",
@@ -1775,7 +1797,6 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
                 ));
             }
 
-            // TODO: Implement detailed help with argument
             cmd_help(app)
         },
         "Show help",
@@ -1791,13 +1812,6 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
         "translate",
         vec![] as Vec<String>,
         |app, args| {
-            // Check if we have selected nodes
-            if app.selected_nodes.is_empty() {
-                return Err(CommandError::InvalidCommand(
-                    "No nodes selected. Select nodes with 'v' first".to_string(),
-                ));
-            }
-
             // Get parameters if provided
             let params = if !args.is_empty() {
                 Some(args.join(" "))
@@ -1823,12 +1837,6 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
         "rotate",
         vec![] as Vec<String>,
         |app, args| {
-            if app.selected_nodes.is_empty() {
-                return Err(CommandError::InvalidCommand(
-                    "No nodes selected. Select nodes with 'v' first".to_string(),
-                ));
-            }
-
             let params = if !args.is_empty() {
                 Some(args.join(" "))
             } else {
@@ -1853,12 +1861,6 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
         "scale",
         vec![] as Vec<String>,
         |app, args| {
-            if app.selected_nodes.is_empty() {
-                return Err(CommandError::InvalidCommand(
-                    "No nodes selected. Select nodes with 'v' first".to_string(),
-                ));
-            }
-
             let params = if !args.is_empty() {
                 Some(args.join(" "))
             } else {
@@ -1884,12 +1886,6 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
         "union",
         vec![] as Vec<String>,
         |app, args| {
-            if app.selected_nodes.is_empty() {
-                return Err(CommandError::InvalidCommand(
-                    "No nodes selected. Select nodes with 'v' first".to_string(),
-                ));
-            }
-
             if !args.is_empty() {
                 return Err(CommandError::InvalidCommand(
                     "union command takes no arguments".to_string(),
@@ -1914,12 +1910,6 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
         "difference",
         vec![] as Vec<String>,
         |app, args| {
-            if app.selected_nodes.is_empty() {
-                return Err(CommandError::InvalidCommand(
-                    "No nodes selected. Select nodes with 'v' first".to_string(),
-                ));
-            }
-
             if !args.is_empty() {
                 return Err(CommandError::InvalidCommand(
                     "difference command takes no arguments".to_string(),
@@ -1944,12 +1934,6 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
         "intersection",
         vec![] as Vec<String>,
         |app, args| {
-            if app.selected_nodes.is_empty() {
-                return Err(CommandError::InvalidCommand(
-                    "No nodes selected. Select nodes with 'v' first".to_string(),
-                ));
-            }
-
             if !args.is_empty() {
                 return Err(CommandError::InvalidCommand(
                     "intersection command takes no arguments".to_string(),
