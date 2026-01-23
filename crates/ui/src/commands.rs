@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use thiserror::Error;
 
+use crate::app::{App, InputMode};
 use crate::command_registry::CommandType;
 
 const MAX_RECURSION_DEPTH: usize = 1000;
@@ -49,7 +50,7 @@ pub type CommandResult<T> = std::result::Result<T, CommandError>;
 ///   - Insert after the currently selected node if there is one
 ///   - If no node is selected, or selected node is not in Modules section, insert at root level of Modules
 pub fn cmd_insert(
-    app: &mut crate::app::App,
+    app: &mut App,
     module_name: &str,
     _parent_id: Option<&str>,
     params: Option<&str>,
@@ -273,7 +274,7 @@ fn insert_after_node(
 }
 
 /// Delete command
-pub fn cmd_delete(app: &mut crate::app::App, node_id: &str) -> CommandResult<()> {
+pub fn cmd_delete(app: &mut App, node_id: &str) -> CommandResult<()> {
     // Prevent deletion of section headers
     let final_node_id = if node_id.is_empty() {
         &app.tree_state
@@ -312,7 +313,7 @@ pub fn cmd_delete(app: &mut crate::app::App, node_id: &str) -> CommandResult<()>
 /// Apply boolean operation (union, difference, intersection)
 #[allow(dead_code)]
 pub fn cmd_boolean_op(
-    app: &mut crate::app::App,
+    app: &mut App,
     operation: &str,
     node_ids: &[String],
 ) -> CommandResult<String> {
@@ -339,7 +340,7 @@ pub fn cmd_boolean_op(
 /// Insert a container module with selected nodes as children
 /// Handles both modules section and module definition contexts
 fn insert_container_with_selected_nodes(
-    app: &mut crate::app::App,
+    app: &mut App,
     container: ModuleNode,
     selected_node_ids: &[String],
 ) -> CommandResult<String> {
@@ -536,7 +537,7 @@ fn insert_container_with_selected_nodes(
 
 /// Select command
 #[allow(dead_code)]
-pub fn cmd_select(app: &mut crate::app::App, node_id: &str) -> CommandResult<()> {
+pub fn cmd_select(app: &mut App, node_id: &str) -> CommandResult<()> {
     if app.ast.find_node_by_id(node_id).is_none() {
         return Err(CommandError::InvalidCommand(format!(
             "Node not found: {}",
@@ -553,21 +554,21 @@ pub fn cmd_select(app: &mut crate::app::App, node_id: &str) -> CommandResult<()>
 
 /// Deselect command
 #[allow(dead_code)]
-pub fn cmd_deselect(app: &mut crate::app::App, node_id: &str) -> CommandResult<()> {
+pub fn cmd_deselect(app: &mut App, node_id: &str) -> CommandResult<()> {
     app.selected_nodes.retain(|id| id != node_id);
     Ok(())
 }
 
 /// Clear selection
 #[allow(dead_code)]
-pub fn cmd_clear_selection(app: &mut crate::app::App) {
+pub fn cmd_clear_selection(app: &mut App) {
     app.selected_nodes.clear();
 }
 
 /// Navigation commands
 /// Move cursor down (next)
 #[allow(dead_code)]
-pub fn cmd_next(app: &mut crate::app::App) -> CommandResult<()> {
+pub fn cmd_next(app: &mut App) -> CommandResult<()> {
     app.tree_state.borrow_mut().key_down();
     app.update_navigation_status();
     Ok(())
@@ -575,7 +576,7 @@ pub fn cmd_next(app: &mut crate::app::App) -> CommandResult<()> {
 
 /// Move cursor up (previous)
 #[allow(dead_code)]
-pub fn cmd_prev(app: &mut crate::app::App) -> CommandResult<()> {
+pub fn cmd_prev(app: &mut App) -> CommandResult<()> {
     app.tree_state.borrow_mut().key_up();
     app.update_navigation_status();
     Ok(())
@@ -583,7 +584,7 @@ pub fn cmd_prev(app: &mut crate::app::App) -> CommandResult<()> {
 
 /// Collapse node (move left)
 #[allow(dead_code)]
-pub fn cmd_collapse(app: &mut crate::app::App) -> CommandResult<()> {
+pub fn cmd_collapse(app: &mut App) -> CommandResult<()> {
     app.tree_state.borrow_mut().key_left();
     app.update_navigation_status();
     Ok(())
@@ -591,7 +592,7 @@ pub fn cmd_collapse(app: &mut crate::app::App) -> CommandResult<()> {
 
 /// Expand node (move right)
 #[allow(dead_code)]
-pub fn cmd_expand(app: &mut crate::app::App) -> CommandResult<()> {
+pub fn cmd_expand(app: &mut App) -> CommandResult<()> {
     app.tree_state.borrow_mut().key_right();
     app.update_navigation_status();
     Ok(())
@@ -599,7 +600,7 @@ pub fn cmd_expand(app: &mut crate::app::App) -> CommandResult<()> {
 
 /// Toggle node (move right)
 #[allow(dead_code)]
-pub fn cmd_toggle(app: &mut crate::app::App) -> CommandResult<()> {
+pub fn cmd_toggle(app: &mut App) -> CommandResult<()> {
     app.tree_state.borrow_mut().toggle_selected();
     app.update_navigation_status();
     Ok(())
@@ -607,7 +608,7 @@ pub fn cmd_toggle(app: &mut crate::app::App) -> CommandResult<()> {
 
 /// Select/toggle current node
 #[allow(dead_code)]
-pub fn cmd_select_toggle(app: &mut crate::app::App) -> CommandResult<()> {
+pub fn cmd_select_toggle(app: &mut App) -> CommandResult<()> {
     let selected = app.tree_state.borrow().selected().last().cloned();
     if let Some(node_id) = selected {
         // Prevent selection of section headers
@@ -631,7 +632,7 @@ pub fn cmd_select_toggle(app: &mut crate::app::App) -> CommandResult<()> {
 
 /// Clear all selections
 #[allow(dead_code)]
-pub fn cmd_deselect_all(app: &mut crate::app::App) -> CommandResult<()> {
+pub fn cmd_deselect_all(app: &mut App) -> CommandResult<()> {
     app.selected_nodes.clear();
     app.set_info("All nodes deselected");
     Ok(())
@@ -774,9 +775,16 @@ fn split_parameters(input: &str) -> CommandResult<Vec<String>> {
 }
 
 /// Save AST to JSON file
-pub fn cmd_write(app: &crate::app::App, filename: &str) -> CommandResult<()> {
+pub fn cmd_write(app: &mut App, filename: &str) -> CommandResult<()> {
     // Expand tilde in filename
-    let expanded_filepath = expand_tilde(filename);
+    let expanded_filepath = if filename.is_empty() {
+        let current_file_str = app.current_file.clone().ok_or(CommandError::Custom(
+            "No current file specified and no filename provided to write to".to_string(),
+        ))?;
+        expand_tilde(current_file_str)
+    } else {
+        expand_tilde(filename)
+    };
 
     // Ensure filename ends with .json
     let filepath = if !expanded_filepath
@@ -802,11 +810,23 @@ pub fn cmd_write(app: &crate::app::App, filename: &str) -> CommandResult<()> {
         ))
     })?;
 
+    app.mark_saved();
+
     Ok(())
 }
 
 /// Load AST from JSON file
-pub fn cmd_load(app: &mut crate::app::App, filename: &str) -> CommandResult<()> {
+pub fn cmd_load(app: &mut App, filename: &str) -> CommandResult<()> {
+    if !app.saved {
+        return Err(CommandError::Custom(
+            "File is not saved, use 'e!' or 'edit!' to force load file".to_string(),
+        ));
+    }
+    cmd_load_force(app, filename)
+}
+
+/// Force load AST from JSON file
+pub fn cmd_load_force(app: &mut App, filename: &str) -> CommandResult<()> {
     // Expand tilde in filename
     let expanded_filename = expand_tilde(filename);
 
@@ -855,12 +875,13 @@ pub fn cmd_load(app: &mut crate::app::App, filename: &str) -> CommandResult<()> 
     // Reset navigation state
     app.selected_nodes.clear();
     app.tree_state.borrow_mut().select(Vec::new());
+    app.current_file = Some(filename.to_string());
 
     Ok(())
 }
 
 /// Export AST to OpenSCAD code file
-pub fn cmd_export(app: &crate::app::App, filename: &str) -> CommandResult<()> {
+pub fn cmd_export(app: &App, filename: &str) -> CommandResult<()> {
     // Expand tilde in filename
     let expanded_filepath = expand_tilde(filename);
 
@@ -893,7 +914,7 @@ pub fn cmd_export(app: &crate::app::App, filename: &str) -> CommandResult<()> {
 /// Load a library from a JSON file
 /// This command loads third-party module libraries into the LibraryManager
 /// Libraries should be in JSON format with the same schema as stdlib.json
-pub fn cmd_load_library(app: &mut crate::app::App, filename: &str) -> CommandResult<()> {
+pub fn cmd_load_library(app: &mut App, filename: &str) -> CommandResult<()> {
     // Expand tilde in filename
     let expanded_path = expand_tilde(filename);
 
@@ -938,7 +959,7 @@ pub fn cmd_load_library(app: &mut crate::app::App, filename: &str) -> CommandRes
 /// Example: global width=100
 ///          global size=[10,20,30]
 ///          global $fn=50  (special variable)
-pub fn cmd_global(app: &mut crate::app::App, var_spec: &str) -> CommandResult<()> {
+pub fn cmd_global(app: &mut App, var_spec: &str) -> CommandResult<()> {
     use openscad_core::GlobalVariable;
 
     let var_spec = var_spec.trim();
@@ -1009,11 +1030,7 @@ fn is_valid_identifier(name: &str) -> bool {
 /// Syntax: funcdef <function_name>(param1, param2, ...) = expression
 /// Example: funcdef square(x) = x * x
 ///          funcdef add(a, b) = a + b
-pub fn cmd_funcdef(
-    app: &mut crate::app::App,
-    func_name: &str,
-    params_body: Option<&str>,
-) -> CommandResult<()> {
+pub fn cmd_funcdef(app: &mut App, func_name: &str, params_body: Option<&str>) -> CommandResult<()> {
     use openscad_core::{Expr, FunctionDefinition, Parameter};
 
     let (parameters, body_expr) = if let Some(params_body_str) = params_body {
@@ -1093,30 +1110,42 @@ pub fn cmd_funcdef(
 }
 
 /// Quit app command
-#[allow(dead_code)]
-pub fn cmd_quit(app: &mut crate::app::App) -> CommandResult<()> {
+pub fn cmd_quit(app: &mut App) -> CommandResult<()> {
+    if !app.saved {
+        return Err(CommandError::Custom(
+            "File is not saved, use 'q!' or 'quit!' to force quit".to_string(),
+        ));
+    }
+    cmd_quit_force(app)
+}
+
+/// Force Quit app command
+pub fn cmd_quit_force(app: &mut App) -> CommandResult<()> {
     app.should_quit = true;
     Ok(())
 }
 
+/// Write and quit app command
+pub fn cmd_write_and_quit(app: &mut App) -> CommandResult<()> {
+    cmd_write(app, "")?;
+    cmd_quit(app)
+}
+
 /// Undo command
-#[allow(dead_code)]
-pub fn cmd_undo(app: &mut crate::app::App) -> CommandResult<()> {
+pub fn cmd_undo(app: &mut App) -> CommandResult<()> {
     app.undo();
     Ok(())
 }
 
 /// Redo command
-#[allow(dead_code)]
-pub fn cmd_redo(app: &mut crate::app::App) -> CommandResult<()> {
+pub fn cmd_redo(app: &mut App) -> CommandResult<()> {
     app.redo();
     Ok(())
 }
 
 /// Help command - Show help modal
-#[allow(dead_code)]
-pub fn cmd_help(app: &mut crate::app::App) -> CommandResult<()> {
-    app.input_mode = crate::app::InputMode::Help;
+pub fn cmd_help(app: &mut App) -> CommandResult<()> {
+    app.input_mode = InputMode::Help;
     Ok(())
 }
 
@@ -1149,11 +1178,7 @@ fn expand_tilde<P: AsRef<Path>>(path: P) -> PathBuf {
 /// Syntax: moddef <module_name> [params]
 ///   params: optional parameter list like "size=10, center=false"
 ///   children: taken from selected nodes (if any)
-pub fn cmd_moddef(
-    app: &mut crate::app::App,
-    module_name: &str,
-    params: Option<&str>,
-) -> CommandResult<()> {
+pub fn cmd_moddef(app: &mut App, module_name: &str, params: Option<&str>) -> CommandResult<()> {
     use openscad_core::ModuleDefinition;
     use openscad_library::{ModuleDef, ParameterDef};
 
@@ -1506,6 +1531,7 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
         "next",
         vec!["j", "next"],
         CommandType::NoArgCmd,
+        false,
     ));
 
     registry.register(CommandDef::new(
@@ -1525,6 +1551,7 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
         "prev",
         vec!["k", "prev"],
         CommandType::NoArgCmd,
+        false,
     ));
 
     registry.register(CommandDef::new(
@@ -1544,6 +1571,7 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
         "collapse",
         vec!["h", "collapse"],
         CommandType::NoArgCmd,
+        false,
     ));
 
     registry.register(CommandDef::new(
@@ -1563,6 +1591,7 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
         "expand",
         vec!["l", "expand"],
         CommandType::NoArgCmd,
+        false,
     ));
 
     registry.register(CommandDef::new(
@@ -1582,6 +1611,7 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
         "toggle",
         vec!["toggle"],
         CommandType::NoArgCmd,
+        false,
     ));
 
     // Selection commands
@@ -1602,6 +1632,7 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
         "select",
         vec!["v", "select"],
         CommandType::NoArgCmd,
+        false,
     ));
 
     registry.register(CommandDef::new(
@@ -1621,6 +1652,7 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
         "deselect-all",
         vec!["deselect-all"],
         CommandType::NoArgCmd,
+        false,
     ));
 
     // Edit commands
@@ -1641,6 +1673,7 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
         "undo",
         vec!["u", "undo"],
         CommandType::NoArgCmd,
+        true,
     ));
 
     registry.register(CommandDef::new(
@@ -1660,6 +1693,7 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
         "redo",
         vec!["r", "redo"],
         CommandType::NoArgCmd,
+        true,
     ));
 
     registry.register(CommandDef::new(
@@ -1688,6 +1722,7 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
         "delete [node_id]",
         vec!["delete", "d cube_1", "dd", "D"],
         CommandType::NoArgCmd,
+        true,
     ));
 
     // File operations
@@ -1695,38 +1730,78 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
         "write",
         vec!["save", "w"],
         |app, args| {
-            if args.len() != 1 {
+            if args.len() > 1 {
                 return Err(CommandError::InvalidCommand(
-                    "write command requires a filename".to_string(),
+                    "write command takes at most 1 argument".to_string(),
                 ));
             }
-            cmd_write(app, args[0])
+            let file_name = if let Some(file) = args.first() {
+                (*file).to_string()
+            } else {
+                // Use current selection (handled in cmd_delete)
+                String::new()
+            };
+            cmd_write(app, &file_name)
         },
         "Save AST to JSON file",
-        1,
+        0,
         Some(1),
-        "write <filename>",
+        "write [filename]",
         vec!["write test.json", "save project.json"],
         CommandType::FileCmd,
+        false,
     ));
 
     registry.register(CommandDef::new(
         "edit",
         vec!["e"],
         |app, args| {
-            if args.len() != 1 {
+            if args.len() > 1 {
                 return Err(CommandError::InvalidCommand(
-                    "edit command requires a filename".to_string(),
+                    "edit command takes at most 1 argument".to_string(),
                 ));
             }
-            cmd_load(app, args[0])
+            let file_name = if let Some(file) = args.first() {
+                (*file).to_string()
+            } else {
+                // Use current selection (handled in cmd_delete)
+                String::new()
+            };
+            cmd_load(app, &file_name)
         },
         "Load AST from JSON file",
-        1,
+        0,
         Some(1),
-        "edit <filename>",
+        "edit [filename]",
         vec!["edit test.json", "e project.json"],
         CommandType::FileCmd,
+        false,
+    ));
+
+    registry.register(CommandDef::new(
+        "edit!",
+        vec!["e!"],
+        |app, args| {
+            if args.len() > 1 {
+                return Err(CommandError::InvalidCommand(
+                    "edit command takes at most 1 argument".to_string(),
+                ));
+            }
+            let file_name = if let Some(file) = args.first() {
+                (*file).to_string()
+            } else {
+                // Use current selection (handled in cmd_delete)
+                String::new()
+            };
+            cmd_load_force(app, &file_name)
+        },
+        "Load AST from JSON file",
+        0,
+        Some(1),
+        "edit! [filename]",
+        vec!["edit! test.json", "e! project.json"],
+        CommandType::FileCmd,
+        false,
     ));
 
     registry.register(CommandDef::new(
@@ -1746,6 +1821,7 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
         "export <filename>",
         vec!["export model.scad"],
         CommandType::FileCmd,
+        false,
     ));
 
     registry.register(CommandDef::new(
@@ -1765,6 +1841,7 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
         "library <filename>",
         vec!["library mylib.json"],
         CommandType::FileCmd,
+        true,
     ));
 
     // System commands
@@ -1785,6 +1862,47 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
         "quit",
         vec!["quit", "q"],
         CommandType::NoArgCmd,
+        false,
+    ));
+
+    registry.register(CommandDef::new(
+        "quit!",
+        vec!["q!"],
+        |app, args| {
+            if !args.is_empty() {
+                return Err(CommandError::InvalidCommand(
+                    "quit command takes no arguments".to_string(),
+                ));
+            }
+            cmd_quit_force(app)
+        },
+        "Exit the application",
+        0,
+        Some(0),
+        "quit!",
+        vec!["quit!", "q!"],
+        CommandType::NoArgCmd,
+        false,
+    ));
+
+    registry.register(CommandDef::new(
+        "wq",
+        vec!["wq"],
+        |app, args| {
+            if !args.is_empty() {
+                return Err(CommandError::InvalidCommand(
+                    "wq command takes no arguments".to_string(),
+                ));
+            }
+            cmd_write_and_quit(app)
+        },
+        "Save and exit the application",
+        0,
+        Some(0),
+        "wq",
+        vec!["wq"],
+        CommandType::NoArgCmd,
+        false,
     ));
 
     registry.register(CommandDef::new(
@@ -1805,6 +1923,7 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
         "help [command]",
         vec!["help", "help write", "?"],
         CommandType::NoArgCmd,
+        false,
     ));
 
     // Transform commands
@@ -1831,6 +1950,7 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
         "translate [x,y,z]",
         vec!["translate", "translate 10,0,0"],
         CommandType::ParamCmd,
+        true,
     ));
 
     registry.register(CommandDef::new(
@@ -1855,6 +1975,7 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
         "rotate [a,vx,vy,vz]",
         vec!["rotate", "rotate 45,0,0,1"],
         CommandType::ParamCmd,
+        true,
     ));
 
     registry.register(CommandDef::new(
@@ -1879,6 +2000,7 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
         "scale [x,y,z]",
         vec!["scale", "scale 2,2,2"],
         CommandType::ParamCmd,
+        true,
     ));
 
     // Boolean commands
@@ -1904,6 +2026,7 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
         "union",
         vec!["union"],
         CommandType::NoArgCmd,
+        true,
     ));
 
     registry.register(CommandDef::new(
@@ -1928,6 +2051,7 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
         "difference",
         vec!["difference"],
         CommandType::NoArgCmd,
+        true,
     ));
 
     registry.register(CommandDef::new(
@@ -1952,6 +2076,7 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
         "intersection",
         vec!["intersection"],
         CommandType::NoArgCmd,
+        true,
     ));
 
     // Insert command with multi-stage parameter handling
@@ -1998,7 +2123,7 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
             // If params not provided and module has parameters, ask for them in next stage
             if params.is_none() && module_has_params {
                 app.insert_module_name = Some(module_name.to_string());
-                app.input_mode = crate::app::InputMode::InsertEnterParams;
+                app.input_mode = InputMode::InsertEnterParams;
                 app.set_info(&format!(
                     "Enter parameters for '{}' (or press Enter to skip):",
                     module_name
@@ -2021,6 +2146,7 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
         "insert <module_name> [params]",
         vec!["insert cube", "i sphere", "insert translate 10,0,0"],
         CommandType::ModuleCmd,
+        true,
     ));
 
     // Function definition command
@@ -2051,6 +2177,7 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
         "funcdef <function_name> [(param1, param2, ...)=expression]",
         vec!["funcdef myfunc", "funcdef add x,y = x + y"],
         CommandType::DefinitionCmd,
+        true,
     ));
 
     // Module definition command
@@ -2081,6 +2208,7 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
         "moddef <module_name> [params]",
         vec!["moddef mymodule", "moddef mybox size=10, center=false"],
         CommandType::DefinitionCmd,
+        true,
     ));
 
     // Global variable command
@@ -2115,6 +2243,7 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
         "global <name>=<value>",
         vec!["global pi=3.14159", "global name=\"test\""],
         CommandType::DefinitionCmd,
+        true,
     ));
 
     // Placeholder commands for unimplemented functionality
@@ -2137,6 +2266,7 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
         "yank [node_id]",
         vec!["yank", "y cube_1"],
         CommandType::NoArgCmd,
+        false,
     ));
 
     registry.register(CommandDef::new(
@@ -2158,6 +2288,7 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
         "paste",
         vec!["paste", "p"],
         CommandType::NoArgCmd,
+        true,
     ));
 
     registry.register(CommandDef::new(
@@ -2179,6 +2310,7 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
         "remove [node_id]",
         vec!["remove", "x cube_1"],
         CommandType::NoArgCmd,
+        true,
     ));
 
     registry.register(CommandDef::new(
@@ -2200,6 +2332,7 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
         "replace <node_id> <new_module_name>",
         vec!["replace cube_1 sphere"],
         CommandType::NoArgCmd,
+        true,
     ));
 }
 
@@ -2207,7 +2340,7 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
 mod tests {
     use super::*;
     #[allow(unused_imports)]
-    use crate::app::App;
+    use App;
 
     #[test]
     fn test_parse_arguments() {
@@ -2221,7 +2354,7 @@ mod tests {
 
     #[test]
     fn test_cmd_moddef_basic() {
-        use crate::app::App;
+        use App;
 
         let mut app = App::new();
 
@@ -2246,7 +2379,7 @@ mod tests {
 
     #[test]
     fn test_cmd_moddef_with_params() {
-        use crate::app::App;
+        use App;
 
         let mut app = App::new();
 
@@ -2280,7 +2413,7 @@ mod tests {
 
     #[test]
     fn test_cmd_moddef_duplicate_name() {
-        use crate::app::App;
+        use App;
 
         let mut app = App::new();
 
@@ -2298,7 +2431,7 @@ mod tests {
 
     #[test]
     fn test_cmd_moddef_complex_parameters() {
-        use crate::app::App;
+        use App;
 
         let mut app = App::new();
 
@@ -2324,8 +2457,8 @@ mod tests {
 
     #[test]
     fn test_serialize_deserialize_with_custom_module() {
-        use crate::app::App;
         use openscad_core::AstRoot;
+        use App;
 
         let mut app = App::new();
 
@@ -2359,8 +2492,8 @@ mod tests {
 
     #[test]
     fn test_serialize_deserialize_with_custom_module_and_children() {
-        use crate::app::App;
         use openscad_core::{Argument, AstRoot, Expr, ModuleNode};
+        use App;
 
         let mut app = App::new();
 
@@ -2401,7 +2534,7 @@ mod tests {
 
     #[test]
     fn test_cmd_insert_into_modules_section() {
-        use crate::app::App;
+        use App;
 
         let mut app = App::new();
 
@@ -2428,7 +2561,7 @@ mod tests {
 
     #[test]
     fn test_cmd_insert_into_module_definition() {
-        use crate::app::App;
+        use App;
 
         let mut app = App::new();
 
@@ -2460,7 +2593,7 @@ mod tests {
 
     #[test]
     fn test_cmd_boolean_op_in_modules_section() {
-        use crate::app::App;
+        use App;
 
         let mut app = App::new();
 
@@ -2504,7 +2637,7 @@ mod tests {
 
     #[test]
     fn test_cmd_boolean_op_in_module_definition() {
-        use crate::app::App;
+        use App;
 
         let mut app = App::new();
 
@@ -2574,7 +2707,7 @@ mod tests {
 
     #[test]
     fn test_cmd_boolean_op_mixed_context_error() {
-        use crate::app::App;
+        use App;
 
         let mut app = App::new();
 
@@ -2620,7 +2753,7 @@ mod tests {
 
     #[test]
     fn test_cmd_insert_container_in_module_definition() {
-        use crate::app::App;
+        use App;
 
         let mut app = App::new();
 
@@ -2690,7 +2823,7 @@ mod tests {
 
     #[test]
     fn test_cmd_moddef_with_children_module() {
-        use crate::app::App;
+        use App;
 
         let mut app = App::new();
 
@@ -2725,7 +2858,7 @@ mod tests {
 
     #[test]
     fn test_cmd_insert_children_outside_module_definition_fails() {
-        use crate::app::App;
+        use App;
 
         let mut app = App::new();
 
@@ -2749,7 +2882,7 @@ mod tests {
 
     #[test]
     fn test_cmd_global_basic() {
-        use crate::app::App;
+        use App;
 
         let mut app = App::new();
 
@@ -2767,7 +2900,7 @@ mod tests {
 
     #[test]
     fn test_cmd_global_special() {
-        use crate::app::App;
+        use App;
 
         let mut app = App::new();
 
@@ -2788,7 +2921,7 @@ mod tests {
 
     #[test]
     fn test_cmd_global_with_list() {
-        use crate::app::App;
+        use App;
 
         let mut app = App::new();
 
@@ -2815,7 +2948,7 @@ mod tests {
 
     #[test]
     fn test_cmd_global_invalid_syntax() {
-        use crate::app::App;
+        use App;
 
         let mut app = App::new();
 
@@ -2832,7 +2965,7 @@ mod tests {
 
     #[test]
     fn test_cmd_global_invalid_identifier() {
-        use crate::app::App;
+        use App;
 
         let mut app = App::new();
 
@@ -2849,7 +2982,7 @@ mod tests {
 
     #[test]
     fn test_cmd_global_duplicate() {
-        use crate::app::App;
+        use App;
 
         let mut app = App::new();
 
@@ -2870,7 +3003,7 @@ mod tests {
 
     #[test]
     fn test_cmd_global_string_value() {
-        use crate::app::App;
+        use App;
 
         let mut app = App::new();
 
@@ -2891,7 +3024,7 @@ mod tests {
 
     #[test]
     fn test_cmd_global_float_value() {
-        use crate::app::App;
+        use App;
 
         let mut app = App::new();
 
@@ -2915,7 +3048,7 @@ mod tests {
 
     #[test]
     fn test_cmd_funcdef_basic() {
-        use crate::app::App;
+        use App;
 
         let mut app = App::new();
 
@@ -2933,7 +3066,7 @@ mod tests {
 
     #[test]
     fn test_cmd_funcdef_no_params() {
-        use crate::app::App;
+        use App;
 
         let mut app = App::new();
 
@@ -2951,7 +3084,7 @@ mod tests {
 
     #[test]
     fn test_cmd_funcdef_multiple_params() {
-        use crate::app::App;
+        use App;
 
         let mut app = App::new();
 
@@ -2970,7 +3103,7 @@ mod tests {
 
     #[test]
     fn test_cmd_funcdef_duplicate_name() {
-        use crate::app::App;
+        use App;
 
         let mut app = App::new();
 
@@ -2988,7 +3121,7 @@ mod tests {
 
     #[test]
     fn test_cmd_funcdef_invalid_syntax() {
-        use crate::app::App;
+        use App;
 
         let mut app = App::new();
 
@@ -3002,7 +3135,7 @@ mod tests {
 
     #[test]
     fn test_cmd_funcdef_invalid_name() {
-        use crate::app::App;
+        use App;
 
         let mut app = App::new();
 

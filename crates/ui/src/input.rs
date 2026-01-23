@@ -301,15 +301,20 @@ fn execute_command_registry(app: &mut App, cmd: &str) -> bool {
     // First, check if this is a command that should be handled by the registry
     if let Some(cmd_def) = app.command_registry.find(cmd_name) {
         // Validate arguments
-        if args.len() < cmd_def.min_args {
+        let handler = cmd_def.handler;
+        let min_args = cmd_def.min_args;
+        let max_args = cmd_def.max_args;
+        let change_ast = cmd_def.change_ast;
+
+        if args.len() < min_args {
             app.set_error(&format!(
                 "{} requires at least {} arguments",
-                cmd_name, cmd_def.min_args
+                cmd_name, min_args
             ));
             return true;
         }
 
-        if let Some(max) = cmd_def.max_args {
+        if let Some(max) = max_args {
             if args.len() > max {
                 app.set_error(&format!("{} accepts at most {} arguments", cmd_name, max));
                 return true;
@@ -317,10 +322,13 @@ fn execute_command_registry(app: &mut App, cmd: &str) -> bool {
         }
 
         // Execute the command
-        match (cmd_def.handler)(app, args) {
+        match handler(app, args) {
             Ok(_) => {
                 // Command succeeded
                 // Note: The handler may have already set an info message
+                if change_ast {
+                    app.mark_dirty();
+                }
             }
             Err(e) => {
                 app.set_error(&e.to_string());
@@ -975,7 +983,7 @@ fn preview_completion(app: &mut App) {
                 &app.completion_candidates[app.completion_index]
             }
         }
-        _ => &app.completion_candidates[app.completion_index]
+        _ => &app.completion_candidates[app.completion_index],
     };
 
     let mut new_input = app.input_buffer.clone();

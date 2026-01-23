@@ -101,6 +101,10 @@ pub struct App {
     pub completion_index: usize,
     pub completion_context: CompletionContext,
     pub completion_active: bool,
+
+    // 文件相关
+    pub current_file: Option<String>,
+    pub saved: bool,
 }
 
 impl App {
@@ -127,6 +131,8 @@ impl App {
             completion_index: 0,
             completion_context: CompletionContext::Command,
             completion_active: false,
+            current_file: None,
+            saved: true,
         };
 
         // Load standard library (from config dir if exists, otherwise use embedded)
@@ -281,12 +287,6 @@ impl App {
 
         // No valid node in path, select first section
         self.init_tree_selection();
-    }
-
-    #[allow(dead_code)]
-    pub fn toggle_command_mode(&mut self) {
-        // Legacy method - no longer used, kept for compatibility
-        // All input is now command-based
     }
 
     /// Find the path to a node (from root to the node)
@@ -637,6 +637,14 @@ impl App {
             None
         }
         find_recursive(modules, node_id, 0)
+    }
+
+    pub fn mark_dirty(&mut self) -> () {
+        self.saved = false;
+    }
+
+    pub fn mark_saved(&mut self) -> () {
+        self.saved = true;
     }
 }
 

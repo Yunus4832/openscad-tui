@@ -46,6 +46,8 @@ pub struct CommandDef {
     pub examples: Vec<String>,
     /// Command type for dynamic completion context analysis
     pub cmd_type: CommandType,
+    /// 是否修改 Ast 语法树
+    pub change_ast: bool,
 }
 
 impl CommandDef {
@@ -61,6 +63,7 @@ impl CommandDef {
         usage: impl Into<String>,
         examples: Vec<impl Into<String>>,
         cmd_type: crate::command_registry::CommandType,
+        change_ast: bool,
     ) -> Self {
         Self {
             name: name.into(),
@@ -71,7 +74,8 @@ impl CommandDef {
             max_args,
             usage: usage.into(),
             examples: examples.into_iter().map(|s| s.into()).collect(),
-            cmd_type: cmd_type, // Default type
+            cmd_type: cmd_type,
+            change_ast: change_ast
         }
     }
 

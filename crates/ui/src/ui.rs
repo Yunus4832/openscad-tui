@@ -42,10 +42,16 @@ pub fn draw(f: &mut Frame, app: &App) {
 }
 
 fn draw_tree(f: &mut Frame, app: &App, area: Rect) {
-    let title = if app.selected_nodes.is_empty() {
-        " Tree ".to_string()
+    let current_file = &app.current_file.clone().unwrap_or("Untitled".to_string());
+    let unsaved_flag = if app.saved {
+        ""
     } else {
-        format!(" Tree ({}) ", app.selected_nodes.len())
+        "*"
+    };
+    let title = if app.selected_nodes.is_empty() {
+        format!(" {}{} ", current_file, unsaved_flag)
+    } else {
+        format!(" {}{} ({}) ", current_file, unsaved_flag, app.selected_nodes.len())
     };
 
     let block = Block::default()
