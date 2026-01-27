@@ -783,7 +783,27 @@ pub fn cmd_write(app: &mut App, filename: &str) -> CommandResult<()> {
         ))?;
         expand_tilde(current_file_str)
     } else {
-        expand_tilde(filename)
+        let expanded = expand_tilde(filename);
+
+        // Check if file exists and warn user if it's different from current file
+        if expanded.exists() {
+            if let Some(ref current_file) = app.current_file {
+                let current_expanded = expand_tilde(current_file);
+                if expanded != current_expanded {
+                    app.set_warning(&format!(
+                        "File '{}' exists and will be overwritten",
+                        expanded.display()
+                    ));
+                }
+            } else {
+                app.set_warning(&format!(
+                    "File '{}' exists and will be overwritten",
+                    expanded.display()
+                ));
+            }
+        }
+
+        expanded
     };
 
     // Ensure filename ends with .json
@@ -810,6 +830,11 @@ pub fn cmd_write(app: &mut App, filename: &str) -> CommandResult<()> {
         ))
     })?;
 
+    // If app.current_file is None but we're saving with a filename, update current_file
+    // This handles the case where we're saving a new unnamed file
+    if app.current_file.is_none() && !filename.is_empty() {
+        app.current_file = Some(filename.to_string());
+    }
     app.mark_saved();
 
     Ok(())
