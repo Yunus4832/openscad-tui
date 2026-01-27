@@ -9,6 +9,158 @@ use tui_tree_widget::TreeState;
 
 use crate::command_registry::{CommandRegistry, CommandType};
 
+/// Input buffer with cursor position management
+#[derive(Debug, Clone)]
+pub struct InputBuffer {
+    buffer: String,
+    cursor_pos: usize,
+}
+
+impl InputBuffer {
+    /// Create a new empty input buffer
+    pub fn new() -> Self {
+        Self {
+            buffer: String::new(),
+            cursor_pos: 0,
+        }
+    }
+
+    /// Get the buffer content
+    pub fn content(&self) -> &str {
+        &self.buffer
+    }
+
+    /// Get the buffer content as mutable string (use with caution)
+    #[allow(dead_code)]
+    pub fn content_mut(&mut self) -> &mut String {
+        &mut self.buffer
+    }
+
+    /// Get cursor position
+    pub fn cursor_pos(&self) -> usize {
+        self.cursor_pos
+    }
+
+    /// Set cursor position (clamped to valid range)
+    #[allow(dead_code)]
+    pub fn set_cursor_pos(&mut self, pos: usize) {
+        self.cursor_pos = pos;
+        self.clamp_cursor();
+    }
+
+    /// Convert character index to byte index
+    fn char_to_byte_index(&self, char_idx: usize) -> usize {
+        self.buffer
+            .char_indices()
+            .nth(char_idx)
+            .map(|(i, _)| i)
+            .unwrap_or(self.buffer.len())
+    }
+
+    /// Insert character at cursor position
+    pub fn insert_char(&mut self, ch: char) {
+        let byte_pos = self.char_to_byte_index(self.cursor_pos);
+        self.buffer.insert(byte_pos, ch);
+        self.cursor_pos += 1;
+    }
+
+    /// Insert string at cursor position
+    pub fn insert_str(&mut self, s: &str) {
+        let byte_pos = self.char_to_byte_index(self.cursor_pos);
+        self.buffer.insert_str(byte_pos, s);
+        self.cursor_pos += s.chars().count();
+    }
+
+    /// Set buffer content (replaces entire content, moves cursor to end)
+    pub fn set_content(&mut self, content: &str) {
+        self.buffer = content.to_string();
+        self.cursor_pos = self.buffer.len();
+    }
+
+    /// Delete character before cursor (backspace)
+    pub fn delete_before_cursor(&mut self) {
+        if self.cursor_pos > 0 {
+            self.cursor_pos -= 1;
+            self.buffer.remove(self.cursor_pos);
+        }
+    }
+
+    /// Delete character at cursor (delete key)
+    pub fn delete_at_cursor(&mut self) {
+        if self.cursor_pos < self.buffer.len() {
+            self.buffer.remove(self.cursor_pos);
+        }
+    }
+
+    /// Clear the input buffer
+    pub fn clear(&mut self) {
+        self.buffer.clear();
+        self.cursor_pos = 0;
+    }
+
+    /// Move cursor left
+    pub fn move_left(&mut self) {
+        if self.cursor_pos > 0 {
+            self.cursor_pos -= 1;
+        }
+    }
+
+    /// Move cursor right
+    pub fn move_right(&mut self) {
+        if self.cursor_pos < self.buffer.len() {
+            self.cursor_pos += 1;
+        }
+    }
+
+    /// Move cursor to start
+    pub fn move_to_start(&mut self) {
+        self.cursor_pos = 0;
+    }
+
+    /// Move cursor to end
+    pub fn move_to_end(&mut self) {
+        self.cursor_pos = self.buffer.len();
+    }
+
+    /// Ensure cursor position is within bounds
+    pub fn clamp_cursor(&mut self) {
+        if self.cursor_pos > self.buffer.len() {
+            self.cursor_pos = self.buffer.len();
+        }
+    }
+
+    /// Replace a range in the buffer
+    pub fn replace_range(&mut self, start: usize, end: usize, replacement: &str) {
+        self.buffer.replace_range(start..end, replacement);
+        // Update cursor to end of replacement
+        self.cursor_pos = start + replacement.len();
+    }
+
+    /// Get buffer length
+    #[allow(dead_code)]
+    pub fn len(&self) -> usize {
+        self.buffer.len()
+    }
+
+    /// Check if buffer is empty
+    #[allow(dead_code)]
+    pub fn is_empty(&self) -> bool {
+        self.buffer.is_empty()
+    }
+
+    /// Get a substring of the buffer
+    #[allow(dead_code)]
+    pub fn substring(&self, start: usize, end: usize) -> &str {
+        &self.buffer[start..end]
+    }
+}
+
+impl Default for InputBuffer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[allow(dead_code)]
 pub enum InputMode {
@@ -84,7 +236,7 @@ pub struct App {
     pub expanded_nodes: std::collections::HashSet<String>,
 
     // UI state - Input and display
-    pub input_buffer: String,
+    pub input_buffer: InputBuffer,
     pub input_mode: InputMode,
     /// For insert mode: whether to insert after (true) or before (false)
     #[allow(dead_code)]
@@ -119,7 +271,7 @@ impl App {
             tree_state: RefCell::new(TreeState::default()),
             tree_cursor: 0,
             expanded_nodes: std::collections::HashSet::new(),
-            input_buffer: String::new(),
+            input_buffer: InputBuffer::new(),
             input_mode: InputMode::Normal,
             insert_after: true,
             insert_module_name: None,
@@ -504,6 +656,11 @@ impl App {
         self.clear_message();
     }
 
+    /// Ensure cursor position is within bounds of input buffer
+    pub fn clamp_cursor(&mut self) {
+        self.input_buffer.clamp_cursor();
+    }
+
     #[allow(dead_code)]
     pub fn clear_input(&mut self) {
         self.input_buffer.clear();
@@ -651,5 +808,172 @@ impl App {
 impl Default for App {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_input_buffer_new() {
+        let buf = InputBuffer::new();
+        assert_eq!(buf.content(), "");
+        assert_eq!(buf.cursor_pos(), 0);
+        assert!(buf.is_empty());
+        assert_eq!(buf.len(), 0);
+    }
+
+    #[test]
+    fn test_input_buffer_insert_char() {
+        let mut buf = InputBuffer::new();
+        buf.insert_char('a');
+        assert_eq!(buf.content(), "a");
+        assert_eq!(buf.cursor_pos(), 1);
+        buf.insert_char('b');
+        assert_eq!(buf.content(), "ab");
+        assert_eq!(buf.cursor_pos(), 2);
+        buf.move_left();
+        buf.insert_char('c');
+        assert_eq!(buf.content(), "acb");
+        assert_eq!(buf.cursor_pos(), 2);
+    }
+
+    #[test]
+    fn test_input_buffer_insert_str() {
+        let mut buf = InputBuffer::new();
+        buf.insert_str("hello");
+        assert_eq!(buf.content(), "hello");
+        assert_eq!(buf.cursor_pos(), 5);
+        buf.move_to_start();
+        buf.insert_str("world");
+        assert_eq!(buf.content(), "worldhello");
+        assert_eq!(buf.cursor_pos(), 5);
+    }
+
+    #[test]
+    fn test_input_buffer_set_content() {
+        let mut buf = InputBuffer::new();
+        buf.set_content("test");
+        assert_eq!(buf.content(), "test");
+        assert_eq!(buf.cursor_pos(), 4);
+        buf.set_content("");
+        assert_eq!(buf.content(), "");
+        assert_eq!(buf.cursor_pos(), 0);
+    }
+
+    #[test]
+    fn test_input_buffer_delete_before_cursor() {
+        let mut buf = InputBuffer::new();
+        buf.set_content("hello");
+        buf.move_to_end();
+        buf.delete_before_cursor();
+        assert_eq!(buf.content(), "hell");
+        assert_eq!(buf.cursor_pos(), 4);
+        buf.move_to_start();
+        buf.delete_before_cursor(); // Should do nothing at start
+        assert_eq!(buf.content(), "hell");
+        assert_eq!(buf.cursor_pos(), 0);
+    }
+
+    #[test]
+    fn test_input_buffer_delete_at_cursor() {
+        let mut buf = InputBuffer::new();
+        buf.set_content("hello");
+        buf.move_to_start();
+        buf.delete_at_cursor();
+        assert_eq!(buf.content(), "ello");
+        assert_eq!(buf.cursor_pos(), 0);
+        buf.move_to_end();
+        buf.delete_at_cursor(); // Should do nothing at end
+        assert_eq!(buf.content(), "ello");
+        assert_eq!(buf.cursor_pos(), 4);
+    }
+
+    #[test]
+    fn test_input_buffer_move_cursor() {
+        let mut buf = InputBuffer::new();
+        buf.set_content("hello");
+        assert_eq!(buf.cursor_pos(), 5);
+        buf.move_left();
+        assert_eq!(buf.cursor_pos(), 4);
+        buf.move_right();
+        assert_eq!(buf.cursor_pos(), 5);
+        buf.move_right(); // Should not go beyond end
+        assert_eq!(buf.cursor_pos(), 5);
+        buf.move_to_start();
+        assert_eq!(buf.cursor_pos(), 0);
+        buf.move_left(); // Should not go below 0
+        assert_eq!(buf.cursor_pos(), 0);
+        buf.move_to_end();
+        assert_eq!(buf.cursor_pos(), 5);
+    }
+
+    #[test]
+    fn test_input_buffer_clear() {
+        let mut buf = InputBuffer::new();
+        buf.set_content("hello");
+        buf.move_left();
+        buf.clear();
+        assert_eq!(buf.content(), "");
+        assert_eq!(buf.cursor_pos(), 0);
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn test_input_buffer_replace_range() {
+        let mut buf = InputBuffer::new();
+        buf.set_content("hello world");
+        buf.replace_range(6, 11, "there");
+        assert_eq!(buf.content(), "hello there");
+        assert_eq!(buf.cursor_pos(), 11);
+        buf.replace_range(0, 5, "hi");
+        assert_eq!(buf.content(), "hi there");
+        assert_eq!(buf.cursor_pos(), 2);
+    }
+
+    #[test]
+    fn test_input_buffer_substring() {
+        let mut buf = InputBuffer::new();
+        buf.set_content("hello world");
+        assert_eq!(buf.substring(0, 5), "hello");
+        assert_eq!(buf.substring(6, 11), "world");
+    }
+
+    #[test]
+    fn test_input_buffer_unicode() {
+        let mut buf = InputBuffer::new();
+        buf.insert_str("café");
+        assert_eq!(buf.content(), "café");
+        assert_eq!(buf.cursor_pos(), 4); // 4 characters, not bytes
+        buf.move_to_start();
+        buf.move_right();
+        buf.move_right();
+        buf.delete_before_cursor();
+        assert_eq!(buf.content(), "cfé");
+        assert_eq!(buf.cursor_pos(), 1);
+    }
+
+    #[test]
+    fn test_input_buffer_clamp_cursor() {
+        let mut buf = InputBuffer::new();
+        buf.set_content("hello");
+        // Manually set cursor out of bounds
+        buf.cursor_pos = 10;
+        buf.clamp_cursor();
+        assert_eq!(buf.cursor_pos(), 5);
+        buf.cursor_pos = 3;
+        buf.clamp_cursor();
+        assert_eq!(buf.cursor_pos(), 3);
+    }
+
+    #[test]
+    fn test_input_buffer_set_cursor_pos() {
+        let mut buf = InputBuffer::new();
+        buf.set_content("hello");
+        buf.set_cursor_pos(2);
+        assert_eq!(buf.cursor_pos(), 2);
+        buf.set_cursor_pos(10); // Should clamp to 5
+        assert_eq!(buf.cursor_pos(), 5);
     }
 }

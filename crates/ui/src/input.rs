@@ -26,19 +26,19 @@ fn handle_normal_input(key: KeyEvent, app: &mut App) {
         // i - insert module (mapped to :insert command)
         KeyCode::Char('i') => {
             app.input_mode = InputMode::Command;
-            app.input_buffer = "insert ".to_string();
+            app.input_buffer.set_content("insert ");
         }
 
         // t - translate
         KeyCode::Char('t') => {
             app.input_mode = InputMode::Command;
-            app.input_buffer = "translate ".to_string();
+            app.input_buffer.set_content("translate ");
         }
 
         // s - scale
         KeyCode::Char('s') => {
             app.input_mode = InputMode::Command;
-            app.input_buffer = "scale ".to_string();
+            app.input_buffer.set_content("scale ");
         }
 
         // Navigation: j (next), k (prev), h (back/collapse), l (forward/expand)
@@ -71,7 +71,7 @@ fn handle_normal_input(key: KeyEvent, app: &mut App) {
         }
         KeyCode::Char('r') => {
             app.input_mode = InputMode::Command;
-            app.input_buffer = "rotate ".to_string();
+            app.input_buffer.set_content("rotate ");
         }
 
         // d - delete node
@@ -82,22 +82,19 @@ fn handle_normal_input(key: KeyEvent, app: &mut App) {
         // w - write (save to JSON)
         KeyCode::Char('w') => {
             app.input_mode = InputMode::Command;
-            app.input_buffer = "write ".to_string();
-            app.set_info("Save to JSON file - enter filename");
+            app.input_buffer.set_content("write ");
         }
 
         // e - edit (load from JSON)
         KeyCode::Char('e') => {
             app.input_mode = InputMode::Command;
-            app.input_buffer = "edit ".to_string();
-            app.set_info("Load from JSON file - enter filename");
+            app.input_buffer.set_content("edit ");
         }
 
         // L - library (load library JSON)
         KeyCode::Char('L') => {
             app.input_mode = InputMode::Command;
-            app.input_buffer = "library ".to_string();
-            app.set_info("Load library from JSON file - enter filename");
+            app.input_buffer.set_content("library ");
         }
 
         // : - enter command mode
@@ -132,6 +129,8 @@ fn handle_normal_input(key: KeyEvent, app: &mut App) {
 
 /// Handle input in command mode - text input with echo
 fn handle_command_input(key: KeyEvent, app: &mut App) {
+    app.clamp_cursor();
+
     match key.code {
         // Esc to return to Normal mode or cancel completion
         KeyCode::Esc => {
@@ -147,31 +146,54 @@ fn handle_command_input(key: KeyEvent, app: &mut App) {
             }
         }
 
-        // Regular character input - with echo
+        // Regular character input - insert at cursor position
         KeyCode::Char(c) => {
             if app.completion_active {
                 // User started typing, exit completion mode
                 app.completion_active = false;
                 app.completion_candidates.clear();
             }
-            app.input_buffer.push(c);
+            app.input_buffer.insert_char(c);
         }
 
-        // Backspace to delete character
+        // Backspace to delete character before cursor
         KeyCode::Backspace => {
             if app.completion_active {
                 // User started editing, exit completion mode
                 app.completion_active = false;
                 app.completion_candidates.clear();
             }
-            app.input_buffer.pop();
+            app.input_buffer.delete_before_cursor();
+        }
+
+        // Delete to delete character at cursor
+        KeyCode::Delete => {
+            if app.completion_active {
+                app.completion_active = false;
+                app.completion_candidates.clear();
+            }
+            app.input_buffer.delete_at_cursor();
+        }
+
+        // Cursor movement
+        KeyCode::Left => {
+            app.input_buffer.move_left();
+        }
+        KeyCode::Right => {
+            app.input_buffer.move_right();
+        }
+        KeyCode::Home => {
+            app.input_buffer.move_to_start();
+        }
+        KeyCode::End => {
+            app.input_buffer.move_to_end();
         }
 
         KeyCode::Enter => {
             if app.completion_active {
                 apply_completion(app);
             } else {
-                let cmd = app.input_buffer.clone();
+                let cmd = app.input_buffer.content().to_string();
                 execute_command(app, &cmd);
             }
         }
@@ -188,20 +210,41 @@ fn handle_command_input(key: KeyEvent, app: &mut App) {
 /// Handle module name input for insert command
 /// Handle parameter input for insert command (multi-stage)
 fn handle_insert_params_input(key: KeyEvent, app: &mut App) {
+    app.clamp_cursor();
+
     match key.code {
         KeyCode::Char(c) => {
             if app.completion_active {
                 app.completion_active = false;
                 app.completion_candidates.clear();
             }
-            app.input_buffer.push(c);
+            app.input_buffer.insert_char(c);
         }
         KeyCode::Backspace => {
             if app.completion_active {
                 app.completion_active = false;
                 app.completion_candidates.clear();
             }
-            app.input_buffer.pop();
+            app.input_buffer.delete_before_cursor();
+        }
+        KeyCode::Delete => {
+            if app.completion_active {
+                app.completion_active = false;
+                app.completion_candidates.clear();
+            }
+            app.input_buffer.delete_at_cursor();
+        }
+        KeyCode::Left => {
+            app.input_buffer.move_left();
+        }
+        KeyCode::Right => {
+            app.input_buffer.move_right();
+        }
+        KeyCode::Home => {
+            app.input_buffer.move_to_start();
+        }
+        KeyCode::End => {
+            app.input_buffer.move_to_end();
         }
         KeyCode::Tab => {
             handle_tab_completion(app);
@@ -211,7 +254,7 @@ fn handle_insert_params_input(key: KeyEvent, app: &mut App) {
             if app.completion_active {
                 apply_completion(app);
             } else {
-                let params = app.input_buffer.trim().to_string();
+                let params = app.input_buffer.content().trim().to_string();
                 if let Some(ref module_name) = app.insert_module_name.clone() {
                     // Check if module accepts children and we have selections
                     if let Some(module_def) = app.library.get_module(module_name) {
@@ -252,15 +295,32 @@ fn handle_insert_params_input(key: KeyEvent, app: &mut App) {
 
 /// Handle module selection for replace command
 fn handle_replace_module_input(key: KeyEvent, app: &mut App) {
+    app.clamp_cursor();
+
     match key.code {
         KeyCode::Char(c) => {
-            app.input_buffer.push(c);
+            app.input_buffer.insert_char(c);
         }
         KeyCode::Backspace => {
-            app.input_buffer.pop();
+            app.input_buffer.delete_before_cursor();
+        }
+        KeyCode::Delete => {
+            app.input_buffer.delete_at_cursor();
+        }
+        KeyCode::Left => {
+            app.input_buffer.move_left();
+        }
+        KeyCode::Right => {
+            app.input_buffer.move_right();
+        }
+        KeyCode::Home => {
+            app.input_buffer.move_to_start();
+        }
+        KeyCode::End => {
+            app.input_buffer.move_to_end();
         }
         KeyCode::Enter => {
-            let _module_name = app.input_buffer.trim().to_string();
+            let _module_name = app.input_buffer.content().trim().to_string();
             app.set_error("Replace command not implemented yet");
             app.input_mode = InputMode::Command;
             app.input_buffer.clear();
@@ -357,7 +417,7 @@ fn execute_command(app: &mut App, cmd: &str) {
 /// Handle Tab key for autocompletion
 fn handle_tab_completion(app: &mut App) {
     if !app.completion_active {
-        let (candidates, context) = generate_completions(&app.input_buffer, app);
+        let (candidates, context) = generate_completions(app.input_buffer.content(), app);
         if candidates.is_empty() {
             return;
         }
@@ -562,11 +622,7 @@ fn analyze_input_context(input: &str, app: &App) -> CompletionContext {
                     } else {
                         // 有参数部分
                         let param_str = parts[2..].join(" ");
-                        analyze_param_context(
-                            &param_str,
-                            module_part,
-                            CommandType::Module,
-                        )
+                        analyze_param_context(&param_str, module_part, CommandType::Module)
                     }
                 }
             }
@@ -968,7 +1024,8 @@ fn preview_completion(app: &mut App) {
     }
 
     // 替换输入缓冲区中的范围
-    let (start, end) = get_replacement_range(&app.input_buffer, &app.completion_context, app);
+    let (start, end) =
+        get_replacement_range(app.input_buffer.content(), &app.completion_context, app);
     let candidate = match &app.completion_context {
         CompletionContext::File {
             current_path: _,
@@ -976,7 +1033,7 @@ fn preview_completion(app: &mut App) {
             partial_name: _,
             ends_with_separator: _,
         } => {
-            if app.input_buffer.trim().ends_with("~") {
+            if app.input_buffer.content().trim().ends_with("~") {
                 let candidate_clone = &app.completion_candidates[app.completion_index].clone();
                 &format!("{}{}", "~/", candidate_clone)
             } else {
@@ -986,9 +1043,8 @@ fn preview_completion(app: &mut App) {
         _ => &app.completion_candidates[app.completion_index],
     };
 
-    let mut new_input = app.input_buffer.clone();
-    new_input.replace_range(start..end, candidate);
-    app.input_buffer = new_input;
+    // Use InputBuffer's replace_range method
+    app.input_buffer.replace_range(start, end, candidate);
 }
 
 /// 获取输入缓冲区中需要替换的范围（起始索引和结束索引）
@@ -1129,22 +1185,22 @@ fn apply_completion(app: &mut App) {
     }
 
     let candidate = &app.completion_candidates[app.completion_index];
-    let (start, end) = get_replacement_range(&app.input_buffer, &app.completion_context, app);
+    let (start, end) =
+        get_replacement_range(app.input_buffer.content(), &app.completion_context, app);
 
     // 替换输入缓冲区中的范围
-    let mut new_input = app.input_buffer.clone();
-    new_input.replace_range(start..end, candidate);
+    app.input_buffer.replace_range(start, end, candidate);
 
     // 根据上下文追加分隔符
     match &app.completion_context {
         CompletionContext::Command => {
-            new_input.push(' ');
+            app.input_buffer.insert_str(" ");
         }
         CompletionContext::Module => {
-            new_input.push(' ');
+            app.input_buffer.insert_str(" ");
         }
         CompletionContext::ModuleParam { .. } => {
-            new_input.push('=');
+            app.input_buffer.insert_str("=");
         }
         CompletionContext::ModuleParamValue {
             cmd_type: _cmd_type,
@@ -1153,9 +1209,10 @@ fn apply_completion(app: &mut App) {
             value_index: _value_index,
         } => {
             // 检查当前参数是否是最后一个参数, 不是最后一个参数，追加逗号
-            let (_, param_str) = extract_module_and_param_str(app, &app.input_buffer, _cmd_type);
+            let (_, param_str) =
+                extract_module_and_param_str(app, app.input_buffer.content(), _cmd_type);
             if !is_last_parameter(app, module_name, &param_str) {
-                new_input.push(',');
+                app.input_buffer.insert_str(",");
             }
         }
         CompletionContext::File {
@@ -1170,19 +1227,17 @@ fn apply_completion(app: &mut App) {
             if let Ok(metadata) = full_path.metadata() {
                 if metadata.is_dir() {
                     // 对于目录，追加 "/"
-                    new_input.push('/');
+                    app.input_buffer.insert_str("/");
                 } else {
                     // 对于文件，追加空格
-                    new_input.push(' ');
+                    app.input_buffer.insert_str(" ");
                 }
             } else {
                 // 如果无法获取元数据，默认追加空格
-                new_input.push(' ');
+                app.input_buffer.insert_str(" ");
             }
         }
     }
-
-    app.input_buffer = new_input;
 
     // 退出补全模式
     app.completion_active = false;

@@ -75,7 +75,7 @@ impl CommandDef {
             usage: usage.into(),
             examples: examples.into_iter().map(|s| s.into()).collect(),
             cmd_type,
-            change_ast
+            change_ast,
         }
     }
 

@@ -43,15 +43,16 @@ pub fn draw(f: &mut Frame, app: &App) {
 
 fn draw_tree(f: &mut Frame, app: &App, area: Rect) {
     let current_file = &app.current_file.clone().unwrap_or("Untitled".to_string());
-    let unsaved_flag = if app.saved {
-        ""
-    } else {
-        "*"
-    };
+    let unsaved_flag = if app.saved { "" } else { "*" };
     let title = if app.selected_nodes.is_empty() {
         format!(" {}{} ", current_file, unsaved_flag)
     } else {
-        format!(" {}{} ({}) ", current_file, unsaved_flag, app.selected_nodes.len())
+        format!(
+            " {}{} ({}) ",
+            current_file,
+            unsaved_flag,
+            app.selected_nodes.len()
+        )
     };
 
     let block = Block::default()
@@ -321,13 +322,49 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
 
     // Add input line (only in command/param modes)
     if app.input_mode == InputMode::Command || app.input_mode == InputMode::InsertEnterParams {
-        lines.push(Line::from(vec![
-            Span::styled(
-                "> ",
-                Style::default().fg(style_fg).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(app.input_buffer.clone(), Style::default().fg(Color::White)),
-        ]));
+        let cursor_pos = app.input_buffer.cursor_pos();
+        let buffer = app.input_buffer.content();
+
+        // Build spans for input buffer with cursor highlighting
+        let mut spans = vec![Span::styled(
+            "> ",
+            Style::default().fg(style_fg).add_modifier(Modifier::BOLD),
+        )];
+
+        // Add each character with appropriate styling
+        for (i, ch) in buffer.chars().enumerate() {
+            if i == cursor_pos {
+                // Cursor is on this character - highlight with different background
+                spans.push(Span::styled(
+                    ch.to_string(),
+                    Style::default().fg(Color::White).bg(Color::DarkGray),
+                ));
+            } else {
+                // Normal character
+                spans.push(Span::styled(
+                    ch.to_string(),
+                    Style::default().fg(Color::White),
+                ));
+            }
+        }
+
+        // Handle cursor at end of buffer (after all characters)
+        let char_count = buffer.chars().count();
+        if cursor_pos == char_count {
+            // Cursor at end - show a space with background
+            spans.push(Span::styled(
+                " ",
+                Style::default().fg(Color::White).bg(Color::DarkGray),
+            ));
+        } else if cursor_pos > char_count {
+            // Cursor out of bounds (shouldn't happen due to clamp_cursor, but handle gracefully)
+            spans.push(Span::styled(
+                " ",
+                Style::default().fg(Color::White).bg(Color::DarkGray),
+            ));
+        }
+
+        lines.push(Line::from(spans));
     }
 
     // Add error line if there's a message
