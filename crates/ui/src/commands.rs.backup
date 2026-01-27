@@ -774,33 +774,49 @@ fn split_parameters(input: &str) -> CommandResult<Vec<String>> {
     Ok(params)
 }
 
+/// 
 /// Save AST to JSON file
 pub fn cmd_write(app: &mut App, filename: &str) -> CommandResult<()> {
-    if filename.is_empty() {
-        app.current_file.clone().ok_or(CommandError::Custom(
-            "No current file specified and no filename provided to write to".to_string(),
-        ))?;
-    } else {
+    if !filename.is_empty() {
         let expanded = expand_tilde(filename);
 
-        // Check if file exists and warn user if it's different from current file
+        // Check if file exists and return error if it's different from current file
         if expanded.exists() {
             if let Some(ref current_file) = app.current_file {
                 let current_expanded = expand_tilde(current_file);
                 if expanded != current_expanded {
-                    return Err(CommandError::Custom(format!(
-                        "File '{}' exists, use w!, write! or save! to force write",
-                        filename
-                    )));
+                    return Err(CommandError::Custom(
+                        format!("File '{}' exists (use 'w!' or 'write!' to force overwrite)", expanded.display())
+                    ));
                 }
             } else {
-                return Err(CommandError::Custom(format!(
-                    "File '{}' exists, use w!, write! or save! to force write",
-                    filename
-                )));
+                return Err(CommandError::Custom(
+                    format!("File '{}' exists (use 'w!' or 'write!' to force overwrite)", expanded.display())
+                ));
             }
         }
     }
+    cmd_write_force(app, filename)
+}
+            } else {
+                return Err(CommandError::Custom(
+                    format!("File '{}' exists (use 'w!' or 'write!' to force overwrite)", expanded.display())
+                ));
+            }
+        }
+    }
+    cmd_write_force(app, filename)
+}
+            } else {
+                return Err(CommandError::Custom(format!(
+                    "File '{}' exists (use 'w!' or 'write!' to force overwrite)",
+                    expanded.display()
+                )));
+            }
+        }
+
+        expanded
+    };
     cmd_write_force(app, filename)
 }
 
@@ -1788,32 +1804,6 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
     ));
 
     registry.register(CommandDef::new(
-        "write!",
-        vec!["save!", "w!"],
-        |app, args| {
-            if args.len() > 1 {
-                return Err(CommandError::InvalidCommand(
-                    "write! command takes at most 1 argument".to_string(),
-                ));
-            }
-            let file_name = if let Some(file) = args.first() {
-                (*file).to_string()
-            } else {
-                // Use current selection (handled in cmd_delete)
-                String::new()
-            };
-            cmd_write_force(app, &file_name)
-        },
-        "Force save AST to JSON file",
-        0,
-        Some(1),
-        "write! [filename]",
-        vec!["write! test.json", "save! project.json"],
-        CommandType::File,
-        false,
-    ));
-
-    registry.register(CommandDef::new(
         "edit",
         vec!["e"],
         |app, args| {
@@ -1845,7 +1835,7 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
         |app, args| {
             if args.len() > 1 {
                 return Err(CommandError::InvalidCommand(
-                    "edit! command takes at most 1 argument".to_string(),
+                    "edit command takes at most 1 argument".to_string(),
                 ));
             }
             let file_name = if let Some(file) = args.first() {
@@ -1856,7 +1846,7 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
             };
             cmd_load_force(app, &file_name)
         },
-        "Force load AST from JSON file",
+        "Load AST from JSON file",
         0,
         Some(1),
         "edit! [filename]",
@@ -1937,7 +1927,7 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
             }
             cmd_quit_force(app)
         },
-        "Force exit the application",
+        "Exit the application",
         0,
         Some(0),
         "quit!",
