@@ -440,11 +440,10 @@ fn execute_command_registry(app: &mut App, cmd: &str) -> bool {
         // Execute the command
         match handler(app, args) {
             Ok(_) => {
-                // Command succeeded
-                // Note: The handler may have already set an info message
                 if change_ast {
                     app.mark_dirty();
                 }
+                app.set_info("command success.");
             }
             Err(e) => {
                 app.set_error(&e.to_string());
