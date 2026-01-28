@@ -48,6 +48,8 @@ pub struct CommandDef {
     pub cmd_type: CommandType,
     /// 是否修改 Ast 语法树
     pub change_ast: bool,
+    /// 是否写入历史记录
+    pub write_to_history: bool
 }
 
 impl CommandDef {
@@ -64,6 +66,7 @@ impl CommandDef {
         examples: Vec<impl Into<String>>,
         cmd_type: crate::command_registry::CommandType,
         change_ast: bool,
+        write_to_history: bool,
     ) -> Self {
         Self {
             name: name.into(),
@@ -76,6 +79,7 @@ impl CommandDef {
             examples: examples.into_iter().map(|s| s.into()).collect(),
             cmd_type,
             change_ast,
+            write_to_history,
         }
     }
 

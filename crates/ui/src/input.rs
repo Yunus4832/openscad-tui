@@ -147,13 +147,30 @@ fn handle_command_input(key: KeyEvent, app: &mut App) {
         }
 
         // Regular character input - insert at cursor position
-        KeyCode::Char(c) => {
+        KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
             if app.completion_active {
                 // User started typing, exit completion mode
                 app.completion_active = false;
                 app.completion_candidates.clear();
             }
             app.input_buffer.insert_char(c);
+        }
+
+        // Ctrl+P to get previous command from history (vim-style)
+        KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            if let Some(prev_cmd) = app.get_previous_command() {
+                app.input_buffer.set_content(&prev_cmd);
+            }
+        }
+
+        // Ctrl+N to get next command from history (vim-style)
+        KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            if let Some(next_cmd) = app.get_next_command() {
+                app.input_buffer.set_content(&next_cmd);
+            } else {
+                // Clear input buffer, back to blank input state
+                app.input_buffer.clear();
+            }
         }
 
         // Backspace to delete character before cursor
@@ -187,6 +204,40 @@ fn handle_command_input(key: KeyEvent, app: &mut App) {
         }
         KeyCode::End => {
             app.input_buffer.move_to_end();
+        }
+
+        // Up arrow to get previous command from history
+        KeyCode::Up => {
+            if let Some(prev_cmd) = app.get_previous_command() {
+                app.input_buffer.set_content(&prev_cmd);
+            }
+        }
+
+        // Down arrow to get next command from history
+        KeyCode::Down => {
+            if let Some(next_cmd) = app.get_next_command() {
+                app.input_buffer.set_content(&next_cmd);
+            } else {
+                // Clear input buffer, back to blank input state
+                app.input_buffer.clear();
+            }
+        }
+
+        // Ctrl+P to get previous command from history (vim-style)
+        KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            if let Some(prev_cmd) = app.get_previous_command() {
+                app.input_buffer.set_content(&prev_cmd);
+            }
+        }
+
+        // Ctrl+N to get next command from history (vim-style)
+        KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            if let Some(next_cmd) = app.get_next_command() {
+                app.input_buffer.set_content(&next_cmd);
+            } else {
+                // Clear input buffer, back to blank input state
+                app.input_buffer.clear();
+            }
         }
 
         KeyCode::Enter => {
@@ -365,6 +416,11 @@ fn execute_command_registry(app: &mut App, cmd: &str) -> bool {
         let min_args = cmd_def.min_args;
         let max_args = cmd_def.max_args;
         let change_ast = cmd_def.change_ast;
+        let write_to_history = cmd_def.write_to_history;
+
+        if write_to_history {
+            app.add_to_history(cmd);
+        }
 
         if args.len() < min_args {
             app.set_error(&format!(
@@ -403,6 +459,8 @@ fn execute_command_registry(app: &mut App, cmd: &str) -> bool {
         "Unknown command: '{}'. Type 'help' for commands.",
         cmd_name
     ));
+    // Add unknown command to history so user can recall and edit it
+    app.add_to_history(cmd);
     true
 }
 

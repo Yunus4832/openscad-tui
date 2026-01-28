@@ -254,6 +254,11 @@ pub struct App {
     pub completion_context: CompletionContext,
     pub completion_active: bool,
 
+    // Command history
+    pub command_history: Vec<String>,
+    pub history_index: Option<usize>,
+    pub history_max_size: usize,
+
     // 文件相关
     pub current_file: Option<String>,
     pub saved: bool,
@@ -283,6 +288,9 @@ impl App {
             completion_index: 0,
             completion_context: CompletionContext::Command,
             completion_active: false,
+            command_history: Vec::new(),
+            history_index: None,
+            history_max_size: 100,
             current_file: None,
             saved: true,
         };
@@ -803,6 +811,68 @@ impl App {
     pub fn mark_saved(&mut self) {
         self.saved = true;
     }
+
+    /// Add command to history
+    pub fn add_to_history(&mut self, command: &str) {
+        if !command.trim().is_empty() {
+            // Avoid duplicate commands (if same as last, don't add)
+            if self
+                .command_history
+                .last()
+                .map_or(true, |last| last != command)
+            {
+                self.command_history.push(command.to_string());
+
+                // Limit history size
+                if self.command_history.len() > self.history_max_size {
+                    self.command_history.remove(0); // Remove oldest record
+                }
+            }
+        }
+
+        // Reset history index
+        self.history_index = None;
+    }
+
+    /// Get previous command from history
+    pub fn get_previous_command(&mut self) -> Option<String> {
+        if self.command_history.is_empty() {
+            self.history_index = None;
+            return None;
+        }
+
+        let index = match self.history_index {
+            Some(i) => {
+                if i > 0 {
+                    i - 1
+                } else {
+                    0
+                }
+            }
+            None => self.command_history.len() - 1,
+        };
+
+        self.history_index = Some(index);
+        Some(self.command_history[index].clone())
+    }
+
+    /// Get next command from history
+    pub fn get_next_command(&mut self) -> Option<String> {
+        match self.history_index {
+            None => None,
+            Some(i) => {
+                if i < self.command_history.len() - 1 {
+                    let next_index = i + 1;
+                    self.history_index = Some(next_index);
+                    Some(self.command_history[next_index].clone())
+                } else {
+                    // Reached the most recent command, return empty string (back to normal input)
+                    self.history_index = None;
+                    Some(String::new())
+                }
+            }
+        }
+    }
 }
 
 impl Default for App {
@@ -822,6 +892,94 @@ mod tests {
         assert_eq!(buf.cursor_pos(), 0);
         assert!(buf.is_empty());
         assert_eq!(buf.len(), 0);
+    }
+
+    #[test]
+    fn test_command_history_add_and_get() {
+        let mut app = App::new();
+
+        // Add some commands to history
+        app.add_to_history("help");
+        app.add_to_history("insert cube");
+        app.add_to_history("translate [10, 0, 0]");
+
+        // Verify history contains all commands
+        assert_eq!(app.command_history.len(), 3);
+        assert_eq!(app.command_history[0], "help");
+        assert_eq!(app.command_history[1], "insert cube");
+        assert_eq!(app.command_history[2], "translate [10, 0, 0]");
+
+        // Test getting previous commands (going backwards in history)
+        assert_eq!(
+            app.get_previous_command(),
+            Some("translate [10, 0, 0]".to_string())
+        );
+        assert_eq!(app.history_index, Some(2));
+
+        assert_eq!(app.get_previous_command(), Some("insert cube".to_string()));
+        assert_eq!(app.history_index, Some(1));
+
+        assert_eq!(app.get_previous_command(), Some("help".to_string()));
+        assert_eq!(app.history_index, Some(0));
+
+        // Should stay at the first command when trying to go further back
+        assert_eq!(app.get_previous_command(), Some("help".to_string()));
+        assert_eq!(app.history_index, Some(0));
+
+        // Test getting next commands (going forward in history)
+        assert_eq!(app.get_next_command(), Some("insert cube".to_string()));
+        assert_eq!(app.history_index, Some(1));
+
+        assert_eq!(
+            app.get_next_command(),
+            Some("translate [10, 0, 0]".to_string())
+        );
+        assert_eq!(app.history_index, Some(2));
+
+        // Going forward past the end should clear the index and return empty string
+        assert_eq!(app.get_next_command(), Some(String::new()));
+        assert_eq!(app.history_index, None);
+    }
+
+    #[test]
+    fn test_command_history_duplicates() {
+        let mut app = App::new();
+
+        // Add the same command twice
+        app.add_to_history("help");
+        app.add_to_history("help"); // This should not be added
+
+        // Should only have one command in history
+        assert_eq!(app.command_history.len(), 1);
+        assert_eq!(app.command_history[0], "help");
+    }
+
+    #[test]
+    fn test_command_history_empty() {
+        let mut app = App::new();
+
+        // Getting from empty history should return None
+        assert_eq!(app.get_previous_command(), None);
+        assert_eq!(app.get_next_command(), None);
+    }
+
+    #[test]
+    fn test_command_history_size_limit() {
+        let mut app = App::new();
+        app.history_max_size = 3; // Set small limit for testing
+
+        // Add more commands than the limit
+        app.add_to_history("cmd1");
+        app.add_to_history("cmd2");
+        app.add_to_history("cmd3");
+        app.add_to_history("cmd4"); // This should cause the first one to be removed
+        app.add_to_history("cmd5"); // This should cause more removals
+
+        // Should only have the last 3 commands
+        assert_eq!(app.command_history.len(), 3);
+        assert_eq!(app.command_history[0], "cmd3");
+        assert_eq!(app.command_history[1], "cmd4");
+        assert_eq!(app.command_history[2], "cmd5");
     }
 
     #[test]
