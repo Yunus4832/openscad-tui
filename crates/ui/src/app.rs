@@ -819,7 +819,7 @@ impl App {
             if self
                 .command_history
                 .last()
-                .map_or(true, |last| last != command)
+                .is_none_or(|last| last != command)
             {
                 self.command_history.push(command.to_string());
 

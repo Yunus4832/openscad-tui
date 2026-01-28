@@ -74,6 +74,11 @@ impl Expr {
     pub fn parse(input: &str) -> Result<Self> {
         let trimmed = input.trim();
 
+        // First check for binary operations
+        if let Some(bin_op_result) = parse_binary_operation(trimmed) {
+            return bin_op_result;
+        }
+
         // Try boolean
         if trimmed == "true" {
             return Ok(Expr::Boolean(true));
@@ -901,6 +906,122 @@ fn is_valid_identifier(s: &str) -> bool {
     }
 
     s.chars().all(|c| c.is_alphanumeric() || c == '_')
+}
+
+/// Helper function to parse binary operations in expressions
+fn parse_binary_operation(input: &str) -> Option<Result<Expr>> {
+    // Define operators in order of increasing precedence
+    // (operations with lower precedence are processed first)
+    let operators = [
+        ("||", BinOp::Or),   // Logical OR
+        ("&&", BinOp::And),  // Logical AND
+        ("==", BinOp::Eq),   // Equal
+        ("!=", BinOp::Neq),  // Not equal
+        ("<=", BinOp::Lte),  // Less than or equal
+        (">=", BinOp::Gte),  // Greater than or equal
+        ("<", BinOp::Lt),    // Less than
+        (">", BinOp::Gt),    // Greater than
+        ("+", BinOp::Add),   // Addition
+        ("-", BinOp::Sub),   // Subtraction
+        ("*", BinOp::Mul),   // Multiplication
+        ("/", BinOp::Div),   // Division
+        ("%", BinOp::Mod),   // Modulo
+        ("^", BinOp::Power), // Power
+    ];
+
+    // Track bracket/parentheses depth to avoid parsing operators inside them
+    let mut paren_depth = 0;
+    let mut bracket_depth = 0;
+    let mut brace_depth = 0;
+    let mut in_string = false;
+    let mut escape_next = false;
+
+    // Process from right to left to respect precedence (lower precedence first)
+    let chars: Vec<(usize, char)> = input.char_indices().collect();
+    let mut i = chars.len();
+
+    while i > 0 {
+        i -= 1;
+        let (pos, ch) = chars[i];
+
+        if escape_next {
+            escape_next = false;
+            continue;
+        }
+
+        match ch {
+            '\\' => {
+                escape_next = true;
+            }
+            '"' => {
+                in_string = !in_string;
+            }
+            '(' => {
+                if !in_string {
+                    paren_depth -= 1;
+                }
+            }
+            ')' => {
+                if !in_string {
+                    paren_depth += 1;
+                }
+            }
+            '[' => {
+                if !in_string {
+                    bracket_depth -= 1;
+                }
+            }
+            ']' => {
+                if !in_string {
+                    bracket_depth += 1;
+                }
+            }
+            '{' => {
+                if !in_string {
+                    brace_depth -= 1;
+                }
+            }
+            '}' => {
+                if !in_string {
+                    brace_depth += 1;
+                }
+            }
+            _ => {}
+        }
+
+        // Only look for operators when not inside brackets/strings and at outermost level
+        if !in_string && paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 {
+            // Check for operators at current position
+            for &(op_str, op_enum) in &operators {
+                if input[pos..].starts_with(op_str) {
+                    let left_str = input[..pos].trim();
+                    let right_str = input[pos + op_str.len()..].trim();
+
+                    if left_str.is_empty() || right_str.is_empty() {
+                        continue; // Invalid expression like "+ x" or "x +" (unless unary)
+                    }
+
+                    // Parse left and right sides recursively
+                    let left_result = Expr::parse(left_str);
+                    let right_result = Expr::parse(right_str);
+
+                    match (left_result, right_result) {
+                        (Ok(left_expr), Ok(right_expr)) => {
+                            return Some(Ok(Expr::BinOp {
+                                left: Box::new(left_expr),
+                                op: op_enum,
+                                right: Box::new(right_expr),
+                            }));
+                        }
+                        (Err(e), _) => return Some(Err(e)),
+                        (_, Err(e)) => return Some(Err(e)),
+                    }
+                }
+            }
+        }
+    }
+
+    None // No binary operation found
 }
 
 #[cfg(test)]

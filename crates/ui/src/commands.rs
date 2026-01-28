@@ -1062,81 +1062,121 @@ fn is_valid_identifier(name: &str) -> bool {
 }
 
 /// Define a new custom function
-pub fn cmd_funcdef(app: &mut App, func_name: &str, params_body: Option<&str>) -> CommandResult<()> {
-    use openscad_core::{Expr, FunctionDefinition, Parameter};
+/// Helper function to parse function signature with support for parentheses
+fn parse_function_signature(sig: &str) -> CommandResult<(String, String)> {
+    // Look for = to separate parameters/body
+    let equals_pos = sig.find('=');
 
-    let (parameters, body_expr) = if let Some(params_body_str) = params_body {
-        // Parse parameters and body from format like "x, y = x + y"
-        let equals_pos = params_body_str.find('=');
+    if let Some(eq_pos) = equals_pos {
+        let params_part = sig[..eq_pos].trim();
+        let body_part = sig[eq_pos + 1..].trim();
 
-        if let Some(pos) = equals_pos {
-            let params_part = params_body_str[..pos].trim();
-            let body_part = params_body_str[pos + 1..].trim();
+        // Check if there are parentheses around parameters
+        let cleaned_params = params_part.trim();
 
-            // Parse parameters
-            let parameters = if params_part.is_empty() {
-                Vec::new()
-            } else {
-                // Split parameters by comma
-                let param_names: Vec<&str> = params_part.split(',').map(|s| s.trim()).collect();
-                let mut params = Vec::new();
-                for param_name in param_names {
-                    if !param_name.is_empty() {
-                        params.push(Parameter::new(param_name.to_string()));
-                    }
-                }
-                params
-            };
-
-            // Parse body expression
-            let body = Expr::parse(body_part).map_err(|e| {
-                CommandError::ParameterError(format!(
-                    "Invalid function body expression: {} - {}",
-                    body_part, e
-                ))
-            })?;
-
-            (parameters, body)
+        // Check if it has parentheses format like (a, b, c)
+        if cleaned_params.starts_with('(') && cleaned_params.ends_with(')') {
+            let inner = &cleaned_params[1..cleaned_params.len() - 1]; // Remove parentheses
+            Ok((inner.trim().to_string(), body_part.to_string()))
         } else {
-            // If no equals sign, treat the whole string as the body with no parameters
-            let body = Expr::parse(params_body_str).map_err(|e| {
-                CommandError::ParameterError(format!(
-                    "Invalid function body expression: {} - {}",
-                    params_body_str, e
-                ))
-            })?;
-            (Vec::new(), body)
+            // Old format: a, b, c
+            Ok((cleaned_params.to_string(), body_part.to_string()))
         }
     } else {
-        // No parameters or body provided, create function with empty body (placeholder)
-        let body = Expr::Integer(0); // Placeholder value
-        (Vec::new(), body)
-    };
-
-    // Validate function name
-    if !is_valid_identifier(func_name) {
-        return Err(CommandError::InvalidCommand(format!(
-            "Invalid function name: {}",
-            func_name
-        )));
+        // No equals sign - entire string is treated as body with no parameters
+        Ok(("".to_string(), sig.trim().to_string()))
     }
+}
 
-    // Check if function with this name already exists
-    if app.ast.find_function_define(func_name).is_some() {
-        return Err(CommandError::InvalidCommand(format!(
-            "Function '{}' already defined",
-            func_name
-        )));
+pub fn cmd_funcdef(app: &mut App, func_def: &str) -> CommandResult<()> {
+    use openscad_core::{Expr, FunctionDefinition, Parameter};
+
+    let trimmed = func_def.trim();
+
+    // Find where the function name ends and parameters begin
+    if let Some(open_paren_pos) = trimmed.find('(') {
+        let func_name = &trimmed[..open_paren_pos].trim();
+
+        // Extract the part after the function name (should be "(params) = body")
+        let params_and_body_part = &trimmed[open_paren_pos..];
+
+        // Validate function name
+        if !is_valid_identifier(func_name) {
+            return Err(CommandError::InvalidCommand(format!(
+                "Invalid function name: {}",
+                func_name
+            )));
+        }
+
+        // Parse parameters and body from the params_and_body_part
+        let (params_part, body_part) = parse_function_signature(params_and_body_part)?;
+
+        // Parse parameters
+        let parameters = if params_part.is_empty() {
+            Vec::new()
+        } else {
+            // Split parameters by comma
+            let param_names: Vec<&str> = params_part.split(',').map(|s| s.trim()).collect();
+            let mut params = Vec::new();
+            for param_name in param_names {
+                if !param_name.is_empty() {
+                    params.push(Parameter::new(param_name.to_string()));
+                }
+            }
+            params
+        };
+
+        // Parse body expression
+        let body = Expr::parse(&body_part).map_err(|e| {
+            CommandError::ParameterError(format!(
+                "Invalid function body expression: {} - {}",
+                body_part, e
+            ))
+        })?;
+
+        // Check if function with this name already exists
+        if app.ast.find_function_define(func_name).is_some() {
+            return Err(CommandError::InvalidCommand(format!(
+                "Function '{}' already defined",
+                func_name
+            )));
+        }
+
+        // Create FunctionDefinition for AST
+        let function_def = FunctionDefinition::new(func_name.to_string(), parameters.clone(), body);
+
+        // Add to AST
+        app.ast_mut()
+            .add_function_define(function_def)
+            .map_err(CommandError::AstError)?;
+    } else {
+        // No parentheses found - just a function name with no parameters
+        let func_name = trimmed;
+
+        if !is_valid_identifier(func_name) {
+            return Err(CommandError::InvalidCommand(format!(
+                "Invalid function name: {}",
+                func_name
+            )));
+        }
+
+        // Check if function with this name already exists
+        if app.ast.find_function_define(func_name).is_some() {
+            return Err(CommandError::InvalidCommand(format!(
+                "Function '{}' already defined",
+                func_name
+            )));
+        }
+
+        // Create FunctionDefinition for AST with empty parameters and placeholder body
+        let function_def =
+            FunctionDefinition::new(func_name.to_string(), Vec::new(), Expr::Integer(0));
+
+        // Add to AST
+        app.ast_mut()
+            .add_function_define(function_def)
+            .map_err(CommandError::AstError)?;
     }
-
-    // Create FunctionDefinition for AST
-    let function_def =
-        FunctionDefinition::new(func_name.to_string(), parameters.clone(), body_expr);
-
-    // Add to AST
-    app.ast_mut()
-        .add_function_define(function_def)
-        .map_err(CommandError::AstError)?;
 
     Ok(())
 }
@@ -2238,27 +2278,21 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
         |app, args| {
             if args.is_empty() {
                 return Err(CommandError::InvalidCommand(
-                    "Usage: function <function_name> [(param1, param2, ...)=expression]"
-                        .to_string(),
+                    "Usage: function name(params) = expression".to_string(),
                 ));
             }
-            let func_name = args[0];
-            let params_body = if args.len() > 1 {
-                Some(args[1..].join(" "))
-            } else {
-                None
-            };
+
+            // Join all arguments to form the complete function definition
+            let full_command = args.join(" ");
+
             app.push_undo();
-            cmd_funcdef(app, func_name, params_body.as_deref()).map(|_| {
-                app.update_navigation_status();
-                app.set_info(&format!("Function '{}' defined", func_name));
-            })
+            cmd_funcdef(app, &full_command)
         },
         "Define a new function",
         1,
         None, // Variable number of parameters (optional)
-        "function <function_name> [(param1, param2, ...)=expression]",
-        vec!["function myfunc", "function add x,y = x + y"],
+        "function name(params) = expression",
+        vec!["function myfunc()", "function add(a,b) = a + b"],
         CommandType::Definition,
         true,
         true,
@@ -3142,8 +3176,8 @@ mod tests {
 
         let mut app = App::new();
 
-        // Create a function definition with one parameter
-        let result = cmd_funcdef(&mut app, "square", Some("x = 10"));
+        // Create a function definition with one parameter using new parentheses syntax
+        let result = cmd_funcdef(&mut app, "square(x) = 10");
         assert!(result.is_ok(), "cmd_funcdef should succeed");
 
         // Check that function was added to AST
@@ -3161,7 +3195,7 @@ mod tests {
         let mut app = App::new();
 
         // Create a function definition without parameters
-        let result = cmd_funcdef(&mut app, "pi_value", Some("= 3.14159"));
+        let result = cmd_funcdef(&mut app, "pi_value() = 3.14159");
         assert!(result.is_ok(), "cmd_funcdef should succeed");
 
         // Check that function was added to AST
@@ -3178,8 +3212,8 @@ mod tests {
 
         let mut app = App::new();
 
-        // Create a function definition with multiple parameters
-        let result = cmd_funcdef(&mut app, "add", Some("a, b = 15"));
+        // Create a function definition with multiple parameters using new parentheses syntax
+        let result = cmd_funcdef(&mut app, "add(a, b) = 15");
         assert!(result.is_ok(), "cmd_funcdef should succeed");
 
         // Check that function was added to AST
@@ -3198,11 +3232,11 @@ mod tests {
         let mut app = App::new();
 
         // First function definition should succeed
-        let result = cmd_funcdef(&mut app, "my_func", Some("x = 10"));
+        let result = cmd_funcdef(&mut app, "my_func(x) = 10");
         assert!(result.is_ok());
 
         // Second function definition with same name should fail
-        let result = cmd_funcdef(&mut app, "my_func", Some("y = 20"));
+        let result = cmd_funcdef(&mut app, "my_func(y) = 20");
         assert!(result.is_err());
 
         // Verify only one function in AST
@@ -3216,7 +3250,7 @@ mod tests {
         let mut app = App::new();
 
         // Test invalid expression in function body
-        let result = cmd_funcdef(&mut app, "bad_func", Some("x = x + "));
+        let result = cmd_funcdef(&mut app, "bad_func(x) = x + ");
         assert!(result.is_err());
 
         // Check that no functions were added to AST
@@ -3230,10 +3264,85 @@ mod tests {
         let mut app = App::new();
 
         // Test invalid function name (starts with number)
-        let result = cmd_funcdef(&mut app, "123func", Some("x = x * x"));
+        let result = cmd_funcdef(&mut app, "123func(x) = x * x");
         assert!(result.is_err());
 
         // Check that no functions were added to AST
         assert_eq!(app.ast.function_defines.len(), 0);
+    }
+
+    #[test]
+    fn test_cmd_funcdef_with_binary_operations() {
+        use App;
+
+        let mut app = App::new();
+
+        // Create a function with binary operations in the body
+        let result = cmd_funcdef(&mut app, "add(a, b) = a + b");
+        assert!(
+            result.is_ok(),
+            "cmd_funcdef should succeed with binary operations"
+        );
+
+        // Check that function was added to AST
+        assert_eq!(app.ast.function_defines.len(), 1);
+        let func_def = &app.ast.function_defines[0];
+        assert_eq!(func_def.name, "add");
+        assert_eq!(func_def.parameters.len(), 2);
+        assert_eq!(func_def.parameters[0].name, "a");
+        assert_eq!(func_def.parameters[1].name, "b");
+
+        // Verify the body contains a binary operation
+        match &func_def.body {
+            openscad_core::Expr::BinOp { op, .. } => {
+                assert_eq!(*op, openscad_core::BinOp::Add);
+            }
+            _ => panic!("Expected binary operation in function body"),
+        }
+    }
+
+    #[test]
+    fn test_cmd_funcdef_with_complex_expressions() {
+        use App;
+
+        let mut app = App::new();
+
+        // Create a function with a more complex expression
+        let result = cmd_funcdef(&mut app, "calc(x, y, z) = x * y + z");
+        assert!(
+            result.is_ok(),
+            "cmd_funcdef should succeed with complex expressions"
+        );
+
+        // Check that function was added to AST
+        assert_eq!(app.ast.function_defines.len(), 1);
+        let func_def = &app.ast.function_defines[0];
+        assert_eq!(func_def.name, "calc");
+        assert_eq!(func_def.parameters.len(), 3);
+        assert_eq!(func_def.parameters[0].name, "x");
+        assert_eq!(func_def.parameters[1].name, "y");
+        assert_eq!(func_def.parameters[2].name, "z");
+    }
+
+    #[test]
+    fn test_cmd_funcdef_parentheses_format() {
+        use App;
+
+        let mut app = App::new();
+
+        // Test the new parentheses format specifically
+        let result = cmd_funcdef(&mut app, "multiply(a, b) = a * b");
+        assert!(
+            result.is_ok(),
+            "cmd_funcdef should succeed with parentheses format"
+        );
+
+        // Check that function was added to AST with correct parameters
+        assert_eq!(app.ast.function_defines.len(), 1);
+        let func_def = &app.ast.function_defines[0];
+        assert_eq!(func_def.name, "multiply");
+        assert_eq!(func_def.parameters.len(), 2);
+        assert_eq!(func_def.parameters[0].name, "a");
+        assert_eq!(func_def.parameters[1].name, "b");
     }
 }

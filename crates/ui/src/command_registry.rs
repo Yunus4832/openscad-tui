@@ -49,7 +49,7 @@ pub struct CommandDef {
     /// 是否修改 Ast 语法树
     pub change_ast: bool,
     /// 是否写入历史记录
-    pub write_to_history: bool
+    pub write_to_history: bool,
 }
 
 impl CommandDef {
