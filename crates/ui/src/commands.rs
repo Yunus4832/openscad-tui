@@ -1062,9 +1062,6 @@ fn is_valid_identifier(name: &str) -> bool {
 }
 
 /// Define a new custom function
-/// Syntax: funcdef <function_name>(param1, param2, ...) = expression
-/// Example: funcdef square(x) = x * x
-///          funcdef add(a, b) = a + b
 pub fn cmd_funcdef(app: &mut App, func_name: &str, params_body: Option<&str>) -> CommandResult<()> {
     use openscad_core::{Expr, FunctionDefinition, Parameter};
 
@@ -1210,9 +1207,6 @@ fn expand_tilde<P: AsRef<Path>>(path: P) -> PathBuf {
 }
 
 /// Define a new custom module
-/// Syntax: moddef <module_name> [params]
-///   params: optional parameter list like "size=10, center=false"
-///   children: taken from selected nodes (if any)
 pub fn cmd_moddef(app: &mut App, module_name: &str, params: Option<&str>) -> CommandResult<()> {
     use openscad_core::ModuleDefinition;
     use openscad_library::{ModuleDef, ParameterDef};
@@ -2212,12 +2206,13 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
 
     // Function definition command
     registry.register(CommandDef::new(
-        "funcdef",
+        "function",
         vec![] as Vec<String>,
         |app, args| {
             if args.is_empty() {
                 return Err(CommandError::InvalidCommand(
-                    "Usage: funcdef <function_name> [(param1, param2, ...)=expression]".to_string(),
+                    "Usage: function <function_name> [(param1, param2, ...)=expression]"
+                        .to_string(),
                 ));
             }
             let func_name = args[0];
@@ -2235,20 +2230,20 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
         "Define a new function",
         1,
         None, // Variable number of parameters (optional)
-        "funcdef <function_name> [(param1, param2, ...)=expression]",
-        vec!["funcdef myfunc", "funcdef add x,y = x + y"],
+        "function <function_name> [(param1, param2, ...)=expression]",
+        vec!["function myfunc", "function add x,y = x + y"],
         CommandType::Definition,
         true,
     ));
 
     // Module definition command
     registry.register(CommandDef::new(
-        "moddef",
+        "module",
         vec![] as Vec<String>,
         |app, args| {
             if args.is_empty() {
                 return Err(CommandError::InvalidCommand(
-                    "Usage: moddef <module_name> [params]".to_string(),
+                    "Usage: module <module_name> [params]".to_string(),
                 ));
             }
             let module_name = args[0];
@@ -2266,8 +2261,11 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
         "Define a new module",
         1,
         None,
-        "moddef <module_name> [params]",
-        vec!["moddef mymodule", "moddef mybox size=10, center=false"],
+        "module <module_name> [params]",
+        vec![
+            "module mymodule",
+            "module mybox size=10, center=false",
+        ],
         CommandType::Definition,
         true,
     ));

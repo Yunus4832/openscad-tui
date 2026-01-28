@@ -15,7 +15,7 @@ pub enum CommandType {
     Param,
     /// No-argument command: command requires no further arguments (difference, union, etc.)
     NoArg,
-    /// Definition command: for defining content, no completion needed (global, moddef, funcdef)
+    /// Definition command: for defining content, no completion needed (global, module, function)
     Definition,
 }
 
