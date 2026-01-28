@@ -388,9 +388,33 @@ fn handle_replace_module_input(key: KeyEvent, app: &mut App) {
 /// Handle help modal input
 fn handle_help_input(key: KeyEvent, app: &mut App) {
     match key.code {
-        // Any key to close help modal
-        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter => {
+        // Close help modal
+        KeyCode::Esc | KeyCode::Char('q') => {
             app.input_mode = InputMode::Normal;
+        }
+        // Scroll up
+        KeyCode::Up | KeyCode::Char('k') => {
+            app.help_scroll_offset = app.help_scroll_offset.saturating_sub(1).max(0);
+        }
+        // Scroll down
+        KeyCode::Down | KeyCode::Char('j') => {
+            app.help_scroll_offset = app.help_scroll_offset.saturating_add(1).min(app.help_scroll_offset_max);
+        }
+        // Page up
+        KeyCode::PageUp | KeyCode::Char('b') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.help_scroll_offset = app.help_scroll_offset.saturating_sub(10).max(0);
+        }
+        // Page down
+        KeyCode::PageDown | KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.help_scroll_offset = app.help_scroll_offset.saturating_add(10).min(app.help_scroll_offset_max);
+        }
+        // Home key - go to top
+        KeyCode::Home => {
+            app.help_scroll_offset = 0;
+        }
+        // End key - go to bottom
+        KeyCode::End => {
+            app.help_scroll_offset = app.help_doc_count;
         }
         _ => {}
     }

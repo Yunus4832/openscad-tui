@@ -278,7 +278,7 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
     match app.input_mode {
         InputMode::Normal => {
             title = " Normal Mode ".to_string();
-            prompt = "i=insert  j/k=nav  h/l=collapse/expand  v=select  d=delete  u=undo  <c-r>=redo  Enter=toggle  w=write  e=edit  :=cmd  ?=help  q=quit".to_string();
+            prompt = "i=insert  j/k=nav  h/l=collapse/expand  v=select  d=delete  u=undo  <c-r>=redo  enter=toggle  w=write  e=edit  :=cmd  ?=help  q=quit".to_string();
             style_fg = Color::Yellow;
         }
         InputMode::Command => {
@@ -432,11 +432,16 @@ fn draw_preview(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(paragraph, area);
 }
 
-fn draw_help_modal(f: &mut Frame, _app: &App) {
+fn draw_help_modal(f: &mut Frame, app: &App) {
+    let cloned_help_docs = app.help_doc.clone();
+    let scroll_offset = app.help_scroll_offset;
+    let visible_line = app.help_modal_height;
+    let doc_count = app.help_doc_count;
+
     // Create a centered modal area (about 80% of screen width, 85% of height)
     let area = f.area();
     let modal_width = (area.width as f32 * 0.8) as u16;
-    let modal_height = (area.height as f32 * 0.85) as u16;
+    let modal_height = (visible_line + 2) as u16;
     let modal_x = (area.width.saturating_sub(modal_width)) / 2;
     let modal_y = (area.height.saturating_sub(modal_height)) / 2;
 
@@ -449,61 +454,20 @@ fn draw_help_modal(f: &mut Frame, _app: &App) {
 
     // Clear the background area first
     f.render_widget(Clear, modal_area);
-    let help_content = vec![
-        Line::from("OpenSCAD TUI - Command Reference"),
-        Line::from(""),
-        Line::from(vec![Span::styled(
-            "Navigation:",
-            Style::default().add_modifier(Modifier::BOLD),
-        )]),
-        Line::from("  j/↑, k/↓     - move cursor up/down"),
-        Line::from("  h/←, l/→     - collapse/expand nodes"),
-        Line::from(""),
-        Line::from(vec![Span::styled(
-            "Selection & Insertion:",
-            Style::default().add_modifier(Modifier::BOLD),
-        )]),
-        Line::from("  v            - toggle select node at cursor"),
-        Line::from("  i/insert     - insert module (enter module name)"),
-        Line::from("  d/delete     - delete node at cursor"),
-        Line::from(""),
-        Line::from(vec![Span::styled(
-            "Boolean Operations:",
-            Style::default().add_modifier(Modifier::BOLD),
-        )]),
-        Line::from("  union        - union of selected nodes"),
-        Line::from("  difference   - difference of selected nodes"),
-        Line::from("  intersection - intersection of selected nodes"),
-        Line::from(""),
-        Line::from(vec![Span::styled(
-            "Undo/Redo:",
-            Style::default().add_modifier(Modifier::BOLD),
-        )]),
-        Line::from("  u/undo       - undo last operation"),
-        Line::from("  r/redo       - redo last operation"),
-        Line::from(""),
-        Line::from(vec![Span::styled(
-            "File Operations:",
-            Style::default().add_modifier(Modifier::BOLD),
-        )]),
-        Line::from("  w/write      - save AST to JSON"),
-        Line::from("  e/edit       - load AST from JSON"),
-        Line::from("  export       - export to OpenSCAD file"),
-        Line::from("  library      - load third-party library"),
-        Line::from(""),
-        Line::from(vec![Span::styled(
-            "Other:",
-            Style::default().add_modifier(Modifier::BOLD),
-        )]),
-        Line::from("  :            - enter command mode"),
-        Line::from("  help/?       - show this help"),
-        Line::from("  q/quit       - exit application"),
-        Line::from(""),
-        Line::from(Span::styled(
-            "Press Esc or q to close",
-            Style::default().fg(Color::Gray),
-        )),
-    ];
+
+    // Create help content with all available commands
+    let help_content: Vec<Line> = cloned_help_docs
+        .iter()
+        .map(|doc| Line::from(doc.as_str()))
+        .collect();
+
+    // Get the visible portion of help content
+    let visible_content: Vec<Line> = help_content
+        .iter()
+        .skip(scroll_offset)
+        .take(visible_line)
+        .cloned()
+        .collect();
 
     // Create block for modal
     let block = Block::default()
@@ -511,11 +475,34 @@ fn draw_help_modal(f: &mut Frame, _app: &App) {
         .borders(Borders::ALL)
         .style(Style::default().fg(Color::Cyan));
 
-    let modal = Paragraph::new(help_content)
+    let modal = Paragraph::new(visible_content)
         .block(block)
         .style(Style::default().fg(Color::White));
 
     f.render_widget(modal, modal_area);
+
+    // Add scroll indicator if there's more content
+    if doc_count > visible_line {
+        let scroll_info = format!(
+            "({}/{})",
+            (scroll_offset + visible_line).min(doc_count),
+            doc_count
+        );
+        let scroll_text = Paragraph::new(Line::from(scroll_info)).style(
+            Style::default()
+                .fg(Color::Gray)
+                .add_modifier(Modifier::ITALIC),
+        );
+
+        // Position the scroll indicator at the bottom-right of the modal
+        let scroll_area = Rect {
+            x: modal_area.x + modal_area.width - 10,
+            y: modal_area.y + modal_area.height - 1,
+            width: 10,
+            height: 1,
+        };
+        f.render_widget(scroll_text, scroll_area);
+    }
 }
 
 /// Draw completion popup above the input area

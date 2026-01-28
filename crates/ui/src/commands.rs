@@ -1218,6 +1218,7 @@ pub fn cmd_redo(app: &mut App) -> CommandResult<()> {
 /// Help command - Show help modal
 pub fn cmd_help(app: &mut App) -> CommandResult<()> {
     app.input_mode = InputMode::Help;
+    app.help_scroll_offset = 0;
     Ok(())
 }
 

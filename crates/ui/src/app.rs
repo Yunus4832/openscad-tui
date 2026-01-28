@@ -262,10 +262,80 @@ pub struct App {
     // 文件相关
     pub current_file: Option<String>,
     pub saved: bool,
+
+    // 帮助界面状态
+    pub help_scroll_offset: usize,
+    pub help_scroll_offset_max: usize,
+    pub help_doc: Vec<String>,
+    pub help_doc_count: usize,
+    pub help_modal_height: usize,
 }
 
 impl App {
     pub fn new() -> Self {
+        let docs = [
+            "OpenSCAD TUI - Command Reference",
+            "",
+            "Navigation:",
+            "  next/j/↓      - move cursor down",
+            "  prev/k/↑      - move cursor up",
+            "  collapse/h/←  - collapse node or move left",
+            "  expand/l/→    - expand node or move right",
+            "  toggle        - toggle node expansion",
+            "",
+            "Selection:",
+            "  select/v      - toggle select current node",
+            "  deselect-all  - clear all selections",
+            "",
+            "Edit Operations:",
+            "  undo/u        - undo last operation",
+            "  redo/r        - redo last operation",
+            "  delete/d/dd/D - delete node",
+            "",
+            "Transformations:",
+            "  translate     - apply translation to selected nodes",
+            "  rotate        - apply rotation to selected nodes",
+            "  scale         - apply scaling to selected nodes",
+            "",
+            "Boolean Operations:",
+            "  union         - combine selected nodes",
+            "  difference    - subtract selected nodes",
+            "  intersection  - intersect selected nodes",
+            "",
+            "Insertion:",
+            "  insert/i      - insert a module into the AST",
+            "",
+            "Definitions:",
+            "  function      - define a new function",
+            "  module        - define a new module",
+            "  global        - define a global variable",
+            "",
+            "File Operations:",
+            "  write/w/save  - save AST to JSON",
+            "  write!/w!/save! - force save AST to JSON",
+            "  edit/e        - load AST from JSON",
+            "  edit!/e!      - force load AST from JSON",
+            "  export        - export to OpenSCAD file",
+            "  library       - load third-party library",
+            "",
+            "System:",
+            "  quit/q        - exit application",
+            "  quit!/q!      - force exit application",
+            "  wq            - save and exit",
+            "  help/?        - show this help",
+            "",
+            "Unimplemented Commands:",
+            "  yank/y        - copy node to clipboard",
+            "  paste/p       - paste node from clipboard",
+            "  remove/x      - remove a node",
+            "  replace       - replace a node with another module",
+            "",
+            "Navigation: Use ↑/↓ to scroll, Esc/q to close",
+        ];
+        let help_doc: Vec<String> = docs.iter().map(|str| str.to_string()).collect();
+        let help_doc_count = help_doc.len();
+        let help_modal_height: usize = 30;
+
         let mut app = Self {
             ast: Arc::new(AstRoot::new()),
             library: LibraryManager::new(),
@@ -293,6 +363,11 @@ impl App {
             history_max_size: 100,
             current_file: None,
             saved: true,
+            help_scroll_offset: 0,
+            help_scroll_offset_max: help_doc_count - help_modal_height,
+            help_doc,
+            help_doc_count,
+            help_modal_height
         };
 
         // Load standard library (from config dir if exists, otherwise use embedded)
