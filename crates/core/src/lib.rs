@@ -74,6 +74,15 @@ impl Expr {
     pub fn parse(input: &str) -> Result<Self> {
         let trimmed = input.trim();
 
+        // Check if the entire expression is wrapped in parentheses
+        if trimmed.starts_with('(') && trimmed.ends_with(')') {
+            // Need to make sure the parentheses are balanced
+            let content = &trimmed[1..trimmed.len() - 1]; // Extract content between parentheses
+            if is_balanced_parentheses(trimmed) {
+                return Expr::parse(content); // Recursively parse the content inside parentheses
+            }
+        }
+
         // First check for binary operations
         if let Some(bin_op_result) = parse_binary_operation(trimmed) {
             return bin_op_result;
@@ -144,7 +153,21 @@ impl Expr {
                 }
             }
             Expr::BinOp { left, op, right } => {
-                format!("{} {} {}", left.to_scad(), op.to_string(), right.to_scad())
+                let current_op_prec = op.precedence();
+                let wrap_if_needed = |expr: &Expr| -> String {
+                    match expr {
+                        Expr::BinOp {op: sub_op, ..} if sub_op.precedence() < current_op_prec => {
+                            format!("({})", expr.to_scad())
+                        },
+                        _ => expr.to_scad(),
+                    }
+                };
+                format!(
+                    "{} {} {}",
+                    wrap_if_needed(left),
+                    op.to_string(),
+                    wrap_if_needed(right)
+                )
             }
             Expr::UnaryOp { op, expr } => {
                 format!("{}{}", op.to_string(), expr.to_scad())
@@ -215,6 +238,19 @@ impl BinOp {
             BinOp::Neq => "!=",
             BinOp::And => "&&",
             BinOp::Or => "||",
+        }
+    }
+
+    /// Get the precedence level of the operator (higher number means higher precedence)
+    pub fn precedence(self) -> u8 {
+        match self {
+            BinOp::Power => 5,                                    // Exponentiation (highest)
+            BinOp::Mul | BinOp::Div | BinOp::Mod => 4, // Multiplication, division, modulo
+            BinOp::Add | BinOp::Sub => 3,              // Addition, subtraction
+            BinOp::Lt | BinOp::Gt | BinOp::Lte | BinOp::Gte => 2, // Comparison
+            BinOp::Eq | BinOp::Neq => 1,               // Equality
+            BinOp::And => 0,                           // Logical AND
+            BinOp::Or => 0,                            // Logical OR (lowest)
         }
     }
 }
@@ -908,40 +944,24 @@ fn is_valid_identifier(s: &str) -> bool {
     s.chars().all(|c| c.is_alphanumeric() || c == '_')
 }
 
-/// Helper function to parse binary operations in expressions
+/// Helper function to parse binary operations in expressions using precedence-based parsing
 fn parse_binary_operation(input: &str) -> Option<Result<Expr>> {
-    // Define operators in order of increasing precedence
-    // (operations with lower precedence are processed first)
-    let operators = [
-        ("||", BinOp::Or),   // Logical OR
-        ("&&", BinOp::And),  // Logical AND
-        ("==", BinOp::Eq),   // Equal
-        ("!=", BinOp::Neq),  // Not equal
-        ("<=", BinOp::Lte),  // Less than or equal
-        (">=", BinOp::Gte),  // Greater than or equal
-        ("<", BinOp::Lt),    // Less than
-        (">", BinOp::Gt),    // Greater than
-        ("+", BinOp::Add),   // Addition
-        ("-", BinOp::Sub),   // Subtraction
-        ("*", BinOp::Mul),   // Multiplication
-        ("/", BinOp::Div),   // Division
-        ("%", BinOp::Mod),   // Modulo
-        ("^", BinOp::Power), // Power
-    ];
+    // Tokenize and parse using precedence climbing algorithm
+    let trimmed = input.trim();
 
-    // Track bracket/parentheses depth to avoid parsing operators inside them
+    // First, find all operators that are not inside parentheses, brackets, or quotes
+    let mut ops_found = Vec::new();
+
     let mut paren_depth = 0;
     let mut bracket_depth = 0;
     let mut brace_depth = 0;
     let mut in_string = false;
     let mut escape_next = false;
 
-    // Process from right to left to respect precedence (lower precedence first)
-    let chars: Vec<(usize, char)> = input.char_indices().collect();
-    let mut i = chars.len();
+    let chars: Vec<(usize, char)> = trimmed.char_indices().collect();
 
-    while i > 0 {
-        i -= 1;
+    #[allow(clippy::needless_range_loop)]
+    for i in 0..chars.len() {
         let (pos, ch) = chars[i];
 
         if escape_next {
@@ -950,78 +970,159 @@ fn parse_binary_operation(input: &str) -> Option<Result<Expr>> {
         }
 
         match ch {
-            '\\' => {
-                escape_next = true;
-            }
-            '"' => {
-                in_string = !in_string;
-            }
-            '(' => {
-                if !in_string {
-                    paren_depth -= 1;
+            '\\' => escape_next = true,
+            '"' => in_string = !in_string,
+            '(' if !in_string => paren_depth += 1,
+            ')' if !in_string => {
+                paren_depth -= 1;
+                if paren_depth < 0 {
+                    // Unmatched parenthesis
+                    return None;
                 }
             }
-            ')' => {
-                if !in_string {
-                    paren_depth += 1;
-                }
-            }
-            '[' => {
-                if !in_string {
-                    bracket_depth -= 1;
-                }
-            }
-            ']' => {
-                if !in_string {
-                    bracket_depth += 1;
-                }
-            }
-            '{' => {
-                if !in_string {
-                    brace_depth -= 1;
-                }
-            }
-            '}' => {
-                if !in_string {
-                    brace_depth += 1;
-                }
-            }
+            '[' if !in_string => bracket_depth += 1,
+            ']' if !in_string => bracket_depth -= 1,
+            '{' if !in_string => brace_depth += 1,
+            '}' if !in_string => brace_depth -= 1,
             _ => {}
         }
 
         // Only look for operators when not inside brackets/strings and at outermost level
         if !in_string && paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 {
-            // Check for operators at current position
-            for &(op_str, op_enum) in &operators {
-                if input[pos..].starts_with(op_str) {
-                    let left_str = input[..pos].trim();
-                    let right_str = input[pos + op_str.len()..].trim();
+            // Check if any operator starts at this position
+            let remaining = &trimmed[pos..];
 
-                    if left_str.is_empty() || right_str.is_empty() {
-                        continue; // Invalid expression like "+ x" or "x +" (unless unary)
-                    }
+            // Sort operators by length descending to match longest operators first (e.g., "==" before "=")
+            let mut sorted_ops = vec![
+                "||", "&&", "==", "!=", "<=", ">=", "<", ">", "+", "-", "*", "/", "%", "^",
+            ];
+            sorted_ops.sort_by_key(|b| std::cmp::Reverse(b.len()));
 
-                    // Parse left and right sides recursively
-                    let left_result = Expr::parse(left_str);
-                    let right_result = Expr::parse(right_str);
-
-                    match (left_result, right_result) {
-                        (Ok(left_expr), Ok(right_expr)) => {
-                            return Some(Ok(Expr::BinOp {
-                                left: Box::new(left_expr),
-                                op: op_enum,
-                                right: Box::new(right_expr),
-                            }));
-                        }
-                        (Err(e), _) => return Some(Err(e)),
-                        (_, Err(e)) => return Some(Err(e)),
-                    }
+            for op_str in &sorted_ops {
+                if remaining.starts_with(op_str) {
+                    // Found an operator at this position
+                    ops_found.push((pos, *op_str));
+                    break; // Only record the longest matching operator
                 }
             }
         }
     }
 
-    None // No binary operation found
+    // If no operators found at top level, return None
+    if ops_found.is_empty() {
+        return None;
+    }
+
+    // Find the operator with the LOWEST precedence (since lower precedence binds weaker and cuts at the highest level)
+    let mut lowest_prec_op = "";
+    let mut lowest_prec_pos = 0;
+    let mut lowest_prec = u8::MAX; // Start with max to find minimum
+
+    for (pos, op_str) in ops_found {
+        let op = match op_str {
+            "+" => BinOp::Add,
+            "-" => BinOp::Sub,
+            "*" => BinOp::Mul,
+            "/" => BinOp::Div,
+            "%" => BinOp::Mod,
+            "^" => BinOp::Power,
+            "||" => BinOp::Or,
+            "&&" => BinOp::And,
+            "==" => BinOp::Eq,
+            "!=" => BinOp::Neq,
+            "<=" => BinOp::Lte,
+            ">=" => BinOp::Gte,
+            "<" => BinOp::Lt,
+            ">" => BinOp::Gt,
+            _ => continue, // Unknown operator
+        };
+
+        let prec = op.precedence();
+        if prec < lowest_prec {
+            lowest_prec = prec;
+            lowest_prec_op = op_str;
+            lowest_prec_pos = pos;
+        }
+    }
+
+    // If no valid operator found, return None
+    if lowest_prec_op.is_empty() {
+        return None;
+    }
+
+    // Split the expression at the lowest precedence operator
+    let left_str = &trimmed[..lowest_prec_pos].trim();
+    let right_str = &trimmed[lowest_prec_pos + lowest_prec_op.len()..].trim();
+
+    if left_str.is_empty() || right_str.is_empty() {
+        // This might be a unary operator or invalid expression
+        return None;
+    }
+
+    // Parse left and right sides recursively
+    let left_result = Expr::parse(left_str);
+    let right_result = Expr::parse(right_str);
+
+    match (left_result, right_result) {
+        (Ok(left_expr), Ok(right_expr)) => {
+            let op = match lowest_prec_op {
+                "+" => BinOp::Add,
+                "-" => BinOp::Sub,
+                "*" => BinOp::Mul,
+                "/" => BinOp::Div,
+                "%" => BinOp::Mod,
+                "^" => BinOp::Power,
+                "||" => BinOp::Or,
+                "&&" => BinOp::And,
+                "==" => BinOp::Eq,
+                "!=" => BinOp::Neq,
+                "<=" => BinOp::Lte,
+                ">=" => BinOp::Gte,
+                "<" => BinOp::Lt,
+                ">" => BinOp::Gt,
+                _ => unreachable!(), // Should have been caught earlier
+            };
+
+            Some(Ok(Expr::BinOp {
+                left: Box::new(left_expr),
+                op,
+                right: Box::new(right_expr),
+            }))
+        }
+        (Err(e), _) => Some(Err(e)),
+        (_, Err(e)) => Some(Err(e)),
+    }
+}
+
+/// Check if parentheses in an expression are balanced
+fn is_balanced_parentheses(expr: &str) -> bool {
+    let mut paren_count = 0;
+    let mut in_string = false;
+    let mut escape_next = false;
+
+    for ch in expr.chars() {
+        if escape_next {
+            escape_next = false;
+            continue;
+        }
+
+        match ch {
+            '\\' => escape_next = true,
+            '"' => in_string = !in_string,
+            '(' if !in_string => paren_count += 1,
+            ')' if !in_string => {
+                paren_count -= 1;
+                if paren_count < 0 {
+                    // Closing parenthesis without matching opening one
+                    return false;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Balanced parentheses should have a count of 0
+    paren_count == 0
 }
 
 #[cfg(test)]
@@ -1352,5 +1453,154 @@ mod tests {
         assert!(vars_pos < func_pos);
         assert!(func_pos < module_pos);
         assert!(module_pos < inst_pos);
+    }
+
+    #[test]
+    fn test_expr_parse_parentheses_simple() {
+        let result = Expr::parse("(a+b)").unwrap();
+        let expected = Expr::BinOp {
+            left: Box::new(Expr::Identifier("a".to_string())),
+            op: BinOp::Add,
+            right: Box::new(Expr::Identifier("b".to_string())),
+        };
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_expr_parse_nested_parentheses() {
+        let result = Expr::parse("((a+b)*c)").unwrap();
+        let expected = Expr::BinOp {
+            left: Box::new(Expr::BinOp {
+                left: Box::new(Expr::Identifier("a".to_string())),
+                op: BinOp::Add,
+                right: Box::new(Expr::Identifier("b".to_string())),
+            }),
+            op: BinOp::Mul,
+            right: Box::new(Expr::Identifier("c".to_string())),
+        };
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_is_balanced_parentheses() {
+        assert!(is_balanced_parentheses("(a+b)"));
+        assert!(is_balanced_parentheses("((a+b)*c)"));
+        assert!(is_balanced_parentheses("(((a)))"));
+        assert!(is_balanced_parentheses("a+b")); // No parentheses is balanced
+        assert!(!is_balanced_parentheses("((a+b)")); // Unbalanced
+        assert!(!is_balanced_parentheses("(a+b))")); // Unbalanced
+    }
+
+    #[test]
+    fn test_expr_to_scad_with_parentheses_preservation() {
+        // Test that binary operations always get parentheses now (redundant but safe)
+        let expr = Expr::BinOp {
+            left: Box::new(Expr::Identifier("a".to_string())),
+            op: BinOp::Add,
+            right: Box::new(Expr::Identifier("b".to_string())),
+        };
+        assert_eq!(expr.to_scad(), "(a + b)");
+
+        // Test that nested operations get parentheses
+        let nested_expr = Expr::BinOp {
+            left: Box::new(Expr::BinOp {
+                left: Box::new(Expr::Identifier("a".to_string())),
+                op: BinOp::Add,
+                right: Box::new(Expr::Identifier("b".to_string())),
+            }),
+            op: BinOp::Mul,
+            right: Box::new(Expr::Identifier("c".to_string())),
+        };
+        assert_eq!(nested_expr.to_scad(), "((a + b) * c)");
+
+        // Test the reverse: addition with multiplication operands
+        let nested_expr2 = Expr::BinOp {
+            left: Box::new(Expr::BinOp {
+                left: Box::new(Expr::Identifier("a".to_string())),
+                op: BinOp::Mul,
+                right: Box::new(Expr::Identifier("b".to_string())),
+            }),
+            op: BinOp::Add,
+            right: Box::new(Expr::Identifier("c".to_string())),
+        };
+        assert_eq!(nested_expr2.to_scad(), "((a * b) + c)");
+
+        // Test division with addition
+        let div_expr = Expr::BinOp {
+            left: Box::new(Expr::BinOp {
+                left: Box::new(Expr::Identifier("a".to_string())),
+                op: BinOp::Add,
+                right: Box::new(Expr::Identifier("b".to_string())),
+            }),
+            op: BinOp::Div,
+            right: Box::new(Expr::Integer(2)),
+        };
+        assert_eq!(div_expr.to_scad(), "((a + b) / 2)");
+
+        // Test power operation
+        let pow_expr = Expr::BinOp {
+            left: Box::new(Expr::Identifier("a".to_string())),
+            op: BinOp::Power,
+            right: Box::new(Expr::BinOp {
+                left: Box::new(Expr::Identifier("b".to_string())),
+                op: BinOp::Add,
+                right: Box::new(Expr::Identifier("c".to_string())),
+            }),
+        };
+        assert_eq!(pow_expr.to_scad(), "(a ^ (b + c))");
+    }
+
+    #[test]
+    fn test_operator_precedence_values() {
+        // Verify that precedence values are assigned correctly
+        assert!(BinOp::Power.precedence() > BinOp::Mul.precedence());
+        assert!(BinOp::Mul.precedence() > BinOp::Add.precedence());
+        assert!(BinOp::Add.precedence() > BinOp::Gt.precedence());
+        assert!(BinOp::Gt.precedence() > BinOp::Eq.precedence());
+        assert!(BinOp::Eq.precedence() > BinOp::And.precedence());
+        assert_eq!(BinOp::And.precedence(), BinOp::Or.precedence()); // Same precedence
+    }
+
+    #[test]
+    fn test_operator_precedence_parsing() {
+        // Test that multiplication/division has higher precedence than addition/subtraction
+        let expr = Expr::parse("a + b * c").unwrap();
+        // Should be parsed as a + (b * c), not (a + b) * c
+        match expr {
+            Expr::BinOp {
+                left,
+                op: BinOp::Add,
+                right,
+            } => {
+                // Left should be 'a', right should be 'b * c'
+                match right.as_ref() {
+                    Expr::BinOp { op: BinOp::Mul, .. } => {
+                        // Correct: b * c is grouped together
+                        assert!(matches!(left.as_ref(), Expr::Identifier(_)));
+                    }
+                    _ => panic!("Expected multiplication to have higher precedence"),
+                }
+            }
+            _ => panic!("Expected addition with multiplication on right side"),
+        }
+
+        // Test division vs addition
+        let expr = Expr::parse("a + b / c").unwrap();
+        match expr {
+            Expr::BinOp {
+                left,
+                op: BinOp::Add,
+                right,
+            } => {
+                match right.as_ref() {
+                    Expr::BinOp { op: BinOp::Div, .. } => {
+                        // Correct: b / c is grouped together
+                        assert!(matches!(left.as_ref(), Expr::Identifier(_)));
+                    }
+                    _ => panic!("Expected division to have higher precedence than addition"),
+                }
+            }
+            _ => panic!("Expected addition with division on right side"),
+        }
     }
 }
