@@ -75,10 +75,46 @@ impl Expr {
         let trimmed = input.trim();
 
         // Check if the entire expression is wrapped in parentheses
+        // This means the first '(' and last ')' are a matched pair at the top level
         if trimmed.starts_with('(') && trimmed.ends_with(')') {
-            // Need to make sure the parentheses are balanced
-            let content = &trimmed[1..trimmed.len() - 1]; // Extract content between parentheses
-            if is_balanced_parentheses(trimmed) {
+            // Need to make sure these are a matched outer pair
+            let mut paren_depth = 0;
+            let mut last_char_was_escape = false;
+            let mut found_closing_at_top_level = false;
+
+            let chars: Vec<char> = trimmed.chars().collect();
+            for (i, &ch) in chars.iter().enumerate() {
+                if last_char_was_escape {
+                    last_char_was_escape = false;
+                    continue;
+                }
+
+                if ch == '\\' {
+                    last_char_was_escape = true;
+                    continue;
+                }
+
+                match ch {
+                    '(' => paren_depth += 1,
+                    ')' => {
+                        paren_depth -= 1;
+                        if paren_depth == 0 && i == trimmed.len() - 1 {
+                            // This is the matching closing parenthesis at the end
+                            found_closing_at_top_level = true;
+                        }
+                    }
+                    _ => {}
+                }
+
+                // If we reach zero depth before the end, these aren't outer parentheses
+                if paren_depth == 0 && i < trimmed.len() - 1 {
+                    break;
+                }
+            }
+
+            if found_closing_at_top_level {
+                // These are indeed outer parentheses, extract content inside
+                let content = &trimmed[1..trimmed.len() - 1]; // Extract content between outer parentheses
                 return Expr::parse(content); // Recursively parse the content inside parentheses
             }
         }
@@ -86,6 +122,11 @@ impl Expr {
         // First check for binary operations
         if let Some(bin_op_result) = parse_binary_operation(trimmed) {
             return bin_op_result;
+        }
+
+        // Next check for function calls
+        if let Some(func_call_result) = parse_function_call(trimmed) {
+            return func_call_result;
         }
 
         // Try boolean
@@ -156,9 +197,9 @@ impl Expr {
                 let current_op_prec = op.precedence();
                 let wrap_if_needed = |expr: &Expr| -> String {
                     match expr {
-                        Expr::BinOp {op: sub_op, ..} if sub_op.precedence() < current_op_prec => {
+                        Expr::BinOp { op: sub_op, .. } if sub_op.precedence() < current_op_prec => {
                             format!("({})", expr.to_scad())
-                        },
+                        }
                         _ => expr.to_scad(),
                     }
                 };
@@ -1094,13 +1135,18 @@ fn parse_binary_operation(input: &str) -> Option<Result<Expr>> {
     }
 }
 
-/// Check if parentheses in an expression are balanced
-fn is_balanced_parentheses(expr: &str) -> bool {
-    let mut paren_count = 0;
+/// Helper function to parse function calls in expressions
+/// Matches patterns like: identifier(args) where args can be empty or contain comma-separated expressions
+fn parse_function_call(input: &str) -> Option<Result<Expr>> {
+    let trimmed = input.trim();
+
+    // Look for the pattern: identifier followed by parentheses
+    // Find the opening parenthesis that's at the top level (not nested)
+    let mut paren_depth = 0;
     let mut in_string = false;
     let mut escape_next = false;
 
-    for ch in expr.chars() {
+    for (i, ch) in trimmed.char_indices() {
         if escape_next {
             escape_next = false;
             continue;
@@ -1109,25 +1155,203 @@ fn is_balanced_parentheses(expr: &str) -> bool {
         match ch {
             '\\' => escape_next = true,
             '"' => in_string = !in_string,
-            '(' if !in_string => paren_count += 1,
-            ')' if !in_string => {
-                paren_count -= 1;
-                if paren_count < 0 {
-                    // Closing parenthesis without matching opening one
-                    return false;
+            '(' if !in_string => {
+                if paren_depth == 0 {
+                    // This is the first top-level opening parenthesis
+                    let function_name = &trimmed[..i].trim_end();
+
+                    // Verify that the function name is a valid identifier
+                    if is_valid_identifier(function_name) {
+                        // Find the matching closing parenthesis
+                        let remaining = &trimmed[i..];
+                        let mut close_paren_pos = None;
+                        let mut temp_paren_depth = 0;
+
+                        for (j, ch) in remaining.char_indices() {
+                            match ch {
+                                '(' if !in_string => temp_paren_depth += 1,
+                                ')' if !in_string => {
+                                    temp_paren_depth -= 1;
+                                    if temp_paren_depth == 0 {
+                                        close_paren_pos = Some(j);
+                                        break;
+                                    }
+                                }
+                                '"' => in_string = !in_string,
+                                _ => {}
+                            }
+                        }
+
+                        if let Some(close_pos) = close_paren_pos {
+                            // Extract the arguments part (inside the parentheses)
+                            let args_str = &remaining[1..close_pos]; // Exclude the opening '('
+
+                            // Parse arguments
+                            let args = if args_str.trim().is_empty() {
+                                Vec::new() // No arguments
+                            } else {
+                                // Split arguments by commas, respecting nested structures
+                                match split_arguments(args_str) {
+                                    Ok(arg_strings) => {
+                                        let mut parsed_args = Vec::new();
+                                        for arg_str in arg_strings {
+                                            match Expr::parse(arg_str.trim()) {
+                                                Ok(expr) => {
+                                                    parsed_args.push(Argument::Positional(expr))
+                                                }
+                                                Err(e) => return Some(Err(e)),
+                                            }
+                                        }
+                                        parsed_args
+                                    }
+                                    Err(e) => {
+                                        return Some(Err(AstError::InvalidParameter(format!(
+                                            "Error parsing function arguments: {}",
+                                            e
+                                        ))))
+                                    }
+                                }
+                            };
+
+                            // Make sure there's nothing after the closing parenthesis (except whitespace)
+                            let after_close = &remaining[close_pos + 1..].trim();
+                            if after_close.is_empty() {
+                                return Some(Ok(Expr::FunctionCall {
+                                    name: function_name.to_string(),
+                                    args,
+                                }));
+                            }
+                        }
+                    }
+                } else {
+                    paren_depth += 1;
                 }
             }
+            ')' if !in_string => paren_depth -= 1,
             _ => {}
         }
     }
 
-    // Balanced parentheses should have a count of 0
-    paren_count == 0
+    None // Not a function call
+}
+
+/// Split arguments in a function call, respecting nested parentheses and quotes
+fn split_arguments(input: &str) -> std::result::Result<Vec<String>, String> {
+    let mut args = Vec::new();
+    let mut current = String::new();
+    let mut paren_depth = 0;
+    let mut bracket_depth = 0;
+    let mut brace_depth = 0;
+    let mut in_quotes = false;
+    let mut escape_next = false;
+
+    for ch in input.chars() {
+        if escape_next {
+            current.push(ch);
+            escape_next = false;
+            continue;
+        }
+
+        match ch {
+            '\\' if in_quotes => {
+                escape_next = true;
+                current.push(ch);
+            }
+            '"' => {
+                in_quotes = !in_quotes;
+                current.push(ch);
+            }
+            '(' if !in_quotes => {
+                paren_depth += 1;
+                current.push(ch);
+            }
+            ')' if !in_quotes => {
+                paren_depth -= 1;
+                current.push(ch);
+            }
+            '[' if !in_quotes => {
+                bracket_depth += 1;
+                current.push(ch);
+            }
+            ']' if !in_quotes => {
+                bracket_depth -= 1;
+                current.push(ch);
+            }
+            '{' if !in_quotes => {
+                brace_depth += 1;
+                current.push(ch);
+            }
+            '}' if !in_quotes => {
+                brace_depth -= 1;
+                current.push(ch);
+            }
+            ',' if !in_quotes && paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 => {
+                // This comma is an argument separator
+                if !current.trim().is_empty() {
+                    args.push(current.trim().to_string());
+                }
+                current.clear();
+            }
+            _ => current.push(ch),
+        }
+    }
+
+    // Add the last argument
+    if !current.trim().is_empty() {
+        args.push(current.trim().to_string());
+    }
+
+    // Validate nesting
+    if in_quotes {
+        return Err("Unclosed quoted string in arguments".to_string());
+    }
+    if paren_depth != 0 {
+        return Err("Mismatched parentheses in arguments".to_string());
+    }
+    if bracket_depth != 0 {
+        return Err("Mismatched brackets in arguments".to_string());
+    }
+    if brace_depth != 0 {
+        return Err("Mismatched braces in arguments".to_string());
+    }
+
+    Ok(args)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Check if parentheses in an expression are balanced
+    fn is_balanced_parentheses(expr: &str) -> bool {
+        let mut paren_count = 0;
+        let mut in_string = false;
+        let mut escape_next = false;
+
+        for ch in expr.chars() {
+            if escape_next {
+                escape_next = false;
+                continue;
+            }
+
+            match ch {
+                '\\' => escape_next = true,
+                '"' => in_string = !in_string,
+                '(' if !in_string => paren_count += 1,
+                ')' if !in_string => {
+                    paren_count -= 1;
+                    if paren_count < 0 {
+                        // Closing parenthesis without matching opening one
+                        return false;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Balanced parentheses should have a count of 0
+        paren_count == 0
+    }
 
     #[test]
     fn test_expr_parse_integer() {
@@ -1493,15 +1717,15 @@ mod tests {
 
     #[test]
     fn test_expr_to_scad_with_parentheses_preservation() {
-        // Test that binary operations always get parentheses now (redundant but safe)
+        // Test that binary operations get parentheses only when needed for precedence
         let expr = Expr::BinOp {
             left: Box::new(Expr::Identifier("a".to_string())),
             op: BinOp::Add,
             right: Box::new(Expr::Identifier("b".to_string())),
         };
-        assert_eq!(expr.to_scad(), "(a + b)");
+        assert_eq!(expr.to_scad(), "a + b");
 
-        // Test that nested operations get parentheses
+        // Test that nested operations get parentheses when precedence requires it
         let nested_expr = Expr::BinOp {
             left: Box::new(Expr::BinOp {
                 left: Box::new(Expr::Identifier("a".to_string())),
@@ -1511,7 +1735,7 @@ mod tests {
             op: BinOp::Mul,
             right: Box::new(Expr::Identifier("c".to_string())),
         };
-        assert_eq!(nested_expr.to_scad(), "((a + b) * c)");
+        assert_eq!(nested_expr.to_scad(), "(a + b) * c");
 
         // Test the reverse: addition with multiplication operands
         let nested_expr2 = Expr::BinOp {
@@ -1523,9 +1747,9 @@ mod tests {
             op: BinOp::Add,
             right: Box::new(Expr::Identifier("c".to_string())),
         };
-        assert_eq!(nested_expr2.to_scad(), "((a * b) + c)");
+        assert_eq!(nested_expr2.to_scad(), "a * b + c");
 
-        // Test division with addition
+        // Test division with addition (lower precedence than division)
         let div_expr = Expr::BinOp {
             left: Box::new(Expr::BinOp {
                 left: Box::new(Expr::Identifier("a".to_string())),
@@ -1535,9 +1759,9 @@ mod tests {
             op: BinOp::Div,
             right: Box::new(Expr::Integer(2)),
         };
-        assert_eq!(div_expr.to_scad(), "((a + b) / 2)");
+        assert_eq!(div_expr.to_scad(), "(a + b) / 2");
 
-        // Test power operation
+        // Test power operation (higher precedence than other operators)
         let pow_expr = Expr::BinOp {
             left: Box::new(Expr::Identifier("a".to_string())),
             op: BinOp::Power,
@@ -1547,7 +1771,7 @@ mod tests {
                 right: Box::new(Expr::Identifier("c".to_string())),
             }),
         };
-        assert_eq!(pow_expr.to_scad(), "(a ^ (b + c))");
+        assert_eq!(pow_expr.to_scad(), "a ^ (b + c)");
     }
 
     #[test]
@@ -1601,6 +1825,97 @@ mod tests {
                 }
             }
             _ => panic!("Expected addition with division on right side"),
+        }
+    }
+
+    #[test]
+    fn test_expr_parse_function_call_no_args() {
+        let result = Expr::parse("sin()").unwrap();
+        match result {
+            Expr::FunctionCall { name, args } => {
+                assert_eq!(name, "sin");
+                assert_eq!(args.len(), 0);
+            }
+            _ => panic!("Expected FunctionCall expression"),
+        }
+    }
+
+    #[test]
+    fn test_expr_parse_function_call_single_arg() {
+        let result = Expr::parse("sin(x)").unwrap();
+        match result {
+            Expr::FunctionCall { name, args } => {
+                assert_eq!(name, "sin");
+                assert_eq!(args.len(), 1);
+                match &args[0] {
+                    Argument::Positional(expr) => {
+                        assert_eq!(expr, &Expr::Identifier("x".to_string()));
+                    }
+                    _ => panic!("Expected positional argument"),
+                }
+            }
+            _ => panic!("Expected FunctionCall expression"),
+        }
+    }
+
+    #[test]
+    fn test_expr_parse_function_call_multiple_args() {
+        let result = Expr::parse("atan2(x, y)").unwrap();
+        match result {
+            Expr::FunctionCall { name, args } => {
+                assert_eq!(name, "atan2");
+                assert_eq!(args.len(), 2);
+            }
+            _ => panic!("Expected FunctionCall expression"),
+        }
+    }
+
+    #[test]
+    fn test_expr_parse_function_call_with_binary_operation() {
+        let result = Expr::parse("sin(x) + cos(y)").unwrap();
+        match result {
+            Expr::BinOp {
+                left,
+                op: BinOp::Add,
+                right,
+            } => {
+                match left.as_ref() {
+                    Expr::FunctionCall { name, args: _ } => {
+                        assert_eq!(name, "sin");
+                    }
+                    _ => panic!("Expected FunctionCall on left side"),
+                }
+                match right.as_ref() {
+                    Expr::FunctionCall { name, args: _ } => {
+                        assert_eq!(name, "cos");
+                    }
+                    _ => panic!("Expected FunctionCall on right side"),
+                }
+            }
+            _ => panic!("Expected BinOp with Add operator"),
+        }
+    }
+
+    #[test]
+    fn test_expr_parse_complex_function_call() {
+        let result = Expr::parse("min(max(a, b), c)").unwrap();
+        match result {
+            Expr::FunctionCall { name, args } => {
+                assert_eq!(name, "min");
+                assert_eq!(args.len(), 2);
+                // First argument should be max(a, b)
+                match &args[0] {
+                    Argument::Positional(Expr::FunctionCall {
+                        name,
+                        args: inner_args,
+                    }) => {
+                        assert_eq!(name, "max");
+                        assert_eq!(inner_args.len(), 2);
+                    }
+                    _ => panic!("Expected nested FunctionCall as first argument"),
+                }
+            }
+            _ => panic!("Expected FunctionCall expression"),
         }
     }
 }
