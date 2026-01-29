@@ -78,6 +78,7 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Result<(
                 }
                 Event::Resize(_, _) => {
                     // Terminal was resized, next draw will handle it automatically
+                    app.calculate_help_modal_size();
                 }
                 _ => {}
             }

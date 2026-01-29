@@ -434,14 +434,14 @@ fn draw_preview(f: &mut Frame, app: &App, area: Rect) {
 
 fn draw_help_modal(f: &mut Frame, app: &App) {
     let cloned_help_docs = app.help_doc.clone();
-    let scroll_offset = app.help_scroll_offset;
-    let visible_line = app.help_modal_height;
     let doc_count = app.help_doc_count;
+    let modal_width = app.help_modal_width as u16;
+    let modal_height = app.help_modal_height as u16;
+    let scroll_offset = app.help_scroll_offset;
+    let visible_line = app.help_modal_height - 2; // 减去边框
 
-    // Create a centered modal area (about 80% of screen width, 85% of height)
+    // Create a centered modal area
     let area = f.area();
-    let modal_width = (area.width as f32 * 0.8) as u16;
-    let modal_height = (visible_line + 2) as u16;
     let modal_x = (area.width.saturating_sub(modal_width)) / 2;
     let modal_y = (area.height.saturating_sub(modal_height)) / 2;
 

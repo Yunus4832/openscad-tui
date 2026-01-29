@@ -398,7 +398,10 @@ fn handle_help_input(key: KeyEvent, app: &mut App) {
         }
         // Scroll down
         KeyCode::Down | KeyCode::Char('j') => {
-            app.help_scroll_offset = app.help_scroll_offset.saturating_add(1).min(app.help_scroll_offset_max);
+            app.help_scroll_offset = app
+                .help_scroll_offset
+                .saturating_add(1)
+                .min(app.help_scroll_offset_max);
         }
         // Page up
         KeyCode::PageUp | KeyCode::Char('b') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -406,7 +409,10 @@ fn handle_help_input(key: KeyEvent, app: &mut App) {
         }
         // Page down
         KeyCode::PageDown | KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.help_scroll_offset = app.help_scroll_offset.saturating_add(10).min(app.help_scroll_offset_max);
+            app.help_scroll_offset = app
+                .help_scroll_offset
+                .saturating_add(10)
+                .min(app.help_scroll_offset_max);
         }
         // Home key - go to top
         KeyCode::Home => {

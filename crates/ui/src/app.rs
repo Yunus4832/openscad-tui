@@ -268,6 +268,7 @@ pub struct App {
     pub help_scroll_offset_max: usize,
     pub help_doc: Vec<String>,
     pub help_doc_count: usize,
+    pub help_modal_width: usize,
     pub help_modal_height: usize,
 }
 
@@ -334,7 +335,6 @@ impl App {
         ];
         let help_doc: Vec<String> = docs.iter().map(|str| str.to_string()).collect();
         let help_doc_count = help_doc.len();
-        let help_modal_height: usize = 30;
 
         let mut app = Self {
             ast: Arc::new(AstRoot::new()),
@@ -364,10 +364,11 @@ impl App {
             current_file: None,
             saved: true,
             help_scroll_offset: 0,
-            help_scroll_offset_max: help_doc_count - help_modal_height,
+            help_scroll_offset_max: 0,
             help_doc,
             help_doc_count,
-            help_modal_height
+            help_modal_width: 0,
+            help_modal_height: 0,
         };
 
         // Load standard library (from config dir if exists, otherwise use embedded)
@@ -380,7 +381,21 @@ impl App {
 
         // Initialize tree state: select the first module if it exists
         app.init_tree_selection();
+        app.calculate_help_modal_size();
         app
+    }
+
+    // 计算帮助窗口的高度
+    pub fn calculate_help_modal_size(&mut self) {
+        let (width, height) = crossterm::terminal::size().unwrap_or((80, 24));
+
+        let help_modal_width: usize = (width as f32 * 0.8) as usize;
+        let help_modal_height: usize = (height as f32 * 0.8) as usize;
+
+        self.help_modal_width = help_modal_width;
+        self.help_modal_height = help_modal_height;
+
+        self.help_scroll_offset_max = self.help_doc_count.saturating_sub(help_modal_height - 2);
     }
 
     /// Initialize tree state with first item selected if available
