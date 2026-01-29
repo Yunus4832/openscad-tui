@@ -414,7 +414,7 @@ fn handle_help_input(key: KeyEvent, app: &mut App) {
         }
         // End key - go to bottom
         KeyCode::End => {
-            app.help_scroll_offset = app.help_doc_count;
+            app.help_scroll_offset = app.help_scroll_offset_max;
         }
         _ => {}
     }
