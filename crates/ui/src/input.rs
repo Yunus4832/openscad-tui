@@ -473,7 +473,7 @@ fn execute_command_registry(app: &mut App, cmd: &str) -> bool {
                 if change_ast {
                     app.mark_dirty();
                 }
-                app.set_info("command success.");
+                app.set_info("");
             }
             Err(e) => {
                 app.set_error(&e.to_string());
