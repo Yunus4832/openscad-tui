@@ -892,6 +892,8 @@ pub fn cmd_load_force(app: &mut App, filename: &str) -> CommandResult<()> {
     // First, reload custom modules in library manager
     app.library
         .reload_custom_modules_from_ast(&app.ast.module_defines);
+    app.library
+        .reload_custom_functions_from_ast(&app.ast.function_defines);
 
     // Reload libraries that were used in the project
     for library_file in &app.ast.loaded_libraries {
@@ -1177,6 +1179,10 @@ pub fn cmd_funcdef(app: &mut App, func_def: &str) -> CommandResult<()> {
             .add_function_define(function_def)
             .map_err(CommandError::AstError)?;
     }
+
+    // Reload custom functions in library manager
+    app.library
+        .reload_custom_functions_from_ast(&app.ast.function_defines);
 
     Ok(())
 }

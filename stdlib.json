@@ -204,5 +204,443 @@
       "accepts_children": true,
       "parameters": []
     }
+  ],
+  "functions": [
+    {
+      "name": "sin",
+      "description": "Sine of angle in degrees",
+      "parameters": [
+        {
+          "name": "angle",
+          "param_type": "number",
+          "description": "Angle in degrees"
+        }
+      ],
+      "return_type": "number"
+    },
+    {
+      "name": "cos",
+      "description": "Cosine of angle in degrees",
+      "parameters": [
+        {
+          "name": "angle",
+          "param_type": "number",
+          "description": "Angle in degrees"
+        }
+      ],
+      "return_type": "number"
+    },
+    {
+      "name": "tan",
+      "description": "Tangent of angle in degrees",
+      "parameters": [
+        {
+          "name": "angle",
+          "param_type": "number",
+          "description": "Angle in degrees"
+        }
+      ],
+      "return_type": "number"
+    },
+    {
+      "name": "asin",
+      "description": "Arc sine in degrees",
+      "parameters": [
+        {
+          "name": "value",
+          "param_type": "number",
+          "description": "Value between -1 and 1"
+        }
+      ],
+      "return_type": "number"
+    },
+    {
+      "name": "acos",
+      "description": "Arc cosine in degrees",
+      "parameters": [
+        {
+          "name": "value",
+          "param_type": "number",
+          "description": "Value between -1 and 1"
+        }
+      ],
+      "return_type": "number"
+    },
+    {
+      "name": "atan",
+      "description": "Arc tangent in degrees",
+      "parameters": [
+        {
+          "name": "value",
+          "param_type": "number",
+          "description": "Tangent value"
+        }
+      ],
+      "return_type": "number"
+    },
+    {
+      "name": "atan2",
+      "description": "Arc tangent of y/x in degrees",
+      "parameters": [
+        {
+          "name": "y",
+          "param_type": "number",
+          "description": "Y coordinate"
+        },
+        {
+          "name": "x",
+          "param_type": "number",
+          "description": "X coordinate"
+        }
+      ],
+      "return_type": "number"
+    },
+    {
+      "name": "abs",
+      "description": "Absolute value",
+      "parameters": [
+        {
+          "name": "x",
+          "param_type": "number",
+          "description": "Number"
+        }
+      ],
+      "return_type": "number"
+    },
+    {
+      "name": "sign",
+      "description": "Sign of number (-1, 0, or 1)",
+      "parameters": [
+        {
+          "name": "x",
+          "param_type": "number",
+          "description": "Number"
+        }
+      ],
+      "return_type": "number"
+    },
+    {
+      "name": "floor",
+      "description": "Round down to nearest integer",
+      "parameters": [
+        {
+          "name": "x",
+          "param_type": "number",
+          "description": "Number"
+        }
+      ],
+      "return_type": "number"
+    },
+    {
+      "name": "ceil",
+      "description": "Round up to nearest integer",
+      "parameters": [
+        {
+          "name": "x",
+          "param_type": "number",
+          "description": "Number"
+        }
+      ],
+      "return_type": "number"
+    },
+    {
+      "name": "round",
+      "description": "Round to nearest integer",
+      "parameters": [
+        {
+          "name": "x",
+          "param_type": "number",
+          "description": "Number"
+        }
+      ],
+      "return_type": "number"
+    },
+    {
+      "name": "sqrt",
+      "description": "Square root",
+      "parameters": [
+        {
+          "name": "x",
+          "param_type": "number",
+          "description": "Non-negative number"
+        }
+      ],
+      "return_type": "number"
+    },
+    {
+      "name": "pow",
+      "description": "Exponential function",
+      "parameters": [
+        {
+          "name": "base",
+          "param_type": "number",
+          "description": "Base value"
+        },
+        {
+          "name": "exponent",
+          "param_type": "number",
+          "description": "Exponent"
+        }
+      ],
+      "return_type": "number"
+    },
+    {
+      "name": "exp",
+      "description": "Exponential function e^x",
+      "parameters": [
+        {
+          "name": "x",
+          "param_type": "number",
+          "description": "Exponent"
+        }
+      ],
+      "return_type": "number"
+    },
+    {
+      "name": "log",
+      "description": "Natural logarithm",
+      "parameters": [
+        {
+          "name": "x",
+          "param_type": "number",
+          "description": "Positive number"
+        }
+      ],
+      "return_type": "number"
+    },
+    {
+      "name": "ln",
+      "description": "Natural logarithm (alias for log)",
+      "parameters": [
+        {
+          "name": "x",
+          "param_type": "number",
+          "description": "Positive number"
+        }
+      ],
+      "return_type": "number"
+    },
+    {
+      "name": "rands",
+      "description": "Random number seeded from global seed",
+      "parameters": [
+        {
+          "name": "min_value",
+          "param_type": "number",
+          "description": "Minimum value"
+        },
+        {
+          "name": "max_value",
+          "param_type": "number",
+          "description": "Maximum value"
+        },
+        {
+          "name": "value_count",
+          "param_type": "integer",
+          "description": "Number of values to generate"
+        }
+      ],
+      "return_type": "list"
+    },
+    {
+      "name": "min",
+      "description": "Minimum of two values",
+      "parameters": [
+        {
+          "name": "a",
+          "param_type": "number",
+          "description": "First value"
+        },
+        {
+          "name": "b",
+          "param_type": "number",
+          "description": "Second value"
+        }
+      ],
+      "return_type": "number"
+    },
+    {
+      "name": "max",
+      "description": "Maximum of two values",
+      "parameters": [
+        {
+          "name": "a",
+          "param_type": "number",
+          "description": "First value"
+        },
+        {
+          "name": "b",
+          "param_type": "number",
+          "description": "Second value"
+        }
+      ],
+      "return_type": "number"
+    },
+    {
+      "name": "str",
+      "description": "Convert any value to string",
+      "parameters": [
+        {
+          "name": "value",
+          "param_type": "any",
+          "description": "Value to convert"
+        }
+      ],
+      "return_type": "string"
+    },
+    {
+      "name": "chr",
+      "description": "Convert integer to Unicode string",
+      "parameters": [
+        {
+          "name": "value",
+          "param_type": "integer",
+          "description": "Unicode code point"
+        }
+      ],
+      "return_type": "string"
+    },
+    {
+      "name": "ord",
+      "description": "Convert first character to Unicode code point",
+      "parameters": [
+        {
+          "name": "str",
+          "param_type": "string",
+          "description": "String"
+        }
+      ],
+      "return_type": "integer"
+    },
+    {
+      "name": "len",
+      "description": "Length of vector, string, or number of elements",
+      "parameters": [
+        {
+          "name": "value",
+          "param_type": "any",
+          "description": "Vector or string"
+        }
+      ],
+      "return_type": "number"
+    },
+    {
+      "name": "concat",
+      "description": "Concatenate vectors or strings",
+      "parameters": [
+        {
+          "name": "a",
+          "param_type": "any",
+          "description": "First vector or string"
+        },
+        {
+          "name": "b",
+          "param_type": "any",
+          "description": "Second vector or string"
+        }
+      ],
+      "return_type": "any"
+    },
+    {
+      "name": "cross",
+      "description": "Cross product of two 3D vectors",
+      "parameters": [
+        {
+          "name": "a",
+          "param_type": "list",
+          "description": "First 3D vector"
+        },
+        {
+          "name": "b",
+          "param_type": "list",
+          "description": "Second 3D vector"
+        }
+      ],
+      "return_type": "list"
+    },
+    {
+      "name": "norm",
+      "description": "Euclidean norm of vector",
+      "parameters": [
+        {
+          "name": "v",
+          "param_type": "list",
+          "description": "Vector"
+        }
+      ],
+      "return_type": "number"
+    },
+    {
+      "name": "is_bool",
+      "description": "Check if value is boolean",
+      "parameters": [
+        {
+          "name": "x",
+          "param_type": "any",
+          "description": "Value to check"
+        }
+      ],
+      "return_type": "boolean"
+    },
+    {
+      "name": "is_num",
+      "description": "Check if value is number",
+      "parameters": [
+        {
+          "name": "x",
+          "param_type": "any",
+          "description": "Value to check"
+        }
+      ],
+      "return_type": "boolean"
+    },
+    {
+      "name": "is_list",
+      "description": "Check if value is list/vector",
+      "parameters": [
+        {
+          "name": "x",
+          "param_type": "any",
+          "description": "Value to check"
+        }
+      ],
+      "return_type": "boolean"
+    },
+    {
+      "name": "is_string",
+      "description": "Check if value is string",
+      "parameters": [
+        {
+          "name": "x",
+          "param_type": "any",
+          "description": "Value to check"
+        }
+      ],
+      "return_type": "boolean"
+    },
+    {
+      "name": "is_undef",
+      "description": "Check if value is undefined",
+      "parameters": [
+        {
+          "name": "x",
+          "param_type": "any",
+          "description": "Value to check"
+        }
+      ],
+      "return_type": "boolean"
+    },
+    {
+      "name": "is_function",
+      "description": "Check if value is a function (experimental)",
+      "parameters": [
+        {
+          "name": "x",
+          "param_type": "any",
+          "description": "Value to check"
+        }
+      ],
+      "return_type": "boolean"
+    }
   ]
 }
