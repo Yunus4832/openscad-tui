@@ -1008,13 +1008,14 @@ fn generate_completions(input: &str, app: &App) -> (Vec<CompletionCandidate>, Co
     let candidates = match &context {
         CompletionContext::Command => {
             // 命令补全：获取所有命令，过滤以匹配输入前缀
+            let sep = " ".to_string();
             let all_commands: Vec<CompletionCandidate> = get_command_list(app)
                 .iter()
                 .map(|c| {
                     CompletionCandidate::new(
                         c.clone(),
                         CandidateType::Command {
-                            separator: " ".to_string(),
+                            separator: sep.clone(),
                         },
                     )
                 })
@@ -1058,7 +1059,7 @@ fn generate_completions(input: &str, app: &App) -> (Vec<CompletionCandidate>, Co
                 let entered_params = parse_parameter_names(&param_str);
 
                 // 过滤掉已输入的参数
-                let sep = ",".to_string();
+                let sep = "=".to_string();
                 let mut candidates: Vec<CompletionCandidate> = module_def
                     .parameters
                     .iter()
@@ -1330,18 +1331,19 @@ fn apply_completion(app: &mut App) {
     // 替换输入缓冲区中的范围
     app.input_buffer
         .replace_range(start, end, &candidate.content);
+    let separator = match &candidate.candidate_type {
+        CandidateType::Module { separator } => separator,
+        CandidateType::ModuleParam { separator } => separator,
+        CandidateType::Function { separator } => separator,
+        CandidateType::FunctionParam { separator } => separator,
+        CandidateType::Path { separator } => separator,
+        CandidateType::GlobalVar { separator } => separator,
+        CandidateType::Value { separator } => separator,
+        CandidateType::Command { separator } => separator,
+    };
 
     // 根据上下文追加分隔符
     match &app.completion_context {
-        CompletionContext::Command => {
-            app.input_buffer.insert_str(" ");
-        }
-        CompletionContext::Module => {
-            app.input_buffer.insert_str(" ");
-        }
-        CompletionContext::ModuleParam { .. } => {
-            app.input_buffer.insert_str("=");
-        }
         CompletionContext::ModuleParamValue {
             cmd_type: _cmd_type,
             module_name,
@@ -1352,7 +1354,7 @@ fn apply_completion(app: &mut App) {
             let (_, param_str) =
                 extract_module_and_param_str(app, app.input_buffer.content(), _cmd_type);
             if !is_last_parameter(app, module_name, &param_str) {
-                app.input_buffer.insert_str(",");
+                app.input_buffer.insert_str(separator);
             }
         }
         CompletionContext::File {
@@ -1366,8 +1368,7 @@ fn apply_completion(app: &mut App) {
             let full_path = Path::new(&_base_dir).join(&candidate.content);
             if let Ok(metadata) = full_path.metadata() {
                 if metadata.is_dir() {
-                    // 对于目录，追加 "/"
-                    app.input_buffer.insert_str("/");
+                    app.input_buffer.insert_str(separator);
                 } else {
                     // 对于文件，追加空格
                     app.input_buffer.insert_str(" ");
@@ -1376,6 +1377,9 @@ fn apply_completion(app: &mut App) {
                 // 如果无法获取元数据，默认追加空格
                 app.input_buffer.insert_str(" ");
             }
+        }
+        _ => {
+            app.input_buffer.insert_str(separator);
         }
     }
 
