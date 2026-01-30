@@ -3,7 +3,7 @@
 //! Normal mode: Quick keybindings for common operations (i/j/k/h/l/v)
 //! Command mode: Free text input for complex commands with parameter input
 
-use crate::app::{App, CompletionContext, InputMode};
+use crate::app::{App, CandidateType, CompletionCandidate, CompletionContext, InputMode};
 use crate::command_registry::CommandType;
 use crate::commands;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -847,13 +847,13 @@ fn normalize_path(path: &str) -> String {
 }
 
 /// 根据前缀过滤字符串列表
-fn filter_by_prefix(items: &[String], prefix: &str) -> Vec<String> {
+fn filter_by_prefix(items: &[CompletionCandidate], prefix: &str) -> Vec<CompletionCandidate> {
     if prefix.is_empty() {
         return items.to_vec();
     }
     items
         .iter()
-        .filter(|item| item.starts_with(prefix))
+        .filter(|item| item.content.starts_with(prefix))
         .cloned()
         .collect()
 }
@@ -1002,19 +1002,41 @@ fn extract_module_and_param_str(
 /// 生成候选列表
 /// 对于命令，从命令列表读取，对于模块，从模块列表读取，对于模块参数名解析模块获取，对于模块参数值，从模块参数默认值和全局变量
 /// AstRoot.global_variables 中获取
-fn generate_completions(input: &str, app: &App) -> (Vec<String>, CompletionContext) {
+fn generate_completions(input: &str, app: &App) -> (Vec<CompletionCandidate>, CompletionContext) {
     let context = analyze_input_context(input, app);
 
     let candidates = match &context {
         CompletionContext::Command => {
             // 命令补全：获取所有命令，过滤以匹配输入前缀
-            let all_commands = get_command_list(app);
+            let all_commands: Vec<CompletionCandidate> = get_command_list(app)
+                .iter()
+                .map(|c| {
+                    CompletionCandidate::new(
+                        c.clone(),
+                        CandidateType::Command {
+                            separator: " ".to_string(),
+                        },
+                    )
+                })
+                .collect();
+
             let prefix = input.trim();
             filter_by_prefix(&all_commands, prefix)
         }
         CompletionContext::Module => {
             // 模块补全：获取所有模块，过滤以匹配输入中的模块部分
-            let all_modules = get_module_list(app);
+            let sep = " ".to_string();
+            let all_modules: Vec<CompletionCandidate> = get_module_list(app)
+                .iter()
+                .map(|c| {
+                    CompletionCandidate::new(
+                        c.clone(),
+                        CandidateType::Module {
+                            separator: sep.clone(),
+                        },
+                    )
+                })
+                .collect();
             // 提取可能已输入的部分模块名
             let parts: Vec<&str> = input.split_whitespace().collect();
             let prefix = if parts.len() > 1 {
@@ -1036,11 +1058,20 @@ fn generate_completions(input: &str, app: &App) -> (Vec<String>, CompletionConte
                 let entered_params = parse_parameter_names(&param_str);
 
                 // 过滤掉已输入的参数
-                let mut candidates: Vec<String> = module_def
+                let sep = ",".to_string();
+                let mut candidates: Vec<CompletionCandidate> = module_def
                     .parameters
                     .iter()
                     .map(|p| p.name.clone())
                     .filter(|name| !entered_params.contains(name))
+                    .map(|c| {
+                        CompletionCandidate::new(
+                            c.clone(),
+                            CandidateType::ModuleParam {
+                                separator: sep.clone(),
+                            },
+                        )
+                    })
                     .collect();
 
                 // 如果有部分输入的参数名，进行过滤
@@ -1049,7 +1080,6 @@ fn generate_completions(input: &str, app: &App) -> (Vec<String>, CompletionConte
                 if !current_param_part.is_empty() {
                     candidates = filter_by_prefix(&candidates, &current_param_part);
                 }
-
                 candidates
             } else {
                 Vec::new()
@@ -1062,7 +1092,8 @@ fn generate_completions(input: &str, app: &App) -> (Vec<String>, CompletionConte
             value_index: _value_index,
         } => {
             // 模块参数值补全：获取参数的默认值（如果存在）和全局变量
-            let mut candidates = Vec::new();
+            let mut candidates: Vec<CompletionCandidate> = Vec::new();
+            let sep = ",".to_string();
 
             // 首先，尝试获取参数的默认值
             if let Some(module_def) = app.library.get_module(module_name) {
@@ -1072,14 +1103,24 @@ fn generate_completions(input: &str, app: &App) -> (Vec<String>, CompletionConte
                     .find(|p| p.name == *module_param_name)
                 {
                     if let Some(default_val) = &param_def.default {
-                        candidates.push(default_val.clone());
+                        candidates.push(CompletionCandidate {
+                            content: default_val.clone(),
+                            candidate_type: CandidateType::Value {
+                                separator: sep.clone(),
+                            },
+                        });
                     }
                 }
             }
 
             // 添加全局变量
             for var in &app.ast.global_variables {
-                candidates.push(var.name.clone());
+                candidates.push(CompletionCandidate {
+                    content: var.name.clone(),
+                    candidate_type: CandidateType::GlobalVar {
+                        separator: sep.clone(),
+                    },
+                });
             }
 
             // 如果有部分输入的值，进行过滤
@@ -1088,7 +1129,6 @@ fn generate_completions(input: &str, app: &App) -> (Vec<String>, CompletionConte
             if !current_value_part.is_empty() {
                 candidates = filter_by_prefix(&candidates, &current_value_part);
             }
-
             candidates
         }
         CompletionContext::File {
@@ -1097,7 +1137,19 @@ fn generate_completions(input: &str, app: &App) -> (Vec<String>, CompletionConte
             ..
         } => {
             // 文件补全 - 使用基础目录和部分名称
-            get_file_completions(base_dir, partial_name)
+            let sep = "/".to_string();
+            let candidates: Vec<CompletionCandidate> = get_file_completions(base_dir, partial_name)
+                .iter()
+                .map(|c| {
+                    CompletionCandidate::new(
+                        c.clone(),
+                        CandidateType::Path {
+                            separator: sep.clone(),
+                        },
+                    )
+                })
+                .collect();
+            candidates
         }
     };
 
@@ -1122,12 +1174,12 @@ fn preview_completion(app: &mut App) {
         } => {
             if app.input_buffer.content().trim().ends_with("~") {
                 let candidate_clone = &app.completion_candidates[app.completion_index].clone();
-                &format!("{}{}", "~/", candidate_clone)
+                &format!("{}{}", "~/", candidate_clone.content)
             } else {
-                &app.completion_candidates[app.completion_index]
+                &app.completion_candidates[app.completion_index].content
             }
         }
-        _ => &app.completion_candidates[app.completion_index],
+        _ => &app.completion_candidates[app.completion_index].content,
     };
 
     // Use InputBuffer's replace_range method
@@ -1276,7 +1328,8 @@ fn apply_completion(app: &mut App) {
         get_replacement_range(app.input_buffer.content(), &app.completion_context, app);
 
     // 替换输入缓冲区中的范围
-    app.input_buffer.replace_range(start, end, candidate);
+    app.input_buffer
+        .replace_range(start, end, &candidate.content);
 
     // 根据上下文追加分隔符
     match &app.completion_context {
@@ -1310,7 +1363,7 @@ fn apply_completion(app: &mut App) {
         } => {
             // 需要检查实际文件系统来确定是否是目录
             // 构建完整路径来检查文件类型
-            let full_path = Path::new(&_base_dir).join(candidate);
+            let full_path = Path::new(&_base_dir).join(&candidate.content);
             if let Ok(metadata) = full_path.metadata() {
                 if metadata.is_dir() {
                     // 对于目录，追加 "/"

@@ -161,6 +161,53 @@ impl Default for InputBuffer {
     }
 }
 
+/// 补全候选项
+#[derive(Debug, Clone)]
+pub struct CompletionCandidate {
+    pub content: String,
+    pub candidate_type: CandidateType,
+}
+
+impl CompletionCandidate {
+    pub fn new(content: String, candidate_type: CandidateType) -> Self {
+        Self {
+            content,
+            candidate_type,
+        }
+    }
+}
+
+/// 补全候选项类型
+#[derive(Debug, Clone, PartialEq)]
+pub enum CandidateType {
+    Module { separator: String },
+    ModuleParam { separator: String },
+    #[allow(dead_code)]
+    Function { separator: String },
+    #[allow(dead_code)]
+    FunctionParam { separator: String },
+    Path { separator: String },
+    GlobalVar { separator: String },
+    Value { separator: String },
+    Command { separator: String },
+}
+
+impl CandidateType {
+    /// 返回候选项符号
+    pub fn flag(&self) -> &'static str {
+        match self {
+            Self::Module { .. } => "M",
+            Self::ModuleParam { .. } => "MP",
+            Self::Function { .. } => "F",
+            Self::FunctionParam { .. } => "FP",
+            Self::Path { .. } => "PA",
+            Self::GlobalVar { .. } => "G",
+            Self::Value { .. } => "V",
+            Self::Command { .. } => "C",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[allow(dead_code)]
 pub enum InputMode {
@@ -249,7 +296,7 @@ pub struct App {
     pub message_type: MessageType,
 
     // Tab completion state
-    pub completion_candidates: Vec<String>,
+    pub completion_candidates: Vec<CompletionCandidate>,
     pub completion_index: usize,
     pub completion_context: CompletionContext,
     pub completion_active: bool,

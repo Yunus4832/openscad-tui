@@ -543,7 +543,13 @@ fn draw_completion_popup(f: &mut Frame, app: &App, input_area: Rect) {
             } else {
                 "  "
             };
-            let content = format!("{}{}", prefix, candidate);
+            let content = format!(
+                "{}{:<width$.width$} [{}]",
+                prefix,
+                candidate.content,
+                candidate.candidate_type.flag(),
+                width = (popup_width - 10) as usize
+            );
             ListItem::new(content)
         })
         .collect();
