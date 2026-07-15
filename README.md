@@ -1,215 +1,258 @@
-# OpenSCAD TUI - Terminal User Interface
+# OpenSCAD TUI
 
-一个基于 Rust 实现的 OpenSCAD 命令行用户界面，支持类似 Vim 的交互方式，用于快速生成 OpenSCAD 代码。
+OpenSCAD TUI 是一个使用 Rust、Ratatui 和 Crossterm 编写的终端结构化编辑器。它通过
+Vim 风格按键和命令修改 OpenSCAD AST，在终端中展示模型树与生成的 `.scad` 源码。
 
-## 项目结构
+> 当前项目处于可运行的原型阶段。右侧预览是 OpenSCAD 源码预览，不是 2D/3D 几何渲染；
+> 程序目前不会调用 OpenSCAD 编译器。
 
-```
-openscad-tui/
-├── crates/
-│   ├── core/                    # 核心 AST 模块
-│   │   └── src/
-│   │       └── lib.rs          # AST 定义和操作 API
-│   ├── library/                 # 库管理模块
-│   │   └── src/
-│   │       └── lib.rs          # 库加载和模块发现
-│   └── ui/                      # UI 交互模块
-│       └── src/
-│           ├── main.rs         # 应用入口
-│           ├── lib.rs          # 库导出
-│           ├── app.rs          # 应用状态
-│           ├── ui.rs           # UI 渲染
-│           ├── input.rs        # 输入处理
-│           └── commands.rs     # 命令实现
-├── Cargo.toml                   # 工作空间配置
-└── openscad.md                  # 需求文档
-```
+## 当前能力
 
-## 功能模块说明
+- 在树形界面中创建、选择、嵌套和删除 OpenSCAD 模块
+- 对选中节点应用 `translate`、`rotate`、`scale`
+- 使用 `union`、`difference`、`intersection` 组合选中节点
+- 定义全局变量、自定义函数和自定义模块
+- 生成并导出 OpenSCAD 源码
+- 将可编辑项目保存为 JSON，并从 JSON 恢复
+- 从 JSON 加载模块和函数元数据作为补全库
+- 撤销、重做和命令历史
+- 复制、粘贴、移除和替换模块节点
+- 补全命令、模块、参数、值、函数和文件路径
+- 在函数调用与列表嵌套表达式中继续补全
 
-### 1. 核心模块 (openscad-core)
+核心表达式支持布尔值、整数、浮点数、字符串、`undef`、标识符、列表、范围、
+一元/二元运算、三元表达式、索引和函数调用。
 
-提供 OpenSCAD AST 的完整实现：
+## 构建与运行
 
-- **AST 数据结构**: `Expr`, `ModuleNode`, `AstRoot`
-- **表达式类型**: 支持布尔值、数字、字符串、列表、范围、操作符等
-- **模块节点**: 支持参数、子模块、显示名称
-- **序列化**: Serde 支持 YAML 序列化
-
-关键 API:
-```rust
-// 创建 AST
-let mut ast = AstRoot::new();
-
-// 添加模块
-ast.add_module(ModuleNode::new_leaf(
-    "cube1".to_string(),
-    "cube".to_string(),
-    vec![Argument::Named {
-        name: "size".to_string(),
-        value: Expr::List(vec![Expr::Integer(10), ...]),
-    }],
-))?;
-
-// 查找和删除节点
-ast.delete_node("cube1")?;
-
-// 生成代码
-let code = ast.to_scad();
-```
-
-### 2. 库管理模块 (openscad-library)
-
-提供内建模块和库加载功能：
-
-- **内建模块**: cube, sphere, cylinder, square, circle, translate, rotate, scale, 等
-- **库加载**: 从 YAML 文件加载第三方库
-- **模块发现**: 获取所有可用模块及其参数
-
-关键 API:
-```rust
-let mut manager = LibraryManager::new();
-
-// 获取模块定义
-let cube_def = manager.get_module("cube")?;
-
-// 加载外部库
-manager.load_library(Path::new("my_library.yaml"))?;
-
-// 获取所有模块
-let modules = manager.get_all_modules();
-```
-
-### 3. UI 交互模块 (openscad-ui)
-
-提供命令行交互界面和命令处理：
-
-- **UI 布局**: 三层界面 - 树形视图、命令输入、代码预览
-- **Vim 风格交互**: jkhl 导航、i/a 插入、v 选择、d 删除、u 撤销等
-- **命令处理**: 支持多种命令 (insert, delete, union, difference 等)
-- **状态管理**: 撤销/重做栈、选择管理、错误处理
-
-关键命令：
-```
-i         - 下方插入模块
-a         - 上方插入模块
-v         - 选择/取消选择当前节点
-dd/D      - 删除当前节点
-u         - 撤销
-:         - 进入命令模式
-:insert <module_name> [params]  - 插入模块
-:union    - 合并选中节点
-:difference - 差集
-:write <filename> - 保存为 YAML
-:load <filename>  - 加载 YAML
-:export <filename> - 导出为 .scad
-```
-
-## 编译和运行
-
-### 编译
+需要 Rust 2021 edition 兼容工具链。
 
 ```bash
-cd /home/yunus/Desktop/temp/rust-test/openscad-tui
-cargo build --release
-```
-
-### 运行
-
-```bash
+cargo build --workspace
 cargo run --bin openscad-tui
 ```
 
-### 测试
+发布构建：
 
 ```bash
-cargo test
+cargo build --release
+./target/release/openscad-tui
 ```
 
-## 使用示例
+## 基本交互
 
-1. **创建基本模型**
+普通模式下可使用：
 
-```
-i cube [10,10,10]      # 插入一个 10x10x10 的立方体
-i sphere 5             # 插入一个半径为 5 的球体
-```
+| 按键 | 功能 |
+| --- | --- |
+| `j` / `k`、`↓` / `↑` | 移动树光标 |
+| `h` / `l`、`←` / `→` | 折叠或展开节点 |
+| `Enter` | 切换节点展开状态 |
+| `v` | 选择或取消选择当前节点 |
+| `y` / `p` | 复制最后选中的节点子树（否则复制当前节点）／在当前位置后粘贴 |
+| `x` | 移除所有选中节点并提升其子节点；无选中时操作当前节点 |
+| `c` | 进入 `replace`，替换所有选中节点；无选中时操作当前节点 |
+| `i` | 打开 `insert` 命令 |
+| `t` / `r` / `s` | 打开平移、旋转或缩放命令 |
+| `d` | 删除所有选中节点的完整子树；无选中时删除当前子树 |
+| `u` / `Ctrl+R` | 撤销或重做 |
+| `w` / `e` | 保存或加载 JSON 项目 |
+| `L` | 加载 JSON 库 |
+| `:` | 进入命令模式 |
+| `?` | 显示帮助 |
+| `q` / `Ctrl+C` | 退出 |
 
-2. **应用变换**
+命令输入模式支持方向键、Home、End、Backspace、Delete、命令历史，以及 `Tab` 补全。
+存在多个候选时重复按 `Tab` 可切换候选，按 `Enter` 应用当前候选。
 
-```
-:translate [5, 0, 0]   # 移动
-:rotate [45, 45, 0]    # 旋转
-```
+结构编辑命令统一遵循“选中节点优先，否则使用当前节点”。`delete`
+删除整个子树；`remove` 只删除目标节点并将子节点提升到父节点；`replace`
+删除目标子树后在原位置插入新节点。
 
-3. **布尔操作**
+## 常用命令
 
-选择两个节点 (v 命令)，然后：
-```
-:difference            # 执行差集操作
-:union                 # 执行并集
-```
+命令模式由 `:` 进入。命令文本本身不需要带冒号。
 
-4. **保存和导出**
+### 插入模块
 
-```
-:write project.yaml    # 保存项目为 YAML (便于再次编辑)
-:export model.scad     # 导出为 OpenSCAD 代码
-```
-
-## 库定义格式
-
-库定义文件采用 YAML 格式，例如：
-
-```yaml
-name: MyLibrary
-description: My custom OpenSCAD library
-file: my_library.scad
-version: 1.0
-modules:
-  - name: custom_cube
-    description: A customized cube
-    accepts_children: false
-    parameters:
-      - name: size
-        param_type: list
-        default: "[10, 10, 10]"
-        description: "Cube dimensions [x, y, z]"
+```text
+insert cube size=[10, 10, 10], center=true
+i sphere r=5, $fn=64
 ```
 
-## 架构设计要点
+如果省略参数，程序会进入第二阶段参数输入：
 
-1. **三层架构**:
-   - Core: 数据结构和基本操作
-   - Library: 业务逻辑 (库管理)
-   - UI: 用户交互和 TUI 实现
+```text
+insert cylinder
+```
 
-2. **错误处理**: 统一使用 `thiserror` 库
+容器模块需要先使用 `v` 选择子节点：
 
-3. **序列化**: 使用 `serde_yaml` 支持项目保存/加载
+```text
+translate v=[10, 0, 0]
+rotate a=[0, 0, 45]
+scale v=[2, 1, 1]
+union
+difference
+intersection
+```
 
-4. **TUI**: 使用 `ratatui` 和 `crossterm` 提供现代化终端界面
+### 定义全局变量
 
-## 后续扩展方向
+```text
+global size=10
+global label="demo"
+global $fn=64
+```
 
-1. **高级编辑功能**:
-   - 复制粘贴 (y/p 命令)
-   - 节点拖拽重排序
-   - 参数实时编辑
+### 定义函数
 
-2. **性能优化**:
-   - 大型 AST 的增量渲染
-   - 代码生成缓存
+```text
+function square(x) = x * x
+function add(a, b) = a + b
+function distance2d(x, y) = sqrt(x * x + y * y)
+function pi_value() = 3.14159
+```
 
-3. **集成**:
-   - OpenSCAD 渲染预览
-   - 实时编译反馈
+函数名必须是合法标识符，且不能与已有自定义函数重名。当前函数参数不支持默认值。
+定义成功后，函数会出现在参数值补全候选中。
 
-4. **高级操作**:
-   - 参数化模块
-   - 条件表达式支持
-   - 自定义模块定义
+### 定义模块
 
-## 许可证
+`module` 会复制当前选中的节点作为模块定义的主体：
+
+```text
+module post radius=2, height=20
+module holder size=[10, 20, 5]
+```
+
+模块参数可以有默认值，也可以只写参数名：
+
+```text
+module example width=10, height, center=false
+```
+
+定义成功后，自定义模块会进入模块库和补全候选。
+
+### 文件操作
+
+```text
+write project.json
+write! project.json
+edit project.json
+edit! project.json
+export model.scad
+library my_library.json
+wq
+```
+
+- `write` / `edit` 保存和读取可继续编辑的 JSON AST。
+- 带 `!` 的版本允许覆盖未保存状态相关的保护。
+- `export` 只生成 `.scad` 文件，不会运行 OpenSCAD。
+- `library` 加载的是补全及模块元数据；对应的 OpenSCAD 库文件需要在实际使用环境中可用。
+
+## JSON 库格式
+
+库文件需要包含 `modules` 和 `functions` 数组。最小示例：
+
+```json
+{
+  "name": "ExampleLibrary",
+  "description": "Example OpenSCAD metadata",
+  "file": "example.scad",
+  "version": "1.0",
+  "modules": [
+    {
+      "name": "rounded_cube",
+      "description": "Cube with rounded edges",
+      "accepts_children": false,
+      "parameters": [
+        {
+          "name": "size",
+          "param_type": "list",
+          "default": "[10, 10, 10]",
+          "description": "Cube dimensions"
+        }
+      ]
+    }
+  ],
+  "functions": [
+    {
+      "name": "double",
+      "description": "Double a value",
+      "parameters": [
+        {
+          "name": "x",
+          "param_type": "number",
+          "description": "Input value"
+        }
+      ],
+      "return_type": "number"
+    }
+  ]
+}
+```
+
+参数的 `default` 和 `description` 是可选字段。可参考仓库中的 `stdlib.json` 查看更多定义。
+
+## 完整命令概览
+
+- 导航：`next`、`prev`、`collapse`、`expand`、`toggle`
+- 选择：`select`、`deselect-all`
+- 编辑：`insert`、`delete`、`undo`、`redo`
+- 节点操作：`yank`、`paste`、`remove`、`replace`
+- 变换：`translate`、`rotate`、`scale`
+- 布尔操作：`union`、`difference`、`intersection`
+- 定义：`global`、`function`、`module`
+- 文件：`write`、`write!`、`edit`、`edit!`、`export`、`library`
+- 系统：`help`、`quit`、`quit!`、`wq`
+
+节点操作示例：
+
+```text
+yank
+paste
+remove
+replace sphere
+```
+
+- `yank` 将当前节点的整个子树复制到应用内剪贴板。
+- `paste` 在当前节点后粘贴，并为整个子树生成新 ID；选中 Modules 或模块定义时追加到其主体。
+- `remove` 只删除节点本身，将其直接子节点按原顺序提升到父节点的原位置，并且不改变剪贴板。
+- `replace <module_name> [params]` 替换当前节点。它与 `insert` 使用相同的模块名、参数名和参数值多阶段补全；省略参数时会进入第二阶段参数输入。确认参数后，当前节点整棵子树才会被删除，并在相同位置插入具有新 ID 的新模块；取消输入不会修改 AST。
+
+## 项目结构
+
+```text
+openscad-tui/
+├── crates/
+│   ├── core/       # AST、表达式解析和 OpenSCAD 代码生成
+│   ├── library/    # 内置/外部模块与函数元数据
+│   └── ui/         # TUI、输入、命令和应用状态
+├── stdlib.json     # 内置模块与函数元数据
+└── Cargo.toml      # Cargo workspace
+```
+
+## 开发与验证
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+cargo check --workspace
+```
+
+当前工作区包含 114 个独立单元测试：core 30 个、library 9 个、ui 75 个。
+
+## 当前限制
+
+- 没有 OpenSCAD 编译、几何渲染或编译错误反馈
+- 不能导入和解析已有 `.scad` 源文件
+- 不是自由文本源码编辑器，主要通过 AST 树和命令编辑
+- 函数参数默认值、语义类型检查和高级补全仍有限
+- 鼠标事件目前不用于树节点操作
+- README 描述的是当前代码状态，项目尚未提供稳定发布或安装包
+
+## License
 
 MIT
