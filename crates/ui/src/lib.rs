@@ -3,6 +3,8 @@
 pub mod app;
 pub mod command_registry;
 pub mod commands;
+pub mod input;
+pub mod ui;
 
 pub use app::App;
 pub use command_registry::{CommandDef, CommandHandler, CommandRegistry};

@@ -278,7 +278,7 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
     match app.input_mode {
         InputMode::Normal => {
             title = " Normal Mode ".to_string();
-            prompt = "i=insert  j/k=nav  h/l=collapse/expand  v=select  d=delete  u=undo  <c-r>=redo  enter=toggle  w=write  e=edit  :=cmd  ?=help  q=quit".to_string();
+            prompt = "i=insert  y/p=yank/paste  x=remove  c=replace  d=delete  v=select  j/k=nav  h/l=fold  u/ctrl-r=undo/redo  :=cmd  ?=help  q=quit".to_string();
             style_fg = Color::Yellow;
         }
         InputMode::Command => {
@@ -286,18 +286,17 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
             prompt = "Enter command (type help for commands, Esc to exit):".to_string();
             style_fg = Color::Green;
         }
-        InputMode::InsertEnterParams => {
-            title = " Insert Parameters ".to_string();
+        InputMode::ModuleEnterParams => {
+            let action = match app.pending_module_action {
+                Some(crate::app::PendingModuleAction::Replace { .. }) => "Replace",
+                _ => "Insert",
+            };
+            title = format!(" {} Parameters ", action);
             prompt = format!(
                 "Parameters for '{}': ",
-                app.insert_module_name.as_deref().unwrap_or("?")
+                app.pending_module_name.as_deref().unwrap_or("module")
             );
             style_fg = Color::Cyan;
-        }
-        InputMode::ReplaceSelectModule => {
-            title = " Replace Module ".to_string();
-            prompt = "Enter replacement module name: ".to_string();
-            style_fg = Color::Yellow;
         }
         InputMode::Help => {
             title = " Help ".to_string();
@@ -321,7 +320,7 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
     )]));
 
     // Add input line (only in command/param modes)
-    if app.input_mode == InputMode::Command || app.input_mode == InputMode::InsertEnterParams {
+    if shows_input_buffer(app.input_mode) {
         let cursor_pos = app.input_buffer.cursor_pos();
         let buffer = app.input_buffer.content();
 
@@ -385,6 +384,13 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
         .style(Style::default().fg(style_fg));
 
     f.render_widget(paragraph, area);
+}
+
+fn shows_input_buffer(mode: crate::app::InputMode) -> bool {
+    matches!(
+        mode,
+        crate::app::InputMode::Command | crate::app::InputMode::ModuleEnterParams
+    )
 }
 
 fn draw_preview(f: &mut Frame, app: &App, area: Rect) {
@@ -578,7 +584,8 @@ fn draw_completion_popup(f: &mut Frame, app: &App, input_area: Rect) {
 
 #[cfg(test)]
 mod tests {
-    use crate::app::App;
+    use super::shows_input_buffer;
+    use crate::app::{App, InputMode};
 
     #[test]
     fn test_tree_state_with_empty_ast() {
@@ -594,5 +601,13 @@ mod tests {
         app.update_navigation_status();
         // When there's no selection, message should be None
         assert!(app.message.is_none());
+    }
+
+    #[test]
+    fn test_replace_parameter_mode_shows_input_buffer() {
+        assert!(shows_input_buffer(InputMode::ModuleEnterParams));
+        assert!(shows_input_buffer(InputMode::Command));
+        assert!(!shows_input_buffer(InputMode::Normal));
+        assert!(!shows_input_buffer(InputMode::Help));
     }
 }

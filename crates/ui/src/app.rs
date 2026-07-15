@@ -222,14 +222,18 @@ impl CandidateType {
 pub enum InputMode {
     /// Command mode - all input is command-based
     Command,
-    /// Multi-stage insert - entering parameters for insert command
-    InsertEnterParams,
-    /// Multi-stage replace - selecting replacement module
-    ReplaceSelectModule,
+    /// Multi-stage module action - entering parameters for insert or replace.
+    ModuleEnterParams,
     /// Help modal - displaying help information
     Help,
     /// Legacy modes (no longer used, kept for compatibility)
     Normal,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum PendingModuleAction {
+    Insert,
+    Replace { target_ids: Vec<String> },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -272,14 +276,6 @@ pub enum CompletionContext {
         /// Whether the path ends with a separator (indicating directory)
         ends_with_separator: bool,
     },
-    /// 函数参数值上下文
-    #[allow(dead_code)]
-    FunctionParamValue {
-        function_name: String,
-    },
-    /// 列表上下文
-    #[allow(dead_code)]
-    ListValue,
 }
 
 pub struct App {
@@ -289,6 +285,8 @@ pub struct App {
     pub selected_nodes: Vec<String>,
     pub undo_stack: VecDeque<Arc<AstRoot>>,
     pub redo_stack: VecDeque<Arc<AstRoot>>,
+    /// Application-local clipboard for copied module subtrees.
+    pub node_clipboard: Option<openscad_core::ModuleNode>,
 
     // UI state - Tree navigation (using RefCell for interior mutability)
     pub tree_state: RefCell<TreeState<String>>,
@@ -303,8 +301,8 @@ pub struct App {
     /// For insert mode: whether to insert after (true) or before (false)
     #[allow(dead_code)]
     pub insert_after: bool,
-    /// For insert mode: the selected module name
-    pub insert_module_name: Option<String>,
+    pub pending_module_action: Option<PendingModuleAction>,
+    pub pending_module_name: Option<String>,
     pub preview_offset: usize,
     pub should_quit: bool,
     pub message: Option<String>,
@@ -336,68 +334,6 @@ pub struct App {
 
 impl App {
     pub fn new() -> Self {
-        let docs = [
-            "OpenSCAD TUI - Command Reference",
-            "",
-            "Navigation:",
-            "  next/j/↓      - move cursor down",
-            "  prev/k/↑      - move cursor up",
-            "  collapse/h/←  - collapse node or move left",
-            "  expand/l/→    - expand node or move right",
-            "  toggle        - toggle node expansion",
-            "",
-            "Selection:",
-            "  select/v      - toggle select current node",
-            "  deselect-all  - clear all selections",
-            "",
-            "Edit Operations:",
-            "  undo/u        - undo last operation",
-            "  redo/r        - redo last operation",
-            "  delete/d/dd/D - delete node",
-            "",
-            "Transformations:",
-            "  translate     - apply translation to selected nodes",
-            "  rotate        - apply rotation to selected nodes",
-            "  scale         - apply scaling to selected nodes",
-            "",
-            "Boolean Operations:",
-            "  union         - combine selected nodes",
-            "  difference    - subtract selected nodes",
-            "  intersection  - intersect selected nodes",
-            "",
-            "Insertion:",
-            "  insert/i      - insert a module into the AST",
-            "",
-            "Definitions:",
-            "  function      - define a new function",
-            "  module        - define a new module",
-            "  global        - define a global variable",
-            "",
-            "File Operations:",
-            "  write/w/save  - save AST to JSON",
-            "  write!/w!/save! - force save AST to JSON",
-            "  edit/e        - load AST from JSON",
-            "  edit!/e!      - force load AST from JSON",
-            "  export        - export to OpenSCAD file",
-            "  library       - load third-party library",
-            "",
-            "System:",
-            "  quit/q        - exit application",
-            "  quit!/q!      - force exit application",
-            "  wq            - save and exit",
-            "  help/?        - show this help",
-            "",
-            "Unimplemented Commands:",
-            "  yank/y        - copy node to clipboard",
-            "  paste/p       - paste node from clipboard",
-            "  remove/x      - remove a node",
-            "  replace       - replace a node with another module",
-            "",
-            "Navigation: Use ↑/↓ to scroll, Esc/q to close",
-        ];
-        let help_doc: Vec<String> = docs.iter().map(|str| str.to_string()).collect();
-        let help_doc_count = help_doc.len();
-
         let mut app = Self {
             ast: Arc::new(AstRoot::new()),
             library: LibraryManager::new(),
@@ -405,13 +341,15 @@ impl App {
             selected_nodes: Vec::new(),
             undo_stack: VecDeque::with_capacity(100),
             redo_stack: VecDeque::with_capacity(100),
+            node_clipboard: None,
             tree_state: RefCell::new(TreeState::default()),
             tree_cursor: 0,
             expanded_nodes: std::collections::HashSet::new(),
             input_buffer: InputBuffer::new(),
             input_mode: InputMode::Normal,
             insert_after: true,
-            insert_module_name: None,
+            pending_module_action: None,
+            pending_module_name: None,
             preview_offset: 0,
             should_quit: false,
             message: None,
@@ -427,8 +365,8 @@ impl App {
             saved: true,
             help_scroll_offset: 0,
             help_scroll_offset_max: 0,
-            help_doc,
-            help_doc_count,
+            help_doc: Vec::new(),
+            help_doc_count: 0,
             help_modal_width: 0,
             help_modal_height: 0,
         };
@@ -445,6 +383,13 @@ impl App {
         app.init_tree_selection();
         app.calculate_help_modal_size();
         app
+    }
+
+    pub fn set_help_doc(&mut self, help_doc: Vec<String>) {
+        self.help_doc_count = help_doc.len();
+        self.help_doc = help_doc;
+        self.help_scroll_offset = 0;
+        self.calculate_help_modal_size();
     }
 
     // 计算帮助窗口的高度

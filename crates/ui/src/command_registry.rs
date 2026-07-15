@@ -17,6 +17,8 @@ pub enum CommandType {
     NoArg,
     /// Definition command: for defining content, no completion needed (global, module, function)
     Definition,
+    /// Replace command: optional source node ID followed by a module name.
+    Replace,
 }
 
 /// Command type - used for dynamic completion context analysis

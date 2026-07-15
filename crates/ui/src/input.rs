@@ -3,7 +3,9 @@
 //! Normal mode: Quick keybindings for common operations (i/j/k/h/l/v)
 //! Command mode: Free text input for complex commands with parameter input
 
-use crate::app::{App, CandidateType, CompletionCandidate, CompletionContext, InputMode};
+use crate::app::{
+    App, CandidateType, CompletionCandidate, CompletionContext, InputMode, PendingModuleAction,
+};
 use crate::command_registry::CommandType;
 use crate::commands;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -14,8 +16,7 @@ pub fn handle_key(key: KeyEvent, app: &mut App) {
     match app.input_mode {
         InputMode::Normal => handle_normal_input(key, app),
         InputMode::Command => handle_command_input(key, app),
-        InputMode::InsertEnterParams => handle_insert_params_input(key, app),
-        InputMode::ReplaceSelectModule => handle_replace_module_input(key, app),
+        InputMode::ModuleEnterParams => handle_module_params_input(key, app),
         InputMode::Help => handle_help_input(key, app),
     }
 }
@@ -58,6 +59,21 @@ fn handle_normal_input(key: KeyEvent, app: &mut App) {
         // v - select/toggle node
         KeyCode::Char('v') => {
             execute_command(app, "select");
+        }
+
+        // Vim-style structural editing
+        KeyCode::Char('y') => {
+            execute_command(app, "yank");
+        }
+        KeyCode::Char('p') => {
+            execute_command(app, "paste");
+        }
+        KeyCode::Char('x') => {
+            execute_command(app, "remove");
+        }
+        KeyCode::Char('c') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.input_mode = InputMode::Command;
+            app.input_buffer.set_content("replace ");
         }
 
         // u - undo
@@ -260,7 +276,7 @@ fn handle_command_input(key: KeyEvent, app: &mut App) {
 
 /// Handle module name input for insert command
 /// Handle parameter input for insert command (multi-stage)
-fn handle_insert_params_input(key: KeyEvent, app: &mut App) {
+fn handle_module_params_input(key: KeyEvent, app: &mut App) {
     app.clamp_cursor();
 
     match key.code {
@@ -301,85 +317,30 @@ fn handle_insert_params_input(key: KeyEvent, app: &mut App) {
             handle_tab_completion(app);
         }
         KeyCode::Enter => {
-            // User finished entering parameters
             if app.completion_active {
                 apply_completion(app);
             } else {
                 let params = app.input_buffer.content().trim().to_string();
-                if let Some(ref module_name) = app.insert_module_name.clone() {
-                    // Check if module accepts children and we have selections
-                    if let Some(module_def) = app.library.get_module(module_name) {
-                        if module_def.accepts_children && app.selected_nodes.is_empty() {
-                            app.set_error(&format!(
-                                "'{}' requires child modules. Select modules with 'v' first",
-                                module_name
-                            ));
-                            app.input_mode = InputMode::Normal;
-                            app.input_buffer.clear();
-                            app.insert_module_name = None;
-                            return;
-                        }
-                    }
-
-                    app.push_undo();
-                    if let Err(e) = commands::cmd_insert(app, module_name, None, Some(&params)) {
-                        app.set_error(&e.to_string());
-                    } else {
-                        app.update_navigation_status();
-                        app.set_info(&format!("Inserted: {}", module_name));
-                    }
+                if let Err(error) = commands::commit_pending_module_action(app, &params) {
+                    app.set_error(&error.to_string());
                 }
                 app.input_mode = InputMode::Normal;
                 app.input_buffer.clear();
-                app.insert_module_name = None;
+                app.pending_module_action = None;
+                app.pending_module_name = None;
             }
         }
         KeyCode::Esc => {
+            let action = match app.pending_module_action {
+                Some(PendingModuleAction::Insert) => "Insert",
+                Some(PendingModuleAction::Replace { .. }) => "Replace",
+                None => "Module action",
+            };
             app.input_mode = InputMode::Normal;
             app.input_buffer.clear();
-            app.insert_module_name = None;
-            app.set_info("Insert cancelled");
-        }
-        _ => {}
-    }
-}
-
-/// Handle module selection for replace command
-fn handle_replace_module_input(key: KeyEvent, app: &mut App) {
-    app.clamp_cursor();
-
-    match key.code {
-        KeyCode::Char(c) => {
-            app.input_buffer.insert_char(c);
-        }
-        KeyCode::Backspace => {
-            app.input_buffer.delete_before_cursor();
-        }
-        KeyCode::Delete => {
-            app.input_buffer.delete_at_cursor();
-        }
-        KeyCode::Left => {
-            app.input_buffer.move_left();
-        }
-        KeyCode::Right => {
-            app.input_buffer.move_right();
-        }
-        KeyCode::Home => {
-            app.input_buffer.move_to_start();
-        }
-        KeyCode::End => {
-            app.input_buffer.move_to_end();
-        }
-        KeyCode::Enter => {
-            let _module_name = app.input_buffer.content().trim().to_string();
-            app.set_error("Replace command not implemented yet");
-            app.input_mode = InputMode::Command;
-            app.input_buffer.clear();
-        }
-        KeyCode::Esc => {
-            app.input_mode = InputMode::Command;
-            app.input_buffer.clear();
-            app.set_info("Replace cancelled");
+            app.pending_module_action = None;
+            app.pending_module_name = None;
+            app.set_info(&format!("{} cancelled", action));
         }
         _ => {}
     }
@@ -394,7 +355,7 @@ fn handle_help_input(key: KeyEvent, app: &mut App) {
         }
         // Scroll up
         KeyCode::Up | KeyCode::Char('k') => {
-            app.help_scroll_offset = app.help_scroll_offset.saturating_sub(1).max(0);
+            app.help_scroll_offset = app.help_scroll_offset.saturating_sub(1);
         }
         // Scroll down
         KeyCode::Down | KeyCode::Char('j') => {
@@ -405,7 +366,7 @@ fn handle_help_input(key: KeyEvent, app: &mut App) {
         }
         // Page up
         KeyCode::PageUp | KeyCode::Char('b') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.help_scroll_offset = app.help_scroll_offset.saturating_sub(10).max(0);
+            app.help_scroll_offset = app.help_scroll_offset.saturating_sub(10);
         }
         // Page down
         KeyCode::PageDown | KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -573,19 +534,18 @@ fn parse_parameter_names(param_str: &str) -> Vec<String> {
 fn analyze_input_context(input: &str, app: &App) -> CompletionContext {
     let trimmed = input.trim();
 
-    // 检查是否为 InsertEnterParams 模式
-    if app.input_mode == InputMode::InsertEnterParams {
-        // 在 InsertEnterParams 模式下，输入只包含参数字符串
-        // 模块名存储在 app.insert_module_name 中
-        if let Some(ref module_name) = app.insert_module_name {
-            return analyze_param_context(trimmed, module_name, CommandType::Module);
-        } else {
-            // 如果没有模块名，返回默认上下文
-            return CompletionContext::ModuleParam {
-                cmd_type: CommandType::Module,
-                module_name: String::new(),
-            };
+    if app.input_mode == InputMode::ModuleEnterParams {
+        let cmd_type = match app.pending_module_action {
+            Some(PendingModuleAction::Replace { .. }) => CommandType::Replace,
+            _ => CommandType::Module,
+        };
+        if let Some(ref module_name) = app.pending_module_name {
+            return analyze_param_context(trimmed, module_name, cmd_type);
         }
+        return CompletionContext::ModuleParam {
+            cmd_type,
+            module_name: String::new(),
+        };
     }
 
     // 空输入或只有空白字符：命令补全
@@ -742,6 +702,26 @@ fn analyze_input_context(input: &str, app: &App) -> CompletionContext {
                 // 定义命令：无需补全
                 CompletionContext::Command
             }
+            CommandType::Replace => {
+                if parts.len() == 1 {
+                    if input.ends_with(' ') {
+                        CompletionContext::Module
+                    } else {
+                        CompletionContext::Command
+                    }
+                } else if parts.len() == 2 {
+                    if input.ends_with(' ') {
+                        CompletionContext::ModuleParam {
+                            cmd_type: CommandType::Replace,
+                            module_name: parts[1].to_string(),
+                        }
+                    } else {
+                        CompletionContext::Module
+                    }
+                } else {
+                    analyze_param_context(&parts[2..].join(" "), parts[1], CommandType::Replace)
+                }
+            }
         }
     } else {
         CompletionContext::Command
@@ -755,10 +735,10 @@ fn analyze_param_context(
     cmd_type: CommandType,
 ) -> CompletionContext {
     // 解析参数字符串以确定当前上下文
-    // 查找最后一个逗号、等号的位置
-    let last_comma = param_str.rfind(',');
-    let last_equal = param_str.rfind('=');
-    let (in_function, in_list, function_fisrt) = analyze_in_function_or_list(param_str);
+    // 只把最外层的逗号和等号当作模块参数语法；函数调用和列表内部的
+    // 分隔符属于参数值表达式。
+    let last_comma = find_last_top_level_char(param_str, ',');
+    let last_equal = find_last_top_level_char(param_str, '=');
 
     // 确定当前是在参数名、等号后，还是值之后
     match (last_comma, last_equal) {
@@ -816,29 +796,25 @@ fn analyze_param_context(
     }
 }
 
-/// 判断当前输入在列表中，或者在函数中
-fn analyze_in_function_or_list(input: &str) -> (bool, bool, bool) {
-    let mut function_count = 0;
-    let mut list_count = 0;
+fn find_last_top_level_char(input: &str, needle: char) -> Option<usize> {
+    let mut parentheses = 0usize;
+    let mut brackets = 0usize;
+    let mut last_match = None;
 
-    let last_function_index = input.rfind('[');
-    let last_list_index = input.rfind('(');
-
-    for c in input.chars() {
-        match c {
-            '(' => function_count += 1,
-            ')' if function_count > 0 => function_count -= 1,
-            '[' => list_count += 1,
-            ']' if list_count > 0 => list_count -= 1,
+    for (index, ch) in input.char_indices() {
+        match ch {
+            '(' => parentheses += 1,
+            ')' => parentheses = parentheses.saturating_sub(1),
+            '[' => brackets += 1,
+            ']' => brackets = brackets.saturating_sub(1),
+            _ if ch == needle && parentheses == 0 && brackets == 0 => {
+                last_match = Some(index);
+            }
             _ => {}
         }
     }
 
-    (
-        function_count == 0,
-        list_count == 0,
-        last_function_index > last_list_index,
-    )
+    last_match
 }
 
 /// 规范化路径，处理相对路径符号如 ./ 和 ../
@@ -895,32 +871,24 @@ fn get_current_param_name_part(param_str: &str) -> String {
 
 /// 查找最后一个参数分隔符逗号的位置（忽略括号内的逗号）
 fn find_last_param_separator(param_str: &str) -> Option<usize> {
-    let mut in_brackets = 0;
-    let mut last_comma = None;
-
-    for (i, ch) in param_str.chars().enumerate() {
-        match ch {
-            '[' => in_brackets += 1,
-            ']' if in_brackets > 0 => in_brackets -= 1,
-            ',' if in_brackets == 0 => {
-                last_comma = Some(i);
-            }
-            _ => {}
-        }
-    }
-    last_comma
+    find_last_top_level_char(param_str, ',')
 }
 
 /// 从指定位置开始查找下一个参数分隔符逗号的位置（忽略括号内的逗号）
 fn find_next_param_separator_from(param_str: &str, start: usize) -> Option<usize> {
-    let mut in_brackets = 0;
-    let chars: Vec<char> = param_str.chars().collect();
-    for (i, &ch) in chars.iter().enumerate().skip(start) {
+    let mut parentheses = 0usize;
+    let mut brackets = 0usize;
+    for (index, ch) in param_str
+        .char_indices()
+        .filter(|(index, _)| *index >= start)
+    {
         match ch {
-            '[' => in_brackets += 1,
-            ']' if in_brackets > 0 => in_brackets -= 1,
-            ',' if in_brackets == 0 => {
-                return Some(i);
+            '(' => parentheses += 1,
+            ')' => parentheses = parentheses.saturating_sub(1),
+            '[' => brackets += 1,
+            ']' => brackets = brackets.saturating_sub(1),
+            ',' if parentheses == 0 && brackets == 0 => {
+                return Some(index);
             }
             _ => {}
         }
@@ -939,10 +907,48 @@ fn get_current_param_value_part(param_str: &str, param_name: &str) -> String {
         let value_start = start + pattern.len();
         // 查找下一个逗号或字符串结束，忽略括号内的逗号
         let end = find_next_param_separator_from(param_str, value_start).unwrap_or(param_str.len());
-        param_str[value_start..end].trim().to_string()
+        let (fragment_start, fragment_end) = value_fragment_range(param_str, value_start, end);
+        param_str[fragment_start..fragment_end].to_string()
     } else {
         String::new()
     }
+}
+
+/// 返回光标所在值表达式中当前标识符片段的字节范围。
+/// `sin(foo, sq`、`[1, sq` 等输入只替换最后的 `sq`，保留外层表达式。
+fn value_fragment_range(input: &str, value_start: usize, value_end: usize) -> (usize, usize) {
+    let value = &input[value_start..value_end];
+    let token_start = value
+        .char_indices()
+        .filter(|(_, ch)| matches!(ch, '(' | '[' | ','))
+        .map(|(index, ch)| index + ch.len_utf8())
+        .next_back()
+        .unwrap_or(0);
+    let leading_whitespace = value[token_start..]
+        .len()
+        .saturating_sub(value[token_start..].trim_start().len());
+    let fragment_start = value_start + token_start + leading_whitespace;
+    let fragment_end = value_start + value.trim_end_matches(char::is_whitespace).len();
+    (fragment_start.min(fragment_end), fragment_end)
+}
+
+fn value_has_open_container(param_str: &str, param_name: &str) -> bool {
+    let pattern = format!("{}=", param_name);
+    let Some(start) = param_str.find(&pattern) else {
+        return false;
+    };
+    let mut parentheses = 0usize;
+    let mut brackets = 0usize;
+    for ch in param_str[start + pattern.len()..].chars() {
+        match ch {
+            '(' => parentheses += 1,
+            ')' => parentheses = parentheses.saturating_sub(1),
+            '[' => brackets += 1,
+            ']' => brackets = brackets.saturating_sub(1),
+            _ => {}
+        }
+    }
+    parentheses > 0 || brackets > 0
 }
 
 /// 获取模块中还未输入的参数列表（包括有默认值的可选参数）
@@ -977,16 +983,12 @@ fn extract_module_and_param_str(
     input: &str,
     cmd_type: &CommandType,
 ) -> (Option<String>, String) {
-    if app.input_mode == InputMode::InsertEnterParams {
-        // InsertEnterParams 模式：模块名在 app.insert_module_name 中
-        // 整个输入就是参数字符串
-        let module_name = app.insert_module_name.clone();
-        let param_str = input.trim().to_string();
-        (module_name, param_str)
+    if app.input_mode == InputMode::ModuleEnterParams {
+        (app.pending_module_name.clone(), input.trim().to_string())
     } else {
         // 正常命令模式：从输入中提取模块名和参数字符串
         let parts: Vec<&str> = input.split_whitespace().collect();
-        if cmd_type == &CommandType::Module {
+        if matches!(cmd_type, CommandType::Module | CommandType::Replace) {
             if parts.len() >= 2 {
                 let module_name = Some(parts[1].to_string());
                 let param_str = if parts.len() > 2 {
@@ -1138,10 +1140,6 @@ fn generate_completions(input: &str, app: &App) -> (Vec<CompletionCandidate>, Co
                 .collect();
             candidates
         }
-        CompletionContext::FunctionParamValue {
-            function_name,
-        } => todo!(),
-        CompletionContext::ListValue => todo!(),
     };
 
     (candidates, context)
@@ -1198,10 +1196,8 @@ fn get_replacement_range(input: &str, context: &CompletionContext, app: &App) ->
             // 模块补全：替换第二个单词（模块名部分）
             let parts: Vec<&str> = input.split_whitespace().collect();
             if parts.len() < 2 {
-                // 没有模块名，在末尾替换
                 (input.len(), input.len())
             } else {
-                // 找到第二个单词在原始输入中的位置
                 let module_part = parts[1];
                 let module_start = input.find(module_part).unwrap_or(input.len());
                 (module_start, module_start + module_part.len())
@@ -1254,11 +1250,13 @@ fn get_replacement_range(input: &str, context: &CompletionContext, app: &App) ->
             let pattern = format!("{}=", module_param_name);
             if let Some(start) = param_str.find(&pattern) {
                 let value_start = start + pattern.len();
-                let end = find_next_param_separator_from(&param_str, value_start)
+                let value_end = find_next_param_separator_from(&param_str, value_start)
                     .unwrap_or(param_str.len());
+                let (fragment_start, fragment_end) =
+                    value_fragment_range(&param_str, value_start, value_end);
                 // 在原始输入中找到参数字符串的位置
                 let param_start = input.find(&param_str).unwrap_or(input.len());
-                (param_start + value_start, param_start + end)
+                (param_start + fragment_start, param_start + fragment_end)
             } else {
                 (input.len(), input.len())
             }
@@ -1302,10 +1300,6 @@ fn get_replacement_range(input: &str, context: &CompletionContext, app: &App) ->
                 (path_start, input.len()) // 替换从路径开始到末尾的所有内容
             }
         }
-        CompletionContext::FunctionParamValue {
-            function_name,
-        } => todo!(),
-        CompletionContext::ListValue => todo!(),
     }
 }
 
@@ -1329,13 +1323,14 @@ fn apply_completion(app: &mut App) {
         CompletionContext::ModuleParamValue {
             cmd_type: _cmd_type,
             module_name,
-            module_param_name: _,
+            module_param_name,
         } => {
             // 检查当前参数是否是最后一个参数, 不是最后一个参数，追加逗号
             let (_, param_str) =
                 extract_module_and_param_str(app, app.input_buffer.content(), _cmd_type);
             if !is_last_parameter(app, module_name, &param_str)
                 || candidate.candidate_type == CandidateType::Function
+                || value_has_open_container(&param_str, module_param_name)
             {
                 app.input_buffer
                     .insert_str(candidate.candidate_type.separator());
@@ -1439,4 +1434,215 @@ fn get_file_completions(dir_path: &str, prefix: &str) -> Vec<String> {
         .into_iter()
         .map(|(name, _)| name)
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_parameter_names_ignores_nested_commas() {
+        let names = parse_parameter_names("size=[sin(10, 20), 3], center=true");
+        assert_eq!(names, vec!["size", "center"]);
+    }
+
+    #[test]
+    fn test_analyze_param_context_keeps_list_value_context() {
+        let context = analyze_param_context("size=[1, si", "cube", CommandType::Module);
+        assert_eq!(
+            context,
+            CompletionContext::ModuleParamValue {
+                cmd_type: CommandType::Module,
+                module_name: "cube".to_string(),
+                module_param_name: "size".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn test_analyze_param_context_uses_top_level_comma() {
+        let context = analyze_param_context(
+            "size=[sin(10, 20), 3], center=tr",
+            "cube",
+            CommandType::Module,
+        );
+        assert_eq!(
+            context,
+            CompletionContext::ModuleParamValue {
+                cmd_type: CommandType::Module,
+                module_name: "cube".to_string(),
+                module_param_name: "center".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn test_current_value_part_is_nested_expression_fragment() {
+        assert_eq!(
+            get_current_param_value_part("size=[1, sin(10), sq", "size"),
+            "sq"
+        );
+        assert_eq!(
+            get_current_param_value_part("size=sin(10, co", "size"),
+            "co"
+        );
+    }
+
+    #[test]
+    fn test_value_fragment_range_preserves_nested_expression() {
+        let input = "size=[1, sin(10), sq";
+        let (start, end) = value_fragment_range(input, 5, input.len());
+        assert_eq!(&input[start..end], "sq");
+        assert_eq!(&input[..start], "size=[1, sin(10), ");
+    }
+
+    #[test]
+    fn test_generate_completions_filters_function_inside_list() {
+        let app = App::new();
+        let (candidates, context) = generate_completions("insert cube size=[1, si", &app);
+
+        assert!(matches!(
+            context,
+            CompletionContext::ModuleParamValue {
+                module_param_name,
+                ..
+            } if module_param_name == "size"
+        ));
+        assert!(candidates.iter().any(|candidate| {
+            candidate.content == "sin" && candidate.candidate_type == CandidateType::Function
+        }));
+    }
+
+    #[test]
+    fn test_replacement_range_only_covers_nested_fragment() {
+        let app = App::new();
+        let input = "insert cube size=[1, si";
+        let context = analyze_input_context(input, &app);
+        let (start, end) = get_replacement_range(input, &context, &app);
+
+        assert_eq!(&input[start..end], "si");
+    }
+
+    #[test]
+    fn test_value_has_open_container() {
+        assert!(value_has_open_container("size=[1, sin(", "size"));
+        assert!(!value_has_open_container("size=[1, sin(2)]", "size"));
+    }
+
+    #[test]
+    fn test_normal_mode_structural_editing_keys() {
+        let mut app = App::new();
+        app.ast_mut()
+            .modules
+            .push(openscad_core::ModuleNode::new_leaf(
+                "cube_1".to_string(),
+                "cube".to_string(),
+                Vec::new(),
+            ));
+        app.tree_state
+            .borrow_mut()
+            .select(vec!["__modules".to_string(), "cube_1".to_string()]);
+
+        handle_key(
+            KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE),
+            &mut app,
+        );
+        assert_eq!(app.node_clipboard.as_ref().unwrap().id, "cube_1");
+
+        handle_key(
+            KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE),
+            &mut app,
+        );
+        assert_eq!(app.ast.modules.len(), 2);
+
+        app.tree_state
+            .borrow_mut()
+            .select(vec!["__modules".to_string(), "cube_1".to_string()]);
+        handle_key(
+            KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
+            &mut app,
+        );
+        assert!(app.ast.find_node_by_id("cube_1").is_none());
+
+        handle_key(
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE),
+            &mut app,
+        );
+        assert_eq!(app.input_mode, InputMode::Command);
+        assert_eq!(app.input_buffer.content(), "replace ");
+    }
+
+    #[test]
+    fn test_node_commands_do_not_expose_node_ids() {
+        let mut app = App::new();
+        app.ast_mut()
+            .modules
+            .push(openscad_core::ModuleNode::new_leaf(
+                "cube_123".to_string(),
+                "cube".to_string(),
+                Vec::new(),
+            ));
+
+        let (candidates, context) = generate_completions("remove cube_", &app);
+        assert_eq!(context, CompletionContext::Command);
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn test_replace_completion_uses_module_then_parameter_stages() {
+        let mut app = App::new();
+        app.ast_mut()
+            .modules
+            .push(openscad_core::ModuleNode::new_leaf(
+                "cube_123".to_string(),
+                "cube".to_string(),
+                Vec::new(),
+            ));
+
+        let (candidates, context) = generate_completions("replace sp", &app);
+        assert_eq!(context, CompletionContext::Module);
+        assert!(candidates
+            .iter()
+            .any(|candidate| candidate.content == "sphere"));
+        assert!(!candidates
+            .iter()
+            .any(|candidate| candidate.content == "cube_123"));
+
+        let (parameter_candidates, parameter_context) =
+            generate_completions("replace sphere ", &app);
+        assert_eq!(
+            parameter_context,
+            CompletionContext::ModuleParam {
+                cmd_type: CommandType::Replace,
+                module_name: "sphere".to_string(),
+            }
+        );
+        assert!(parameter_candidates
+            .iter()
+            .any(|candidate| candidate.content == "r"));
+    }
+
+    #[test]
+    fn test_cancel_replace_parameter_stage_keeps_original_node() {
+        let mut app = App::new();
+        app.ast_mut()
+            .modules
+            .push(openscad_core::ModuleNode::new_leaf(
+                "shape_1".to_string(),
+                "sphere".to_string(),
+                Vec::new(),
+            ));
+        app.pending_module_action = Some(PendingModuleAction::Replace {
+            target_ids: vec!["shape_1".to_string()],
+        });
+        app.pending_module_name = Some("cube".to_string());
+        app.input_mode = InputMode::ModuleEnterParams;
+
+        handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &mut app);
+
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert!(app.ast.find_node_by_id("shape_1").is_some());
+        assert!(app.pending_module_action.is_none());
+        assert!(app.pending_module_name.is_none());
+    }
 }

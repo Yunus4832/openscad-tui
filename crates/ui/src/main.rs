@@ -2,12 +2,6 @@
 //!
 //! A command-driven OpenSCAD editor with real-time preview
 
-mod app;
-mod command_registry;
-mod commands;
-mod input;
-mod ui;
-
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event},
     execute,
@@ -20,9 +14,7 @@ use ratatui::{
 use std::error::Error;
 use std::io;
 
-use app::App;
-use input::handle_key;
-use ui::draw;
+use openscad_ui::{app::App, input::handle_key, ui::draw};
 
 fn main() -> Result<(), Box<dyn Error>> {
     // Setup terminal
