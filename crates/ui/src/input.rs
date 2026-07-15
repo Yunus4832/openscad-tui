@@ -1104,6 +1104,8 @@ fn generate_completions(input: &str, app: &App) -> (Vec<CompletionCandidate>, Co
         } => {
             // 模块参数值补全：获取参数的默认值（如果存在）和全局变量
             let mut candidates: Vec<CompletionCandidate> = Vec::new();
+            let (_, param_str) = extract_module_and_param_str(app, input, _cmd_type);
+            let inside_container = value_has_open_container(&param_str, module_param_name);
 
             // 首先，尝试获取参数的默认值
             if let Some(module_def) = app.library.get_module(module_name) {
@@ -1112,12 +1114,27 @@ fn generate_completions(input: &str, app: &App) -> (Vec<CompletionCandidate>, Co
                     .iter()
                     .find(|p| p.name == *module_param_name)
                 {
-                    if let Some(default_val) = &param_def.default {
-                        candidates.push(CompletionCandidate {
-                            content: default_val.clone(),
-                            candidate_type: CandidateType::Value,
-                        });
+                    if !inside_container {
+                        if let Some(default_val) = &param_def.default {
+                            candidates.push(CompletionCandidate {
+                                content: default_val.clone(),
+                                candidate_type: CandidateType::Value,
+                            });
+                        }
                     }
+                }
+            }
+
+            // Boolean literals are valid value expressions regardless of the parameter default.
+            for literal in ["true", "false"] {
+                if !candidates
+                    .iter()
+                    .any(|candidate| candidate.content == literal)
+                {
+                    candidates.push(CompletionCandidate {
+                        content: literal.to_string(),
+                        candidate_type: CandidateType::Value,
+                    });
                 }
             }
 
@@ -1138,7 +1155,6 @@ fn generate_completions(input: &str, app: &App) -> (Vec<CompletionCandidate>, Co
             }
 
             // 如果有部分输入的值，进行过滤
-            let (_, param_str) = extract_module_and_param_str(app, input, _cmd_type);
             let current_value_part = get_current_param_value_part(&param_str, module_param_name);
             if !current_value_part.is_empty() {
                 candidates = filter_by_prefix(&candidates, &current_value_part);
@@ -1552,6 +1568,40 @@ mod tests {
         assert!(candidates.iter().any(|candidate| {
             candidate.content == "sin" && candidate.candidate_type == CandidateType::Function
         }));
+    }
+
+    #[test]
+    fn test_value_completion_always_includes_boolean_literals() {
+        let app = App::new();
+        let (candidates, analysis) = generate_completions("insert cube center=", &app);
+
+        assert!(matches!(
+            analysis.context,
+            CompletionContext::ModuleParamValue { .. }
+        ));
+        assert!(candidates
+            .iter()
+            .any(|candidate| candidate.content == "true"));
+        assert!(candidates
+            .iter()
+            .any(|candidate| candidate.content == "false"));
+    }
+
+    #[test]
+    fn test_value_completion_hides_whole_default_inside_list() {
+        let app = App::new();
+        let (candidates, analysis) = generate_completions("insert translate v=[4, ", &app);
+
+        assert!(matches!(
+            analysis.context,
+            CompletionContext::ModuleParamValue { .. }
+        ));
+        assert!(!candidates
+            .iter()
+            .any(|candidate| candidate.content == "[0, 0, 0]"));
+        assert!(!candidates
+            .iter()
+            .any(|candidate| candidate.content == "[0,0,0]"));
     }
 
     #[test]
