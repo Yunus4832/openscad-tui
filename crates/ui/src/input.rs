@@ -1175,6 +1175,32 @@ fn preview_completion(app: &mut App) {
     app.input_buffer.replace_range(start, end, candidate);
 }
 
+fn whitespace_token_range(input: &str, token_index: usize) -> Option<(usize, usize)> {
+    let mut token_count = 0;
+    let mut token_start = None;
+
+    for (index, character) in input.char_indices() {
+        if character.is_whitespace() {
+            if let Some(start) = token_start.take() {
+                if token_count == token_index {
+                    return Some((start, index));
+                }
+                token_count += 1;
+            }
+        } else if token_start.is_none() {
+            token_start = Some(index);
+        }
+    }
+
+    token_start.and_then(|start| {
+        if token_count == token_index {
+            Some((start, input.len()))
+        } else {
+            None
+        }
+    })
+}
+
 /// 获取输入缓冲区中需要替换的范围（起始索引和结束索引）
 fn get_replacement_range(input: &str, context: &CompletionContext, app: &App) -> (usize, usize) {
     match context {
@@ -1194,14 +1220,7 @@ fn get_replacement_range(input: &str, context: &CompletionContext, app: &App) ->
         }
         CompletionContext::Module => {
             // 模块补全：替换第二个单词（模块名部分）
-            let parts: Vec<&str> = input.split_whitespace().collect();
-            if parts.len() < 2 {
-                (input.len(), input.len())
-            } else {
-                let module_part = parts[1];
-                let module_start = input.find(module_part).unwrap_or(input.len());
-                (module_start, module_start + module_part.len())
-            }
+            whitespace_token_range(input, 1).unwrap_or((input.len(), input.len()))
         }
         CompletionContext::ModuleParam {
             cmd_type: _cmd_type,
@@ -1521,6 +1540,28 @@ mod tests {
         let (start, end) = get_replacement_range(input, &context, &app);
 
         assert_eq!(&input[start..end], "si");
+    }
+
+    #[test]
+    fn test_module_replacement_range_uses_second_token_position() {
+        let app = App::new();
+        let input = "insert s";
+        let context = analyze_input_context(input, &app);
+
+        assert_eq!(context, CompletionContext::Module);
+        assert_eq!(get_replacement_range(input, &context, &app), (7, 8));
+    }
+
+    #[test]
+    fn test_tab_completion_does_not_replace_matching_text_in_command_name() {
+        let mut app = App::new();
+        app.input_mode = InputMode::Command;
+        app.input_buffer.set_content("insert s");
+
+        handle_tab_completion(&mut app);
+
+        assert!(app.input_buffer.content().starts_with("insert "));
+        assert_ne!(app.input_buffer.content(), "insert s");
     }
 
     #[test]
