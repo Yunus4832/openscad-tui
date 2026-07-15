@@ -465,12 +465,13 @@ fn execute_command(app: &mut App, cmd: &str) {
 /// Handle Tab key for autocompletion
 fn handle_tab_completion(app: &mut App) {
     if !app.completion_active {
-        let (candidates, context) = generate_completions(app.input_buffer.content(), app);
+        let (candidates, analysis) = generate_completions(app.input_buffer.content(), app);
         if candidates.is_empty() {
             return;
         }
 
-        app.completion_context = context;
+        app.completion_context = analysis.context;
+        app.completion_replacement_range = analysis.replacement_range;
         app.completion_index = 0;
         app.completion_active = true;
         app.completion_candidates = candidates;
@@ -725,6 +726,21 @@ fn analyze_input_context(input: &str, app: &App) -> CompletionContext {
         }
     } else {
         CompletionContext::Command
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct CompletionAnalysis {
+    context: CompletionContext,
+    replacement_range: (usize, usize),
+}
+
+fn analyze_completion(input: &str, app: &App) -> CompletionAnalysis {
+    let context = analyze_input_context(input, app);
+    let replacement_range = get_replacement_range(input, &context, app);
+    CompletionAnalysis {
+        context,
+        replacement_range,
     }
 }
 
@@ -1021,8 +1037,9 @@ fn extract_module_and_param_str(
 /// 生成候选列表
 /// 对于命令，从命令列表读取，对于模块，从模块列表读取，对于模块参数名解析模块获取，对于模块参数值，从模块参数默认值和全局变量
 /// AstRoot.global_variables 中获取
-fn generate_completions(input: &str, app: &App) -> (Vec<CompletionCandidate>, CompletionContext) {
-    let context = analyze_input_context(input, app);
+fn generate_completions(input: &str, app: &App) -> (Vec<CompletionCandidate>, CompletionAnalysis) {
+    let analysis = analyze_completion(input, app);
+    let context = &analysis.context;
 
     let candidates = match &context {
         CompletionContext::Command => {
@@ -1142,7 +1159,7 @@ fn generate_completions(input: &str, app: &App) -> (Vec<CompletionCandidate>, Co
         }
     };
 
-    (candidates, context)
+    (candidates, analysis)
 }
 
 /// 预览选中的候选项, 替换缓冲区中的补全内容
@@ -1152,8 +1169,7 @@ fn preview_completion(app: &mut App) {
     }
 
     // 替换输入缓冲区中的范围
-    let (start, end) =
-        get_replacement_range(app.input_buffer.content(), &app.completion_context, app);
+    let (start, end) = app.completion_replacement_range;
     let candidate = match &app.completion_context {
         CompletionContext::File {
             current_path: _,
@@ -1162,17 +1178,24 @@ fn preview_completion(app: &mut App) {
             ends_with_separator: _,
         } => {
             if app.input_buffer.content().trim().ends_with("~") {
-                let candidate_clone = &app.completion_candidates[app.completion_index].clone();
-                &format!("{}{}", "~/", candidate_clone.content)
+                format!(
+                    "~/{}",
+                    app.completion_candidates[app.completion_index].content
+                )
             } else {
-                &app.completion_candidates[app.completion_index].content
+                app.completion_candidates[app.completion_index]
+                    .content
+                    .clone()
             }
         }
-        _ => &app.completion_candidates[app.completion_index].content,
+        _ => app.completion_candidates[app.completion_index]
+            .content
+            .clone(),
     };
 
     // Use InputBuffer's replace_range method
-    app.input_buffer.replace_range(start, end, candidate);
+    app.input_buffer.replace_range(start, end, &candidate);
+    app.completion_replacement_range = (start, start + candidate.len());
 }
 
 fn whitespace_token_range(input: &str, token_index: usize) -> Option<(usize, usize)> {
@@ -1330,8 +1353,7 @@ fn apply_completion(app: &mut App) {
     }
 
     let candidate = &app.completion_candidates[app.completion_index];
-    let (start, end) =
-        get_replacement_range(app.input_buffer.content(), &app.completion_context, app);
+    let (start, end) = app.completion_replacement_range;
 
     // 替换输入缓冲区中的范围
     app.input_buffer
@@ -1518,10 +1540,10 @@ mod tests {
     #[test]
     fn test_generate_completions_filters_function_inside_list() {
         let app = App::new();
-        let (candidates, context) = generate_completions("insert cube size=[1, si", &app);
+        let (candidates, analysis) = generate_completions("insert cube size=[1, si", &app);
 
         assert!(matches!(
-            context,
+            analysis.context,
             CompletionContext::ModuleParamValue {
                 module_param_name,
                 ..
@@ -1536,8 +1558,8 @@ mod tests {
     fn test_replacement_range_only_covers_nested_fragment() {
         let app = App::new();
         let input = "insert cube size=[1, si";
-        let context = analyze_input_context(input, &app);
-        let (start, end) = get_replacement_range(input, &context, &app);
+        let analysis = analyze_completion(input, &app);
+        let (start, end) = analysis.replacement_range;
 
         assert_eq!(&input[start..end], "si");
     }
@@ -1546,10 +1568,10 @@ mod tests {
     fn test_module_replacement_range_uses_second_token_position() {
         let app = App::new();
         let input = "insert s";
-        let context = analyze_input_context(input, &app);
+        let analysis = analyze_completion(input, &app);
 
-        assert_eq!(context, CompletionContext::Module);
-        assert_eq!(get_replacement_range(input, &context, &app), (7, 8));
+        assert_eq!(analysis.context, CompletionContext::Module);
+        assert_eq!(analysis.replacement_range, (7, 8));
     }
 
     #[test]
@@ -1562,6 +1584,23 @@ mod tests {
 
         assert!(app.input_buffer.content().starts_with("insert "));
         assert_ne!(app.input_buffer.content(), "insert s");
+    }
+
+    #[test]
+    fn test_tab_completion_cycles_within_the_analyzed_replacement_range() {
+        let mut app = App::new();
+        app.input_mode = InputMode::Command;
+        app.input_buffer.set_content("insert s");
+
+        handle_tab_completion(&mut app);
+        assert!(app.completion_candidates.len() > 1);
+        let first = app.completion_candidates[0].content.clone();
+        assert_eq!(app.input_buffer.content(), format!("insert {}", first));
+
+        handle_tab_completion(&mut app);
+        let second = app.completion_candidates[1].content.clone();
+        assert_eq!(app.input_buffer.content(), format!("insert {}", second));
+        assert_eq!(app.completion_replacement_range, (7, 7 + second.len()));
     }
 
     #[test]
@@ -1624,8 +1663,8 @@ mod tests {
                 Vec::new(),
             ));
 
-        let (candidates, context) = generate_completions("remove cube_", &app);
-        assert_eq!(context, CompletionContext::Command);
+        let (candidates, analysis) = generate_completions("remove cube_", &app);
+        assert_eq!(analysis.context, CompletionContext::Command);
         assert!(candidates.is_empty());
     }
 
@@ -1640,8 +1679,8 @@ mod tests {
                 Vec::new(),
             ));
 
-        let (candidates, context) = generate_completions("replace sp", &app);
-        assert_eq!(context, CompletionContext::Module);
+        let (candidates, analysis) = generate_completions("replace sp", &app);
+        assert_eq!(analysis.context, CompletionContext::Module);
         assert!(candidates
             .iter()
             .any(|candidate| candidate.content == "sphere"));
@@ -1649,10 +1688,10 @@ mod tests {
             .iter()
             .any(|candidate| candidate.content == "cube_123"));
 
-        let (parameter_candidates, parameter_context) =
+        let (parameter_candidates, parameter_analysis) =
             generate_completions("replace sphere ", &app);
         assert_eq!(
-            parameter_context,
+            parameter_analysis.context,
             CompletionContext::ModuleParam {
                 cmd_type: CommandType::Replace,
                 module_name: "sphere".to_string(),

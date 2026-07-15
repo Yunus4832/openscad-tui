@@ -312,6 +312,7 @@ pub struct App {
     pub completion_candidates: Vec<CompletionCandidate>,
     pub completion_index: usize,
     pub completion_context: CompletionContext,
+    pub completion_replacement_range: (usize, usize),
     pub completion_active: bool,
 
     // Command history
@@ -357,6 +358,7 @@ impl App {
             completion_candidates: Vec::new(),
             completion_index: 0,
             completion_context: CompletionContext::Command,
+            completion_replacement_range: (0, 0),
             completion_active: false,
             command_history: Vec::new(),
             history_index: None,
