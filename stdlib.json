@@ -12,7 +12,7 @@
         {
           "name": "size",
           "param_type": "list",
-          "default": "[1, 1, 1]",
+          "default": "1",
           "description": "Cube dimensions [x, y, z] or single value"
         },
         {
@@ -74,7 +74,7 @@
         {
           "name": "size",
           "param_type": "list",
-          "default": "[1, 1]",
+          "default": "1",
           "description": "Square dimensions [x, y] or single value"
         },
         {

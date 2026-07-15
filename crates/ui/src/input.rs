@@ -531,13 +531,16 @@ fn handle_tab_completion(app: &mut App) {
 fn parse_parameter_names(param_str: &str) -> Vec<String> {
     let mut names = Vec::new();
     let mut current = String::new();
-    let mut in_brackets = 0;
+    let mut in_list = 0;
+    let mut in_function = 0;
 
     for ch in param_str.chars() {
         match ch {
-            '[' => in_brackets += 1,
-            ']' if in_brackets > 0 => in_brackets -= 1,
-            ',' if in_brackets == 0 => {
+            '[' => in_list += 1,
+            ']' if in_list > 0 => in_list -= 1,
+            '(' => in_function += 1,
+            ')' if in_function > 0 => in_function -= 1,
+            ',' if in_list == 0 && in_function == 0 => {
                 // End of a parameter
                 if let Some(equals_pos) = current.find('=') {
                     let name = current[..equals_pos].trim().to_string();
@@ -581,7 +584,6 @@ fn analyze_input_context(input: &str, app: &App) -> CompletionContext {
             return CompletionContext::ModuleParam {
                 cmd_type: CommandType::Module,
                 module_name: String::new(),
-                param_index: 0,
             };
         }
     }
@@ -701,7 +703,6 @@ fn analyze_input_context(input: &str, app: &App) -> CompletionContext {
                             CompletionContext::ModuleParam {
                                 cmd_type: CommandType::Module,
                                 module_name: module_part.to_string(),
-                                param_index: 0,
                             }
                         } else {
                             CompletionContext::Module
@@ -722,7 +723,6 @@ fn analyze_input_context(input: &str, app: &App) -> CompletionContext {
                         CompletionContext::ModuleParam {
                             cmd_type: CommandType::Param,
                             module_name: command.to_string(),
-                            param_index: 0,
                         }
                     } else {
                         // 只输入了命令，还在命令补全阶段
@@ -758,6 +758,7 @@ fn analyze_param_context(
     // 查找最后一个逗号、等号的位置
     let last_comma = param_str.rfind(',');
     let last_equal = param_str.rfind('=');
+    let (in_function, in_list, function_fisrt) = analyze_in_function_or_list(param_str);
 
     // 确定当前是在参数名、等号后，还是值之后
     match (last_comma, last_equal) {
@@ -766,17 +767,14 @@ fn analyze_param_context(
             CompletionContext::ModuleParam {
                 cmd_type,
                 module_name: module_name.to_string(),
-                param_index: 0,
             }
         }
-        (Some(comma_pos), None) => {
+        (Some(_comma_pos), None) => {
             // 有逗号但没有等号（在逗号之后）：正在输入下一个参数名
             // 计算已经输入了多少个参数（逗号数量）
-            let param_count = param_str[..=comma_pos].matches(',').count();
             CompletionContext::ModuleParam {
                 cmd_type,
                 module_name: module_name.to_string(),
-                param_index: param_count,
             }
         }
         (None, Some(equal_pos)) => {
@@ -787,17 +785,13 @@ fn analyze_param_context(
                 cmd_type,
                 module_name: module_name.to_string(),
                 module_param_name: param_name,
-                value_index: 0,
             }
         }
         (Some(comma_pos), Some(equal_pos)) => {
             if comma_pos > equal_pos {
-                // 最后一个逗号在等号之后：参数值已输入完成，等待下一个参数
-                let param_count = param_str[..=comma_pos].matches(',').count();
                 CompletionContext::ModuleParam {
                     cmd_type,
                     module_name: module_name.to_string(),
-                    param_index: param_count,
                 }
             } else {
                 // 最后一个等号在逗号之后：正在输入当前参数的值
@@ -809,19 +803,42 @@ fn analyze_param_context(
                         cmd_type,
                         module_name: module_name.to_string(),
                         module_param_name: param_name,
-                        value_index: 0,
                     }
                 } else {
                     // 应该不会发生这种情况
                     CompletionContext::ModuleParam {
                         cmd_type,
                         module_name: module_name.to_string(),
-                        param_index: param_str.matches(',').count(),
                     }
                 }
             }
         }
     }
+}
+
+/// 判断当前输入在列表中，或者在函数中
+fn analyze_in_function_or_list(input: &str) -> (bool, bool, bool) {
+    let mut function_count = 0;
+    let mut list_count = 0;
+
+    let last_function_index = input.rfind('[');
+    let last_list_index = input.rfind('(');
+
+    for c in input.chars() {
+        match c {
+            '(' => function_count += 1,
+            ')' if function_count > 0 => function_count -= 1,
+            '[' => list_count += 1,
+            ']' if list_count > 0 => list_count -= 1,
+            _ => {}
+        }
+    }
+
+    (
+        function_count == 0,
+        list_count == 0,
+        last_function_index > last_list_index,
+    )
 }
 
 /// 规范化路径，处理相对路径符号如 ./ 和 ../
@@ -1008,17 +1025,9 @@ fn generate_completions(input: &str, app: &App) -> (Vec<CompletionCandidate>, Co
     let candidates = match &context {
         CompletionContext::Command => {
             // 命令补全：获取所有命令，过滤以匹配输入前缀
-            let sep = " ".to_string();
             let all_commands: Vec<CompletionCandidate> = get_command_list(app)
                 .iter()
-                .map(|c| {
-                    CompletionCandidate::new(
-                        c.clone(),
-                        CandidateType::Command {
-                            separator: sep.clone(),
-                        },
-                    )
-                })
+                .map(|c| CompletionCandidate::new(c.clone(), CandidateType::Command))
                 .collect();
 
             let prefix = input.trim();
@@ -1026,17 +1035,9 @@ fn generate_completions(input: &str, app: &App) -> (Vec<CompletionCandidate>, Co
         }
         CompletionContext::Module => {
             // 模块补全：获取所有模块，过滤以匹配输入中的模块部分
-            let sep = " ".to_string();
             let all_modules: Vec<CompletionCandidate> = get_module_list(app)
                 .iter()
-                .map(|c| {
-                    CompletionCandidate::new(
-                        c.clone(),
-                        CandidateType::Module {
-                            separator: sep.clone(),
-                        },
-                    )
-                })
+                .map(|c| CompletionCandidate::new(c.clone(), CandidateType::Module))
                 .collect();
             // 提取可能已输入的部分模块名
             let parts: Vec<&str> = input.split_whitespace().collect();
@@ -1050,7 +1051,6 @@ fn generate_completions(input: &str, app: &App) -> (Vec<CompletionCandidate>, Co
         CompletionContext::ModuleParam {
             cmd_type: _cmd_type,
             module_name,
-            param_index: _param_index,
         } => {
             // 模块参数补全：获取模块的所有参数，过滤掉已输入的参数
             if let Some(module_def) = app.library.get_module(module_name) {
@@ -1059,20 +1059,12 @@ fn generate_completions(input: &str, app: &App) -> (Vec<CompletionCandidate>, Co
                 let entered_params = parse_parameter_names(&param_str);
 
                 // 过滤掉已输入的参数
-                let sep = "=".to_string();
                 let mut candidates: Vec<CompletionCandidate> = module_def
                     .parameters
                     .iter()
                     .map(|p| p.name.clone())
                     .filter(|name| !entered_params.contains(name))
-                    .map(|c| {
-                        CompletionCandidate::new(
-                            c.clone(),
-                            CandidateType::ModuleParam {
-                                separator: sep.clone(),
-                            },
-                        )
-                    })
+                    .map(|c| CompletionCandidate::new(c.clone(), CandidateType::ModuleParam))
                     .collect();
 
                 // 如果有部分输入的参数名，进行过滤
@@ -1090,11 +1082,9 @@ fn generate_completions(input: &str, app: &App) -> (Vec<CompletionCandidate>, Co
             cmd_type: _cmd_type,
             module_name,
             module_param_name,
-            value_index: _value_index,
         } => {
             // 模块参数值补全：获取参数的默认值（如果存在）和全局变量
             let mut candidates: Vec<CompletionCandidate> = Vec::new();
-            let sep = ",".to_string();
 
             // 首先，尝试获取参数的默认值
             if let Some(module_def) = app.library.get_module(module_name) {
@@ -1106,9 +1096,7 @@ fn generate_completions(input: &str, app: &App) -> (Vec<CompletionCandidate>, Co
                     if let Some(default_val) = &param_def.default {
                         candidates.push(CompletionCandidate {
                             content: default_val.clone(),
-                            candidate_type: CandidateType::Value {
-                                separator: sep.clone(),
-                            },
+                            candidate_type: CandidateType::Value,
                         });
                     }
                 }
@@ -1118,10 +1106,16 @@ fn generate_completions(input: &str, app: &App) -> (Vec<CompletionCandidate>, Co
             for var in &app.ast.global_variables {
                 candidates.push(CompletionCandidate {
                     content: var.name.clone(),
-                    candidate_type: CandidateType::GlobalVar {
-                        separator: sep.clone(),
-                    },
+                    candidate_type: CandidateType::GlobalVar,
                 });
+            }
+
+            // 添加函数
+            for func in &app.library.get_all_functions() {
+                candidates.push(CompletionCandidate {
+                    content: func.name.clone(),
+                    candidate_type: CandidateType::Function,
+                })
             }
 
             // 如果有部分输入的值，进行过滤
@@ -1138,20 +1132,16 @@ fn generate_completions(input: &str, app: &App) -> (Vec<CompletionCandidate>, Co
             ..
         } => {
             // 文件补全 - 使用基础目录和部分名称
-            let sep = "/".to_string();
             let candidates: Vec<CompletionCandidate> = get_file_completions(base_dir, partial_name)
                 .iter()
-                .map(|c| {
-                    CompletionCandidate::new(
-                        c.clone(),
-                        CandidateType::Path {
-                            separator: sep.clone(),
-                        },
-                    )
-                })
+                .map(|c| CompletionCandidate::new(c.clone(), CandidateType::Path))
                 .collect();
             candidates
         }
+        CompletionContext::FunctionParamValue {
+            function_name,
+        } => todo!(),
+        CompletionContext::ListValue => todo!(),
     };
 
     (candidates, context)
@@ -1220,7 +1210,6 @@ fn get_replacement_range(input: &str, context: &CompletionContext, app: &App) ->
         CompletionContext::ModuleParam {
             cmd_type: _cmd_type,
             module_name: _module_name,
-            param_index: _param_index,
         } => {
             // 模块参数补全：替换当前正在输入的参数名部分
             let (_, param_str) = extract_module_and_param_str(app, input, _cmd_type);
@@ -1256,7 +1245,6 @@ fn get_replacement_range(input: &str, context: &CompletionContext, app: &App) ->
             cmd_type: _cmd_type,
             module_name: _module_name,
             module_param_name,
-            value_index: _value_index,
         } => {
             // 模块参数值补全：替换当前参数的值部分
             // 使用 extract_module_and_param_str 获取参数字符串
@@ -1314,6 +1302,10 @@ fn get_replacement_range(input: &str, context: &CompletionContext, app: &App) ->
                 (path_start, input.len()) // 替换从路径开始到末尾的所有内容
             }
         }
+        CompletionContext::FunctionParamValue {
+            function_name,
+        } => todo!(),
+        CompletionContext::ListValue => todo!(),
     }
 }
 
@@ -1331,16 +1323,6 @@ fn apply_completion(app: &mut App) {
     // 替换输入缓冲区中的范围
     app.input_buffer
         .replace_range(start, end, &candidate.content);
-    let separator = match &candidate.candidate_type {
-        CandidateType::Module { separator } => separator,
-        CandidateType::ModuleParam { separator } => separator,
-        CandidateType::Function { separator } => separator,
-        CandidateType::FunctionParam { separator } => separator,
-        CandidateType::Path { separator } => separator,
-        CandidateType::GlobalVar { separator } => separator,
-        CandidateType::Value { separator } => separator,
-        CandidateType::Command { separator } => separator,
-    };
 
     // 根据上下文追加分隔符
     match &app.completion_context {
@@ -1348,13 +1330,15 @@ fn apply_completion(app: &mut App) {
             cmd_type: _cmd_type,
             module_name,
             module_param_name: _,
-            value_index: _value_index,
         } => {
             // 检查当前参数是否是最后一个参数, 不是最后一个参数，追加逗号
             let (_, param_str) =
                 extract_module_and_param_str(app, app.input_buffer.content(), _cmd_type);
-            if !is_last_parameter(app, module_name, &param_str) {
-                app.input_buffer.insert_str(separator);
+            if !is_last_parameter(app, module_name, &param_str)
+                || candidate.candidate_type == CandidateType::Function
+            {
+                app.input_buffer
+                    .insert_str(candidate.candidate_type.separator());
             }
         }
         CompletionContext::File {
@@ -1368,7 +1352,8 @@ fn apply_completion(app: &mut App) {
             let full_path = Path::new(&_base_dir).join(&candidate.content);
             if let Ok(metadata) = full_path.metadata() {
                 if metadata.is_dir() {
-                    app.input_buffer.insert_str(separator);
+                    app.input_buffer
+                        .insert_str(candidate.candidate_type.separator());
                 } else {
                     // 对于文件，追加空格
                     app.input_buffer.insert_str(" ");
@@ -1379,7 +1364,8 @@ fn apply_completion(app: &mut App) {
             }
         }
         _ => {
-            app.input_buffer.insert_str(separator);
+            app.input_buffer
+                .insert_str(candidate.candidate_type.separator());
         }
     }
 

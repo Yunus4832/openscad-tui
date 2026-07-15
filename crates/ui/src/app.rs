@@ -180,30 +180,39 @@ impl CompletionCandidate {
 /// 补全候选项类型
 #[derive(Debug, Clone, PartialEq)]
 pub enum CandidateType {
-    Module { separator: String },
-    ModuleParam { separator: String },
-    #[allow(dead_code)]
-    Function { separator: String },
-    #[allow(dead_code)]
-    FunctionParam { separator: String },
-    Path { separator: String },
-    GlobalVar { separator: String },
-    Value { separator: String },
-    Command { separator: String },
+    Module,
+    ModuleParam,
+    Function,
+    Path,
+    GlobalVar,
+    Value,
+    Command,
 }
 
 impl CandidateType {
     /// 返回候选项符号
     pub fn flag(&self) -> &'static str {
         match self {
-            Self::Module { .. } => "M",
-            Self::ModuleParam { .. } => "MP",
-            Self::Function { .. } => "F",
-            Self::FunctionParam { .. } => "FP",
-            Self::Path { .. } => "PA",
-            Self::GlobalVar { .. } => "G",
-            Self::Value { .. } => "V",
-            Self::Command { .. } => "C",
+            Self::Module => "M",
+            Self::ModuleParam => "MP",
+            Self::Function => "F",
+            Self::Path => "PA",
+            Self::GlobalVar => "G",
+            Self::Value => "V",
+            Self::Command => "C",
+        }
+    }
+
+    /// 返回候选项分隔符
+    pub fn separator(&self) -> &'static str {
+        match self {
+            Self::Module => " ",
+            Self::ModuleParam => "=",
+            Self::Function => "(",
+            Self::Path => "/",
+            Self::GlobalVar => ",",
+            Self::Value => ",",
+            Self::Command => " ",
         }
     }
 }
@@ -245,14 +254,12 @@ pub enum CompletionContext {
     ModuleParam {
         cmd_type: CommandType,
         module_name: String,
-        param_index: usize,
     },
     /// Module parameter value completion (after module parameter name)
     ModuleParamValue {
         cmd_type: CommandType,
         module_name: String,
         module_param_name: String,
-        value_index: usize,
     },
     /// File name completion (for write/edit/library commands)
     File {
@@ -265,6 +272,14 @@ pub enum CompletionContext {
         /// Whether the path ends with a separator (indicating directory)
         ends_with_separator: bool,
     },
+    /// 函数参数值上下文
+    #[allow(dead_code)]
+    FunctionParamValue {
+        function_name: String,
+    },
+    /// 列表上下文
+    #[allow(dead_code)]
+    ListValue,
 }
 
 pub struct App {
