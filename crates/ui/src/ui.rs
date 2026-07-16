@@ -139,16 +139,8 @@ fn build_ast_tree_items(
             .global_variables
             .iter()
             .map(|var| {
-                let id = format!(
-                    "__var_{}_{}",
-                    if var.is_special { "s" } else { "n" },
-                    var.name
-                );
-                let display = if var.is_special {
-                    format!("${} = {}", var.name, var.value.to_scad())
-                } else {
-                    format!("{} = {}", var.name, var.value.to_scad())
-                };
+                let id = format!("__var_{}", var.name);
+                let display = format!("{} = {}", var.name, var.value.to_scad());
                 TreeItem::new(id, display, vec![]).expect("Failed to create TreeItem")
             })
             .collect();
@@ -278,7 +270,7 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
     match app.input_mode {
         InputMode::Normal => {
             title = " Normal Mode ".to_string();
-            prompt = "i=insert  y/p=yank/paste  x=remove  c=replace  d=delete  v=select  j/k=nav  h/l=fold  u/ctrl-r=undo/redo  :=cmd  ?=help  q=quit".to_string();
+            prompt = "i=insert  a=arguments  y/p=yank/paste  x=remove  c=replace  d=delete  v=select  j/k=nav  h/l=fold  u/ctrl-r=undo/redo  :=cmd  ?=help  q=quit".to_string();
             style_fg = Color::Yellow;
         }
         InputMode::Command => {

@@ -4,11 +4,13 @@
 //! Command mode: Free text input for complex commands with parameter input
 
 use crate::app::{
-    App, CandidateType, CompletionCandidate, CompletionContext, InputMode, PendingModuleAction,
+    App, CandidateType, CompletionCandidate, CompletionContext, ExpressionCompletionKind,
+    InputMode, PendingModuleAction,
 };
 use crate::command_registry::CommandType;
 use crate::commands;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use openscad_core::ModuleNode;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
@@ -28,6 +30,12 @@ fn handle_normal_input(key: KeyEvent, app: &mut App) {
         KeyCode::Char('i') => {
             app.input_mode = InputMode::Command;
             app.input_buffer.set_content("insert ");
+        }
+
+        // a - edit arguments on selected nodes or the current node
+        KeyCode::Char('a') => {
+            app.input_mode = InputMode::Command;
+            app.input_buffer.set_content("set ");
         }
 
         // t - translate
@@ -702,10 +710,21 @@ fn analyze_input_context(input: &str, app: &App) -> CompletionContext {
                 // 无参数命令：无需补全
                 CompletionContext::Command
             }
-            CommandType::Definition => {
-                // 定义命令：无需补全
-                CompletionContext::Command
-            }
+            CommandType::FunctionDefinition => input
+                .find('=')
+                .map(|_| CompletionContext::ExpressionValue {
+                    kind: ExpressionCompletionKind::FunctionBody,
+                    local_identifiers: function_definition_parameters(input),
+                })
+                .unwrap_or(CompletionContext::Command),
+            CommandType::ModuleDefinition => CompletionContext::Command,
+            CommandType::GlobalDefinition => input
+                .find('=')
+                .map(|_| CompletionContext::ExpressionValue {
+                    kind: ExpressionCompletionKind::GlobalValue,
+                    local_identifiers: Vec::new(),
+                })
+                .unwrap_or(CompletionContext::Command),
             CommandType::Replace => {
                 if parts.len() == 1 {
                     if input.ends_with(' ') {
@@ -726,10 +745,46 @@ fn analyze_input_context(input: &str, app: &App) -> CompletionContext {
                     analyze_param_context(&parts[2..].join(" "), parts[1], CommandType::Replace)
                 }
             }
+            CommandType::NodeParam => {
+                if parts.len() == 1 {
+                    if input.ends_with(' ') {
+                        CompletionContext::NodeParam
+                    } else {
+                        CompletionContext::Command
+                    }
+                } else {
+                    let argument_source = input
+                        .find(char::is_whitespace)
+                        .map(|index| input[index..].trim_start())
+                        .unwrap_or("");
+                    if let Some((parameter_name, _)) = argument_source.split_once('=') {
+                        CompletionContext::NodeParamValue {
+                            parameter_name: parameter_name.trim().to_string(),
+                        }
+                    } else {
+                        CompletionContext::NodeParam
+                    }
+                }
+            }
         }
     } else {
         CompletionContext::Command
     }
+}
+
+fn function_definition_parameters(input: &str) -> Vec<String> {
+    let Some(open_parenthesis) = input.find('(') else {
+        return Vec::new();
+    };
+    let Some(close_offset) = input[open_parenthesis + 1..].find(')') else {
+        return Vec::new();
+    };
+    input[open_parenthesis + 1..open_parenthesis + 1 + close_offset]
+        .split(',')
+        .map(str::trim)
+        .filter(|parameter| !parameter.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -933,21 +988,18 @@ fn get_current_param_value_part(param_str: &str, param_name: &str) -> String {
     }
 }
 
-/// 返回光标所在值表达式中当前标识符片段的字节范围。
-/// `sin(foo, sq`、`[1, sq` 等输入只替换最后的 `sq`，保留外层表达式。
+/// 返回光标所在值表达式中最后一个标识符片段的字节范围。
+/// 从表达式末尾向前扫描，因此同时支持函数、列表、索引和运算符之后的补全。
 fn value_fragment_range(input: &str, value_start: usize, value_end: usize) -> (usize, usize) {
     let value = &input[value_start..value_end];
-    let token_start = value
-        .char_indices()
-        .filter(|(_, ch)| matches!(ch, '(' | '[' | ','))
-        .map(|(index, ch)| index + ch.len_utf8())
-        .next_back()
-        .unwrap_or(0);
-    let leading_whitespace = value[token_start..]
-        .len()
-        .saturating_sub(value[token_start..].trim_start().len());
-    let fragment_start = value_start + token_start + leading_whitespace;
     let fragment_end = value_start + value.trim_end_matches(char::is_whitespace).len();
+    let fragment = &input[value_start..fragment_end];
+    let fragment_start = fragment
+        .char_indices()
+        .rev()
+        .find(|(_, character)| !character.is_alphanumeric() && !matches!(character, '_' | '$'))
+        .map(|(index, character)| value_start + index + character.len_utf8())
+        .unwrap_or(value_start);
     (fragment_start.min(fragment_end), fragment_end)
 }
 
@@ -1037,6 +1089,142 @@ fn extract_module_and_param_str(
     }
 }
 
+fn find_node_in_slice<'a>(nodes: &'a [ModuleNode], node_id: &str) -> Option<&'a ModuleNode> {
+    nodes.iter().find_map(|node| {
+        if node.id == node_id {
+            Some(node)
+        } else {
+            find_node_in_slice(&node.children, node_id)
+        }
+    })
+}
+
+fn completion_target_nodes(app: &App) -> Vec<&ModuleNode> {
+    let target_ids = if app.selected_nodes.is_empty() {
+        app.tree_state
+            .borrow()
+            .selected()
+            .last()
+            .cloned()
+            .into_iter()
+            .collect()
+    } else {
+        app.selected_nodes.clone()
+    };
+    target_ids
+        .iter()
+        .filter_map(|node_id| {
+            app.ast.find_node_by_id(node_id).or_else(|| {
+                app.ast
+                    .module_defines
+                    .iter()
+                    .find_map(|definition| find_node_in_slice(&definition.body, node_id))
+            })
+        })
+        .collect()
+}
+
+fn node_parameter_names(app: &App) -> Vec<String> {
+    let targets = completion_target_nodes(app);
+    let Some(first) = targets.first() else {
+        return Vec::new();
+    };
+    let Some(first_definition) = app.library.get_module(&first.name) else {
+        return Vec::new();
+    };
+    first_definition
+        .parameters
+        .iter()
+        .map(|parameter| parameter.name.clone())
+        .filter(|name| {
+            targets.iter().skip(1).all(|node| {
+                app.library
+                    .get_module(&node.name)
+                    .is_some_and(|definition| {
+                        definition
+                            .parameters
+                            .iter()
+                            .any(|parameter| parameter.name == *name)
+                    })
+            })
+        })
+        .collect()
+}
+
+fn module_scope_parameter_names(app: &App) -> Vec<String> {
+    let Some(target) = completion_target_nodes(app).first().copied() else {
+        return Vec::new();
+    };
+    let Some(module_name) = app.find_module_definition_for_node(&target.id) else {
+        return Vec::new();
+    };
+    app.ast
+        .module_defines
+        .iter()
+        .find(|definition| definition.name == module_name)
+        .map(|definition| {
+            definition
+                .parameters
+                .iter()
+                .map(|parameter| parameter.name.clone())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn expression_candidates(
+    app: &App,
+    local_identifiers: &[String],
+    default_value: Option<String>,
+    include_functions: bool,
+) -> Vec<CompletionCandidate> {
+    let mut candidates = Vec::new();
+    if let Some(default_value) = default_value {
+        candidates.push(CompletionCandidate::new(
+            default_value,
+            CandidateType::Value,
+        ));
+    }
+    for identifier in local_identifiers {
+        candidates.push(CompletionCandidate::new(
+            identifier.clone(),
+            CandidateType::GlobalVar,
+        ));
+    }
+    for literal in ["true", "false", "undef"] {
+        if !candidates
+            .iter()
+            .any(|candidate| candidate.content == literal)
+        {
+            candidates.push(CompletionCandidate::new(
+                literal.to_string(),
+                CandidateType::Value,
+            ));
+        }
+    }
+    for variable in &app.ast.global_variables {
+        let completion_name = variable.name.clone();
+        if !candidates
+            .iter()
+            .any(|candidate| candidate.content == completion_name)
+        {
+            candidates.push(CompletionCandidate::new(
+                completion_name,
+                CandidateType::GlobalVar,
+            ));
+        }
+    }
+    if include_functions {
+        for function in app.library.get_all_functions() {
+            candidates.push(CompletionCandidate::new(
+                function.name,
+                CandidateType::Function,
+            ));
+        }
+    }
+    candidates
+}
+
 /// 生成候选列表
 /// 对于命令，从命令列表读取，对于模块，从模块列表读取，对于模块参数名解析模块获取，对于模块参数值，从模块参数默认值和全局变量
 /// AstRoot.global_variables 中获取
@@ -1105,57 +1293,21 @@ fn generate_completions(input: &str, app: &App) -> (Vec<CompletionCandidate>, Co
             module_name,
             module_param_name,
         } => {
-            // 模块参数值补全：获取参数的默认值（如果存在）和全局变量
-            let mut candidates: Vec<CompletionCandidate> = Vec::new();
             let (_, param_str) = extract_module_and_param_str(app, input, _cmd_type);
             let inside_container = value_has_open_container(&param_str, module_param_name);
-
-            // 首先，尝试获取参数的默认值
-            if let Some(module_def) = app.library.get_module(module_name) {
-                if let Some(param_def) = module_def
+            let default_value = app.library.get_module(module_name).and_then(|module_def| {
+                module_def
                     .parameters
                     .iter()
                     .find(|p| p.name == *module_param_name)
-                {
-                    if !inside_container {
-                        if let Some(default_val) = &param_def.default {
-                            candidates.push(CompletionCandidate {
-                                content: default_val.clone(),
-                                candidate_type: CandidateType::Value,
-                            });
-                        }
-                    }
-                }
-            }
-
-            // Boolean literals are valid value expressions regardless of the parameter default.
-            for literal in ["true", "false"] {
-                if !candidates
-                    .iter()
-                    .any(|candidate| candidate.content == literal)
-                {
-                    candidates.push(CompletionCandidate {
-                        content: literal.to_string(),
-                        candidate_type: CandidateType::Value,
-                    });
-                }
-            }
-
-            // 添加全局变量
-            for var in &app.ast.global_variables {
-                candidates.push(CompletionCandidate {
-                    content: var.name.clone(),
-                    candidate_type: CandidateType::GlobalVar,
-                });
-            }
-
-            // 添加函数
-            for func in &app.library.get_all_functions() {
-                candidates.push(CompletionCandidate {
-                    content: func.name.clone(),
-                    candidate_type: CandidateType::Function,
-                })
-            }
+                    .and_then(|parameter| parameter.default.clone())
+            });
+            let mut candidates = expression_candidates(
+                app,
+                &[],
+                (!inside_container).then_some(default_value).flatten(),
+                true,
+            );
 
             // 如果有部分输入的值，进行过滤
             let current_value_part = get_current_param_value_part(&param_str, module_param_name);
@@ -1163,6 +1315,47 @@ fn generate_completions(input: &str, app: &App) -> (Vec<CompletionCandidate>, Co
                 candidates = filter_by_prefix(&candidates, &current_value_part);
             }
             candidates
+        }
+        CompletionContext::NodeParam => {
+            let candidates: Vec<CompletionCandidate> = node_parameter_names(app)
+                .into_iter()
+                .map(|name| CompletionCandidate::new(name, CandidateType::ModuleParam))
+                .collect();
+            let prefix = whitespace_token_range(input, 1)
+                .map(|(start, end)| &input[start..end])
+                .unwrap_or("");
+            filter_by_prefix(&candidates, prefix)
+        }
+        CompletionContext::NodeParamValue { parameter_name } => {
+            let default_value = completion_target_nodes(app)
+                .first()
+                .and_then(|target| app.library.get_module(&target.name))
+                .and_then(|definition| {
+                    definition
+                        .parameters
+                        .iter()
+                        .find(|parameter| parameter.name == *parameter_name)
+                        .and_then(|parameter| parameter.default.clone())
+                });
+            let candidates =
+                expression_candidates(app, &module_scope_parameter_names(app), default_value, true);
+            let value_source = input.split_once('=').map(|(_, value)| value).unwrap_or("");
+            let (start, end) = value_fragment_range(value_source, 0, value_source.len());
+            filter_by_prefix(&candidates, value_source[start..end].trim())
+        }
+        CompletionContext::ExpressionValue {
+            kind,
+            local_identifiers,
+        } => {
+            let candidates = expression_candidates(
+                app,
+                local_identifiers,
+                None,
+                matches!(kind, ExpressionCompletionKind::FunctionBody),
+            );
+            let value_source = input.split_once('=').map(|(_, value)| value).unwrap_or("");
+            let (start, end) = value_fragment_range(value_source, 0, value_source.len());
+            filter_by_prefix(&candidates, value_source[start..end].trim())
         }
         CompletionContext::File {
             base_dir,
@@ -1322,6 +1515,16 @@ fn get_replacement_range(input: &str, context: &CompletionContext, app: &App) ->
                 (input.len(), input.len())
             }
         }
+        CompletionContext::NodeParam => {
+            whitespace_token_range(input, 1).unwrap_or((input.len(), input.len()))
+        }
+        CompletionContext::NodeParamValue { .. } | CompletionContext::ExpressionValue { .. } => {
+            let Some(equals) = input.find('=') else {
+                return (input.len(), input.len());
+            };
+            let value_start = equals + 1;
+            value_fragment_range(input, value_start, input.len())
+        }
         CompletionContext::File {
             current_path: _,
             base_dir: _,
@@ -1416,6 +1619,11 @@ fn apply_completion(app: &mut App) {
             } else {
                 // 如果无法获取元数据，默认追加空格
                 app.input_buffer.insert_str(" ");
+            }
+        }
+        CompletionContext::NodeParamValue { .. } | CompletionContext::ExpressionValue { .. } => {
+            if candidate.candidate_type == CandidateType::Function {
+                app.input_buffer.insert_str("(");
             }
         }
         _ => {
@@ -1557,6 +1765,20 @@ mod tests {
     }
 
     #[test]
+    fn test_value_fragment_range_handles_expression_operators() {
+        for (input, expected) in [
+            ("sin(a) + co", "co"),
+            ("width * sq", "sq"),
+            ("values[si", "si"),
+            ("angle > 0 ? si", "si"),
+            ("$f", "$f"),
+        ] {
+            let (start, end) = value_fragment_range(input, 0, input.len());
+            assert_eq!(&input[start..end], expected);
+        }
+    }
+
+    #[test]
     fn test_generate_completions_filters_function_inside_list() {
         let app = App::new();
         let (candidates, analysis) = generate_completions("insert cube size=[1, si", &app);
@@ -1605,6 +1827,149 @@ mod tests {
         assert!(!candidates
             .iter()
             .any(|candidate| candidate.content == "[0,0,0]"));
+    }
+
+    #[test]
+    fn test_set_completion_uses_node_and_module_scope_parameters() {
+        let mut app = App::new();
+        let cube_id = commands::cmd_insert(&mut app, "cube", None, Some("size=10")).unwrap();
+        app.selected_nodes = vec![cube_id];
+        commands::cmd_moddef(&mut app, "my_box", Some("size=20")).unwrap();
+        let body_id = app.ast.module_defines[0].body[0].id.clone();
+        app.tree_state.borrow_mut().select(vec![
+            "__moddefs".to_string(),
+            "__moddef_my_box".to_string(),
+            body_id,
+        ]);
+
+        let (parameter_candidates, parameter_analysis) = generate_completions("set si", &app);
+        assert_eq!(parameter_analysis.context, CompletionContext::NodeParam);
+        assert!(parameter_candidates
+            .iter()
+            .any(|candidate| candidate.content == "size"));
+
+        let (value_candidates, value_analysis) = generate_completions("set size=si", &app);
+        assert_eq!(
+            value_analysis.context,
+            CompletionContext::NodeParamValue {
+                parameter_name: "size".to_string()
+            }
+        );
+        assert!(value_candidates
+            .iter()
+            .any(|candidate| candidate.content == "size"));
+    }
+
+    #[test]
+    fn test_function_body_completion_includes_parameters_and_functions() {
+        let app = App::new();
+
+        let (parameter_candidates, parameter_analysis) =
+            generate_completions("function wave(x, phase) = ph", &app);
+        assert_eq!(
+            parameter_analysis.context,
+            CompletionContext::ExpressionValue {
+                kind: ExpressionCompletionKind::FunctionBody,
+                local_identifiers: vec!["x".to_string(), "phase".to_string()],
+            }
+        );
+        assert!(parameter_candidates
+            .iter()
+            .any(|candidate| candidate.content == "phase"));
+
+        let (function_candidates, _) = generate_completions("function wave(x) = si", &app);
+        assert!(function_candidates.iter().any(|candidate| {
+            candidate.content == "sin" && candidate.candidate_type == CandidateType::Function
+        }));
+    }
+
+    #[test]
+    fn test_function_completion_appends_open_parenthesis() {
+        let mut app = App::new();
+        let input = "function wave(x) = si";
+        let (candidates, analysis) = generate_completions(input, &app);
+        let sin_index = candidates
+            .iter()
+            .position(|candidate| candidate.content == "sin")
+            .unwrap();
+        app.input_buffer.set_content(input);
+        app.completion_candidates = candidates;
+        app.completion_context = analysis.context;
+        app.completion_replacement_range = analysis.replacement_range;
+        app.completion_index = sin_index;
+        app.completion_active = true;
+
+        apply_completion(&mut app);
+
+        assert_eq!(app.input_buffer.content(), "function wave(x) = sin(");
+    }
+
+    #[test]
+    fn test_function_completion_after_binary_operator() {
+        let mut app = App::new();
+        let input = "function wave(a) = sin(a) + co";
+        let (candidates, analysis) = generate_completions(input, &app);
+        let cos_index = candidates
+            .iter()
+            .position(|candidate| candidate.content == "cos")
+            .unwrap();
+        assert_eq!(&input[analysis.replacement_range.0..], "co");
+        app.input_buffer.set_content(input);
+        app.completion_candidates = candidates;
+        app.completion_context = analysis.context;
+        app.completion_replacement_range = analysis.replacement_range;
+        app.completion_index = cos_index;
+        app.completion_active = true;
+
+        apply_completion(&mut app);
+
+        assert_eq!(
+            app.input_buffer.content(),
+            "function wave(a) = sin(a) + cos("
+        );
+    }
+
+    #[test]
+    fn test_global_value_completion_is_intentionally_simple() {
+        let mut app = App::new();
+        commands::cmd_global(&mut app, "width=10").unwrap();
+
+        let (candidates, analysis) = generate_completions("global size=wi", &app);
+
+        assert_eq!(
+            analysis.context,
+            CompletionContext::ExpressionValue {
+                kind: ExpressionCompletionKind::GlobalValue,
+                local_identifiers: Vec::new(),
+            }
+        );
+        assert!(candidates
+            .iter()
+            .any(|candidate| candidate.content == "width"));
+        let (function_candidates, _) = generate_completions("global size=si", &app);
+        assert!(!function_candidates
+            .iter()
+            .any(|candidate| candidate.candidate_type == CandidateType::Function));
+    }
+
+    #[test]
+    fn test_expression_completion_preserves_special_variable_prefix() {
+        let mut app = App::new();
+        commands::cmd_global(&mut app, "$fn=64").unwrap();
+        commands::cmd_global(&mut app, "width=10").unwrap();
+
+        let (special_candidates, _) = generate_completions("global segments=$f", &app);
+        assert!(special_candidates
+            .iter()
+            .any(|candidate| candidate.content == "$fn"));
+        assert!(!special_candidates
+            .iter()
+            .any(|candidate| candidate.content == "fn"));
+
+        let (regular_candidates, _) = generate_completions("global size=wi", &app);
+        assert!(regular_candidates
+            .iter()
+            .any(|candidate| candidate.content == "width"));
     }
 
     #[test]
@@ -1703,6 +2068,29 @@ mod tests {
         );
         assert_eq!(app.input_mode, InputMode::Command);
         assert_eq!(app.input_buffer.content(), "replace ");
+
+        app.input_mode = InputMode::Normal;
+        app.input_buffer.clear();
+        handle_key(
+            KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
+            &mut app,
+        );
+        assert_eq!(app.input_mode, InputMode::Command);
+        assert_eq!(app.input_buffer.content(), "set ");
+    }
+
+    #[test]
+    fn test_command_history_navigation_restores_unexecuted_input() {
+        let mut app = App::new();
+        app.add_to_history("insert cube");
+        app.input_mode = InputMode::Command;
+        app.input_buffer.set_content("replace sph");
+
+        handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), &mut app);
+        assert_eq!(app.input_buffer.content(), "insert cube");
+
+        handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &mut app);
+        assert_eq!(app.input_buffer.content(), "replace sph");
     }
 
     #[test]

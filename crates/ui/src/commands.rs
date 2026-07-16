@@ -1,6 +1,6 @@
 //! Commands module for OpenSCAD TUI
 
-use openscad_core::{Argument, AstError, Expr, ModuleNode};
+use openscad_core::{Argument, ArgumentSelector, AstError, Expr, ModuleNode};
 use openscad_library::{LibraryError, ModuleDef};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -1042,18 +1042,12 @@ pub fn cmd_global(app: &mut App, var_spec: &str) -> CommandResult<()> {
     let name_part = var_spec[..pos].trim();
     let value_part = var_spec[pos + 1..].trim();
 
-    // Check if this is a special variable (starts with $)
-    let (name, is_special) = if let Some(stripped) = name_part.strip_prefix('$') {
-        (stripped, true)
-    } else {
-        (name_part, false)
-    };
-
     // Validate identifier
-    if !is_valid_identifier(name) {
+    let identifier_body = name_part.strip_prefix('$').unwrap_or(name_part);
+    if !is_valid_identifier(identifier_body) {
         return Err(CommandError::InvalidCommand(format!(
             "Invalid variable name: {}",
-            name
+            name_part
         )));
     }
 
@@ -1063,11 +1057,7 @@ pub fn cmd_global(app: &mut App, var_spec: &str) -> CommandResult<()> {
     })?;
 
     // Create global variable
-    let global_var = if is_special {
-        GlobalVariable::new_special(name.to_string(), value)
-    } else {
-        GlobalVariable::new(name.to_string(), value)
-    };
+    let global_var = GlobalVariable::new(name_part.to_string(), value);
 
     // Add to AST
     app.ast_mut()
@@ -1493,6 +1483,131 @@ fn selected_or_current_node_ids(app: &App) -> CommandResult<Vec<String>> {
     } else {
         Ok(vec![selected_tree_id(app)?])
     }
+}
+
+enum PlannedParameterUpdate {
+    Existing(ArgumentSelector),
+    AddNamed,
+}
+
+fn plan_parameter_update(
+    app: &App,
+    node_id: &str,
+    parameter_name: &str,
+) -> CommandResult<PlannedParameterUpdate> {
+    let node = find_module_node(app, node_id)
+        .ok_or_else(|| CommandError::InvalidCommand(format!("Node not found: {}", node_id)))?;
+    let definition = app
+        .library
+        .get_module(&node.name)
+        .ok_or_else(|| CommandError::InvalidCommand(format!("Unknown module: {}", node.name)))?;
+    let parameter_position = definition
+        .parameters
+        .iter()
+        .position(|parameter| parameter.name == parameter_name)
+        .ok_or_else(|| {
+            CommandError::InvalidCommand(format!(
+                "Module '{}' has no parameter named '{}'",
+                node.name, parameter_name
+            ))
+        })?;
+
+    if node
+        .args
+        .iter()
+        .any(|argument| matches!(argument, Argument::Named { name, .. } if name == parameter_name))
+    {
+        return Ok(PlannedParameterUpdate::Existing(ArgumentSelector::Named(
+            parameter_name.to_string(),
+        )));
+    }
+    if node
+        .args
+        .iter()
+        .filter(|argument| matches!(argument, Argument::Positional(_)))
+        .nth(parameter_position)
+        .is_some()
+    {
+        return Ok(PlannedParameterUpdate::Existing(
+            ArgumentSelector::Position(parameter_position),
+        ));
+    }
+    Ok(PlannedParameterUpdate::AddNamed)
+}
+
+fn find_node_mut_in<'a>(nodes: &'a mut [ModuleNode], node_id: &str) -> Option<&'a mut ModuleNode> {
+    for node in nodes {
+        if node.id == node_id {
+            return Some(node);
+        }
+        if let Some(found) = find_node_mut_in(&mut node.children, node_id) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+fn find_module_node_mut<'a>(app: &'a mut App, node_id: &str) -> Option<&'a mut ModuleNode> {
+    if app.ast.find_node_by_id(node_id).is_some() {
+        return app.ast_mut().find_node_mut(node_id);
+    }
+    app.ast_mut()
+        .module_defines
+        .iter_mut()
+        .find_map(|definition| find_node_mut_in(&mut definition.body, node_id))
+}
+
+pub fn cmd_set_parameter(app: &mut App, parameter_spec: &str) -> CommandResult<()> {
+    let (parameter_name, value_source) = parameter_spec.split_once('=').ok_or_else(|| {
+        CommandError::InvalidCommand("Usage: set <parameter_name>=<expression>".to_string())
+    })?;
+    let parameter_name = parameter_name.trim();
+    let value_source = value_source.trim();
+    if parameter_name.is_empty() || value_source.is_empty() {
+        return Err(CommandError::InvalidCommand(
+            "Usage: set <parameter_name>=<expression>".to_string(),
+        ));
+    }
+    let value = Expr::parse(value_source).map_err(|error| {
+        CommandError::ParameterError(format!(
+            "Invalid value for '{}': {} - {}",
+            parameter_name, value_source, error
+        ))
+    })?;
+    let target_ids = selected_or_current_node_ids(app)?;
+    if target_ids.iter().any(|node_id| node_id.starts_with("__")) {
+        return Err(CommandError::InvalidCommand(
+            "Only module node parameters can be changed".to_string(),
+        ));
+    }
+
+    // Plan every update before mutating the AST so multi-node edits are atomic.
+    let updates = target_ids
+        .iter()
+        .map(|node_id| {
+            plan_parameter_update(app, node_id, parameter_name)
+                .map(|update| (node_id.clone(), update))
+        })
+        .collect::<CommandResult<Vec<_>>>()?;
+
+    for (node_id, update) in updates {
+        let node = find_module_node_mut(app, &node_id)
+            .ok_or_else(|| CommandError::InvalidCommand(format!("Node not found: {}", node_id)))?;
+        match update {
+            PlannedParameterUpdate::Existing(selector) => {
+                node.set_argument(&selector, value.clone())?;
+            }
+            PlannedParameterUpdate::AddNamed => {
+                node.add_named_argument(parameter_name.to_string(), value.clone())?;
+            }
+        }
+    }
+    app.set_info(&format!(
+        "Set '{}' on {} node(s)",
+        parameter_name,
+        target_ids.len()
+    ));
+    Ok(())
 }
 
 fn find_module_node(app: &App, node_id: &str) -> Option<ModuleNode> {
@@ -2689,7 +2804,7 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
         None, // Variable number of parameters (optional)
         "function name(params) = expression",
         vec!["function myfunc()", "function add(a,b) = a + b"],
-        CommandType::Definition,
+        CommandType::FunctionDefinition,
         true,
         true,
     ));
@@ -2721,7 +2836,7 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
         None,
         "module <module_name> [params]",
         vec!["module mymodule", "module mybox size=10, center=false"],
-        CommandType::Definition,
+        CommandType::ModuleDefinition,
         true,
         true,
     ));
@@ -2757,7 +2872,7 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
         None,
         "global <name>=<value>",
         vec!["global pi=3.14159", "global name=\"test\""],
-        CommandType::Definition,
+        CommandType::GlobalDefinition,
         true,
         true,
     ));
@@ -2823,6 +2938,36 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
         "remove",
         vec!["remove", "x"],
         CommandType::NoArg,
+        true,
+        true,
+    ));
+
+    registry.register(CommandDef::new(
+        "set",
+        vec!["param"],
+        |app, args| {
+            if args.is_empty() {
+                return Err(CommandError::InvalidCommand(
+                    "Usage: set <parameter_name>=<expression>".to_string(),
+                ));
+            }
+            let parameter_spec = args.join(" ");
+            // Parsing and target validation happen before the single undo point.
+            let snapshot = app.ast.clone();
+            cmd_set_parameter(app, &parameter_spec)?;
+            if app.undo_stack.len() >= 100 {
+                app.undo_stack.pop_front();
+            }
+            app.undo_stack.push_back(snapshot);
+            app.redo_stack.clear();
+            Ok(())
+        },
+        "Set a parameter on selected module nodes, or the current node",
+        1,
+        None,
+        "set <parameter_name>=<expression>",
+        vec!["set size=size", "set center=true", "set v=offset"],
+        CommandType::NodeParam,
         true,
         true,
     ));
@@ -2990,6 +3135,89 @@ mod tests {
         assert_eq!(app.ast.modules.len(), 1);
         assert_eq!(app.ast.modules[0].id, "keep_1");
         assert!(app.selected_nodes.is_empty());
+    }
+
+    #[test]
+    fn test_cmd_set_parameter_updates_selected_nodes_atomically() {
+        let mut app = App::new();
+        app.ast_mut().modules = vec![
+            ModuleNode::new_leaf(
+                "cube_1".to_string(),
+                "cube".to_string(),
+                vec![Argument::Named {
+                    name: "size".to_string(),
+                    value: Expr::Integer(10),
+                }],
+            ),
+            ModuleNode::new_leaf(
+                "sphere_1".to_string(),
+                "sphere".to_string(),
+                vec![Argument::Named {
+                    name: "r".to_string(),
+                    value: Expr::Integer(5),
+                }],
+            ),
+        ];
+        app.selected_nodes = vec!["cube_1".to_string(), "sphere_1".to_string()];
+
+        let result = cmd_set_parameter(&mut app, "size=module_size");
+
+        assert!(result.is_err());
+        assert!(matches!(
+            &app.ast.modules[0].args[0],
+            Argument::Named {
+                value: Expr::Integer(10),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_cmd_set_parameter_supports_special_parameters_and_values() {
+        let mut app = App::new();
+        let sphere_id = cmd_insert(&mut app, "sphere", None, Some("r=10")).unwrap();
+        app.tree_state
+            .borrow_mut()
+            .select(vec!["__modules".to_string(), sphere_id.clone()]);
+
+        cmd_set_parameter(&mut app, "$fn=32").unwrap();
+        cmd_set_parameter(&mut app, "r=$fn").unwrap();
+
+        let sphere = app.ast.find_node_by_id(&sphere_id).unwrap();
+        assert!(sphere.args.iter().any(|argument| matches!(
+            argument,
+            Argument::Named {
+                name,
+                value: Expr::Integer(32)
+            } if name == "$fn"
+        )));
+        assert!(sphere.args.iter().any(|argument| matches!(
+            argument,
+            Argument::Named {
+                name,
+                value: Expr::Identifier(identifier)
+            } if name == "r" && identifier == "$fn"
+        )));
+    }
+
+    #[test]
+    fn test_module_body_parameter_can_reference_module_parameter() {
+        let mut app = App::new();
+        let cube_id = cmd_insert(&mut app, "cube", None, Some("size=10")).unwrap();
+        app.selected_nodes = vec![cube_id];
+        cmd_moddef(&mut app, "my_box", Some("size=20")).unwrap();
+        let body_id = app.ast.module_defines[0].body[0].id.clone();
+        app.tree_state.borrow_mut().select(vec![
+            "__moddefs".to_string(),
+            "__moddef_my_box".to_string(),
+            body_id,
+        ]);
+
+        cmd_set_parameter(&mut app, "size=size").unwrap();
+
+        assert!(app.ast.module_defines[0]
+            .to_scad()
+            .contains("cube(size=size);"));
     }
 
     #[test]
@@ -3727,7 +3955,6 @@ mod tests {
         let var = &app.ast.global_variables()[0];
         assert_eq!(var.name, "width");
         assert_eq!(var.value, openscad_core::Expr::Integer(100));
-        assert!(!var.is_special);
     }
 
     #[test]
@@ -3746,9 +3973,8 @@ mod tests {
         // Check that special variable was added to AST
         assert_eq!(app.ast.global_variables().len(), 1);
         let var = &app.ast.global_variables()[0];
-        assert_eq!(var.name, "fn");
+        assert_eq!(var.name, "$fn");
         assert_eq!(var.value, openscad_core::Expr::Integer(50));
-        assert!(var.is_special);
     }
 
     #[test]
@@ -3765,7 +3991,6 @@ mod tests {
         assert_eq!(app.ast.global_variables().len(), 1);
         let var = &app.ast.global_variables()[0];
         assert_eq!(var.name, "size");
-        assert!(!var.is_special);
 
         // Check that value is a list
         if let openscad_core::Expr::List(items) = &var.value {
@@ -3851,7 +4076,6 @@ mod tests {
         let var = &app.ast.global_variables()[0];
         assert_eq!(var.name, "color");
         assert_eq!(var.value, openscad_core::Expr::String("red".to_string()));
-        assert!(!var.is_special);
     }
 
     #[test]
@@ -3875,7 +4099,6 @@ mod tests {
         } else {
             panic!("Expected float expression");
         }
-        assert!(!var.is_special);
     }
 
     #[test]

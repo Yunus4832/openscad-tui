@@ -265,6 +265,14 @@ pub enum CompletionContext {
         module_name: String,
         module_param_name: String,
     },
+    NodeParam,
+    NodeParamValue {
+        parameter_name: String,
+    },
+    ExpressionValue {
+        kind: ExpressionCompletionKind,
+        local_identifiers: Vec<String>,
+    },
     /// File name completion (for write/edit/library commands)
     File {
         /// Current path being completed
@@ -276,6 +284,12 @@ pub enum CompletionContext {
         /// Whether the path ends with a separator (indicating directory)
         ends_with_separator: bool,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExpressionCompletionKind {
+    FunctionBody,
+    GlobalValue,
 }
 
 pub struct App {
@@ -486,9 +500,7 @@ impl App {
                 idx < self.ast.uses.len()
             }
             s if s.starts_with("__var_") => {
-                let name = s
-                    .trim_start_matches("__var_s_")
-                    .trim_start_matches("__var_n_");
+                let name = s.trim_start_matches("__var_");
                 self.ast.global_variables.iter().any(|v| v.name == name)
             }
             s if s.starts_with("__func_") => {
@@ -817,21 +829,12 @@ impl App {
                     .cloned()
                     .unwrap_or_else(|| s.to_string())
             }
-            s if s.starts_with("__var_s_") => {
-                let name = s.trim_start_matches("__var_s_");
+            s if s.starts_with("__var_") => {
+                let name = s.trim_start_matches("__var_");
                 self.ast
                     .global_variables
                     .iter()
-                    .find(|v| v.name == name && v.is_special)
-                    .map(|v| format!("${} = {}", v.name, v.value.to_scad()))
-                    .unwrap_or_else(|| s.to_string())
-            }
-            s if s.starts_with("__var_n_") => {
-                let name = s.trim_start_matches("__var_n_");
-                self.ast
-                    .global_variables
-                    .iter()
-                    .find(|v| v.name == name && !v.is_special)
+                    .find(|v| v.name == name)
                     .map(|v| format!("{} = {}", v.name, v.value.to_scad()))
                     .unwrap_or_else(|| s.to_string())
             }

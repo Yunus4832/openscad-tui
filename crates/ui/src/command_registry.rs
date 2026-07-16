@@ -15,10 +15,13 @@ pub enum CommandType {
     Param,
     /// No-argument command: command requires no further arguments (difference, union, etc.)
     NoArg,
-    /// Definition command: for defining content, no completion needed (global, module, function)
-    Definition,
+    FunctionDefinition,
+    ModuleDefinition,
+    GlobalDefinition,
     /// Replace command: optional source node ID followed by a module name.
     Replace,
+    /// Change a parameter on the selected or current module node.
+    NodeParam,
 }
 
 /// Command type - used for dynamic completion context analysis

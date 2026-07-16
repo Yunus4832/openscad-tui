@@ -159,7 +159,7 @@ impl Expr {
         }
 
         // Try identifier
-        if is_valid_identifier(trimmed) {
+        if is_valid_identifier(trimmed) || is_valid_special_identifier(trimmed) {
             return Ok(Expr::Identifier(trimmed.to_string()));
         }
 
@@ -320,6 +320,12 @@ pub enum Argument {
     Named { name: String, value: Expr },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ArgumentSelector {
+    Named(String),
+    Position(usize),
+}
+
 /// A parameter in a function or module definition
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Parameter {
@@ -382,44 +388,23 @@ impl Assignment {
 /// Global variables in OpenSCAD are declared at the top level with an assignment like:
 /// `$my_var = 10;` or `my_var = [1, 2, 3];`
 ///
-/// The `is_special` flag indicates whether it's a special variable (starts with $)
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct GlobalVariable {
-    /// Variable name (without $ prefix for special variables)
+    /// Variable name exactly as written in OpenSCAD source, including an optional `$` prefix.
     pub name: String,
     /// Variable value
     pub value: Expr,
-    /// Whether this is a special variable (prefixed with $)
-    pub is_special: bool,
 }
 
 impl GlobalVariable {
     /// Create a new global variable
     pub fn new(name: String, value: Expr) -> Self {
-        Self {
-            name,
-            value,
-            is_special: false,
-        }
-    }
-
-    /// Create a new special global variable (prefixed with $)
-    pub fn new_special(name: String, value: Expr) -> Self {
-        Self {
-            name,
-            value,
-            is_special: true,
-        }
+        Self { name, value }
     }
 
     /// Generate OpenSCAD code for this global variable
     pub fn to_scad(&self) -> String {
-        let var_name = if self.is_special {
-            format!("${}", self.name)
-        } else {
-            self.name.clone()
-        };
-        format!("{} = {};", var_name, self.value.to_scad())
+        format!("{} = {};", self.name, self.value.to_scad())
     }
 }
 
@@ -474,6 +459,55 @@ impl ModuleNode {
     pub fn with_display_name(mut self, display_name: String) -> Self {
         self.display_name = Some(display_name);
         self
+    }
+
+    /// Replace an existing argument value and return the previous value.
+    pub fn set_argument(&mut self, selector: &ArgumentSelector, value: Expr) -> Result<Expr> {
+        match selector {
+            ArgumentSelector::Named(expected_name) => self
+                .args
+                .iter_mut()
+                .find_map(|argument| match argument {
+                    Argument::Named { name, value } if name == expected_name => Some(value),
+                    _ => None,
+                })
+                .map(|old_value| std::mem::replace(old_value, value))
+                .ok_or_else(|| {
+                    AstError::InvalidParameter(format!(
+                        "Named argument not found: {}",
+                        expected_name
+                    ))
+                }),
+            ArgumentSelector::Position(expected_position) => self
+                .args
+                .iter_mut()
+                .filter_map(|argument| match argument {
+                    Argument::Positional(value) => Some(value),
+                    Argument::Named { .. } => None,
+                })
+                .nth(*expected_position)
+                .map(|old_value| std::mem::replace(old_value, value))
+                .ok_or_else(|| {
+                    AstError::InvalidParameter(format!(
+                        "Positional argument not found: {}",
+                        expected_position
+                    ))
+                }),
+        }
+    }
+
+    /// Add a named argument. Existing named arguments must be changed with `set_argument`.
+    pub fn add_named_argument(&mut self, name: String, value: Expr) -> Result<()> {
+        if self.args.iter().any(
+            |argument| matches!(argument, Argument::Named { name: existing, .. } if existing == &name),
+        ) {
+            return Err(AstError::InvalidParameter(format!(
+                "Named argument already exists: {}",
+                name
+            )));
+        }
+        self.args.push(Argument::Named { name, value });
+        Ok(())
     }
 
     /// Get the display name, fallback to module name with args
@@ -817,12 +851,14 @@ impl AstRoot {
 
     /// Add a global variable
     pub fn add_global_variable(&mut self, var: GlobalVariable) -> Result<()> {
+        if !is_valid_identifier(&var.name) && !is_valid_special_identifier(&var.name) {
+            return Err(AstError::InvalidParameter(format!(
+                "Invalid global variable name: {}",
+                var.name
+            )));
+        }
         // Check for duplicate variable names
-        if self
-            .global_variables
-            .iter()
-            .any(|v| v.name == var.name && v.is_special == var.is_special)
-        {
+        if self.global_variables.iter().any(|v| v.name == var.name) {
             return Err(AstError::DuplicateIdentifier(var.name.clone()));
         }
         self.global_variables.push(var);
@@ -830,12 +866,8 @@ impl AstRoot {
     }
 
     /// Remove a global variable by name
-    pub fn remove_global_variable(&mut self, name: &str, is_special: bool) -> Result<()> {
-        if let Some(pos) = self
-            .global_variables
-            .iter()
-            .position(|v| v.name == name && v.is_special == is_special)
-        {
+    pub fn remove_global_variable(&mut self, name: &str) -> Result<()> {
+        if let Some(pos) = self.global_variables.iter().position(|v| v.name == name) {
             self.global_variables.remove(pos);
             Ok(())
         } else {
@@ -844,31 +876,18 @@ impl AstRoot {
     }
 
     /// Find a global variable by name
-    pub fn find_global_variable(&self, name: &str, is_special: bool) -> Option<&GlobalVariable> {
-        self.global_variables
-            .iter()
-            .find(|v| v.name == name && v.is_special == is_special)
+    pub fn find_global_variable(&self, name: &str) -> Option<&GlobalVariable> {
+        self.global_variables.iter().find(|v| v.name == name)
     }
 
     /// Find a mutable global variable by name
-    pub fn find_global_variable_mut(
-        &mut self,
-        name: &str,
-        is_special: bool,
-    ) -> Option<&mut GlobalVariable> {
-        self.global_variables
-            .iter_mut()
-            .find(|v| v.name == name && v.is_special == is_special)
+    pub fn find_global_variable_mut(&mut self, name: &str) -> Option<&mut GlobalVariable> {
+        self.global_variables.iter_mut().find(|v| v.name == name)
     }
 
     /// Update a global variable's value
-    pub fn update_global_variable(
-        &mut self,
-        name: &str,
-        is_special: bool,
-        new_value: Expr,
-    ) -> Result<()> {
-        if let Some(var) = self.find_global_variable_mut(name, is_special) {
+    pub fn update_global_variable(&mut self, name: &str, new_value: Expr) -> Result<()> {
+        if let Some(var) = self.find_global_variable_mut(name) {
             var.value = new_value;
             Ok(())
         } else {
@@ -882,10 +901,8 @@ impl AstRoot {
     }
 
     /// Check if a global variable exists
-    pub fn has_global_variable(&self, name: &str, is_special: bool) -> bool {
-        self.global_variables
-            .iter()
-            .any(|v| v.name == name && v.is_special == is_special)
+    pub fn has_global_variable(&self, name: &str) -> bool {
+        self.global_variables.iter().any(|v| v.name == name)
     }
 
     pub fn to_scad(&self) -> String {
@@ -983,6 +1000,10 @@ fn is_valid_identifier(s: &str) -> bool {
     }
 
     s.chars().all(|c| c.is_alphanumeric() || c == '_')
+}
+
+fn is_valid_special_identifier(s: &str) -> bool {
+    s.strip_prefix('$').is_some_and(is_valid_identifier)
 }
 
 /// Helper function to parse binary operations in expressions using precedence-based parsing
@@ -1391,6 +1412,38 @@ mod tests {
     }
 
     #[test]
+    fn test_module_node_argument_mutation_api() {
+        let mut node = ModuleNode::new_leaf(
+            "cube_1".to_string(),
+            "cube".to_string(),
+            vec![
+                Argument::Positional(Expr::Integer(10)),
+                Argument::Named {
+                    name: "center".to_string(),
+                    value: Expr::Boolean(false),
+                },
+            ],
+        );
+
+        let old = node
+            .set_argument(
+                &ArgumentSelector::Position(0),
+                Expr::Identifier("size".to_string()),
+            )
+            .unwrap();
+        assert_eq!(old, Expr::Integer(10));
+        node.set_argument(
+            &ArgumentSelector::Named("center".to_string()),
+            Expr::Identifier("center".to_string()),
+        )
+        .unwrap();
+        node.add_named_argument("$fn".to_string(), Expr::Integer(32))
+            .unwrap();
+
+        assert_eq!(node.to_scad(0), "cube(size, center=center, $fn=32);");
+    }
+
+    #[test]
     fn test_ast_root_basic() {
         let mut ast = AstRoot::new();
         let module = ModuleNode::new_leaf("cube1".to_string(), "cube".to_string(), vec![]);
@@ -1419,14 +1472,14 @@ mod tests {
     fn test_global_variable_regular() {
         let var = GlobalVariable::new("width".to_string(), Expr::Integer(100));
         assert_eq!(var.to_scad(), "width = 100;");
-        assert!(!var.is_special);
+        assert_eq!(var.name, "width");
     }
 
     #[test]
     fn test_global_variable_special() {
-        let var = GlobalVariable::new_special("fn".to_string(), Expr::Integer(50));
+        let var = GlobalVariable::new("$fn".to_string(), Expr::Integer(50));
         assert_eq!(var.to_scad(), "$fn = 50;");
-        assert!(var.is_special);
+        assert_eq!(var.name, "$fn");
     }
 
     #[test]
@@ -1561,17 +1614,14 @@ mod tests {
             .unwrap();
 
         // Add special global variable
-        ast.add_global_variable(GlobalVariable::new_special(
-            "fn".to_string(),
-            Expr::Integer(50),
-        ))
-        .unwrap();
+        ast.add_global_variable(GlobalVariable::new("$fn".to_string(), Expr::Integer(50)))
+            .unwrap();
 
         assert_eq!(ast.global_variables.len(), 2);
-        assert!(ast.find_global_variable("width", false).is_some());
-        assert!(ast.find_global_variable("fn", true).is_some());
-        assert!(ast.has_global_variable("width", false));
-        assert!(!ast.has_global_variable("width", true));
+        assert!(ast.find_global_variable("width").is_some());
+        assert!(ast.find_global_variable("$fn").is_some());
+        assert!(ast.has_global_variable("width"));
+        assert!(!ast.has_global_variable("$width"));
     }
 
     #[test]
@@ -1597,10 +1647,10 @@ mod tests {
             .unwrap();
 
         // Update the variable
-        ast.update_global_variable("size", false, Expr::Integer(20))
+        ast.update_global_variable("size", Expr::Integer(20))
             .unwrap();
 
-        let var = ast.find_global_variable("size", false).unwrap();
+        let var = ast.find_global_variable("size").unwrap();
         assert_eq!(var.value, Expr::Integer(20));
     }
 
@@ -1614,7 +1664,7 @@ mod tests {
         assert_eq!(ast.global_variables.len(), 1);
 
         // Remove the variable
-        ast.remove_global_variable("size", false).unwrap();
+        ast.remove_global_variable("size").unwrap();
         assert_eq!(ast.global_variables.len(), 0);
     }
 
@@ -1626,11 +1676,8 @@ mod tests {
         ast.includes.push("lib.scad".to_string());
 
         // Add global variable
-        ast.add_global_variable(GlobalVariable::new_special(
-            "fn".to_string(),
-            Expr::Integer(32),
-        ))
-        .unwrap();
+        ast.add_global_variable(GlobalVariable::new("$fn".to_string(), Expr::Integer(32)))
+            .unwrap();
 
         // Add function definition
         ast.add_function_define(FunctionDefinition::new(
