@@ -825,6 +825,38 @@ impl AstRoot {
         Ok(())
     }
 
+    /// Add a function definition or replace the existing definition with the same name.
+    /// Returns the previous definition when one was replaced.
+    pub fn upsert_function_define(
+        &mut self,
+        func_def: FunctionDefinition,
+    ) -> Result<Option<FunctionDefinition>> {
+        if !is_valid_identifier(&func_def.name) {
+            return Err(AstError::InvalidParameter(format!(
+                "Invalid function name: {}",
+                func_def.name
+            )));
+        }
+        if let Some(existing) = self
+            .function_defines
+            .iter_mut()
+            .find(|existing| existing.name == func_def.name)
+        {
+            return Ok(Some(std::mem::replace(existing, func_def)));
+        }
+        self.function_defines.push(func_def);
+        Ok(None)
+    }
+
+    /// Remove and return a function definition. References are left unchanged.
+    pub fn remove_function_define(&mut self, name: &str) -> Result<FunctionDefinition> {
+        self.function_defines
+            .iter()
+            .position(|definition| definition.name == name)
+            .map(|position| self.function_defines.remove(position))
+            .ok_or_else(|| AstError::NodeNotFound(name.to_string()))
+    }
+
     /// Add a module definition
     pub fn add_module_define(&mut self, module_def: ModuleDefinition) -> Result<()> {
         // Check for duplicate module names
@@ -865,11 +897,33 @@ impl AstRoot {
         Ok(())
     }
 
+    /// Add a global variable or replace the existing variable with the same name.
+    /// Returns the previous variable when one was replaced.
+    pub fn upsert_global_variable(
+        &mut self,
+        var: GlobalVariable,
+    ) -> Result<Option<GlobalVariable>> {
+        if !is_valid_identifier(&var.name) && !is_valid_special_identifier(&var.name) {
+            return Err(AstError::InvalidParameter(format!(
+                "Invalid global variable name: {}",
+                var.name
+            )));
+        }
+        if let Some(existing) = self
+            .global_variables
+            .iter_mut()
+            .find(|existing| existing.name == var.name)
+        {
+            return Ok(Some(std::mem::replace(existing, var)));
+        }
+        self.global_variables.push(var);
+        Ok(None)
+    }
+
     /// Remove a global variable by name
-    pub fn remove_global_variable(&mut self, name: &str) -> Result<()> {
+    pub fn remove_global_variable(&mut self, name: &str) -> Result<GlobalVariable> {
         if let Some(pos) = self.global_variables.iter().position(|v| v.name == name) {
-            self.global_variables.remove(pos);
-            Ok(())
+            Ok(self.global_variables.remove(pos))
         } else {
             Err(AstError::NodeNotFound(name.to_string()))
         }
@@ -1518,6 +1572,37 @@ mod tests {
     }
 
     #[test]
+    fn test_upsert_and_remove_function_definition() {
+        let mut ast = AstRoot::new();
+        let original = FunctionDefinition::new(
+            "f".to_string(),
+            vec![Parameter::new("x".to_string())],
+            Expr::Identifier("x".to_string()),
+        );
+        assert!(ast
+            .upsert_function_define(original.clone())
+            .unwrap()
+            .is_none());
+
+        let replacement = FunctionDefinition::new(
+            "f".to_string(),
+            vec![Parameter::new("y".to_string())],
+            Expr::Integer(2),
+        );
+        let replaced = ast
+            .upsert_function_define(replacement.clone())
+            .unwrap()
+            .unwrap();
+        assert_eq!(replaced.name, original.name);
+        assert_eq!(ast.function_defines.len(), 1);
+        assert_eq!(ast.function_defines[0].parameters[0].name, "y");
+        assert_eq!(ast.function_defines[0].body, Expr::Integer(2));
+        let removed = ast.remove_function_define("f").unwrap();
+        assert_eq!(removed.name, replacement.name);
+        assert_eq!(removed.body, replacement.body);
+    }
+
+    #[test]
     fn test_module_definition() {
         let module_def = ModuleDefinition::new(
             "my_cube".to_string(),
@@ -1637,6 +1722,20 @@ mod tests {
 
         assert!(result.is_err());
         assert_eq!(ast.global_variables.len(), 1);
+    }
+
+    #[test]
+    fn test_upsert_global_variable_returns_replaced_value() {
+        let mut ast = AstRoot::new();
+        let original = GlobalVariable::new("size".to_string(), Expr::Integer(10));
+        assert_eq!(ast.upsert_global_variable(original.clone()).unwrap(), None);
+
+        let replacement = GlobalVariable::new("size".to_string(), Expr::Integer(20));
+        assert_eq!(
+            ast.upsert_global_variable(replacement.clone()).unwrap(),
+            Some(original)
+        );
+        assert_eq!(ast.global_variables, vec![replacement]);
     }
 
     #[test]

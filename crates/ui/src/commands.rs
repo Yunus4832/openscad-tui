@@ -305,7 +305,10 @@ pub fn cmd_delete(app: &mut App, node_id: &str) -> CommandResult<()> {
             .ok_or(CommandError::NoNodeSelected)?]
     };
 
-    if let Some(section_id) = node_ids.iter().find(|id| id.starts_with("__")) {
+    if let Some(section_id) = node_ids
+        .iter()
+        .find(|id| id.starts_with("__") && !id.starts_with("__var_") && !id.starts_with("__func_"))
+    {
         return Err(CommandError::Custom(format!(
             "Cannot delete section header: {}",
             section_id
@@ -313,7 +316,11 @@ pub fn cmd_delete(app: &mut App, node_id: &str) -> CommandResult<()> {
     }
 
     for target_id in &node_ids {
-        if let Some(module_name) = app.find_module_definition_for_node(target_id) {
+        if let Some(name) = target_id.strip_prefix("__var_") {
+            app.ast_mut().remove_global_variable(name)?;
+        } else if let Some(name) = target_id.strip_prefix("__func_") {
+            app.ast_mut().remove_function_define(name)?;
+        } else if let Some(module_name) = app.find_module_definition_for_node(target_id) {
             let definition = app
                 .ast_mut()
                 .module_defines
@@ -331,6 +338,8 @@ pub fn cmd_delete(app: &mut App, node_id: &str) -> CommandResult<()> {
             app.ast_mut().delete_node(target_id)?;
         }
     }
+    app.library
+        .reload_custom_functions_from_ast(&app.ast.function_defines);
     app.selected_nodes.clear();
 
     app.restore_tree_selection();
@@ -1059,9 +1068,9 @@ pub fn cmd_global(app: &mut App, var_spec: &str) -> CommandResult<()> {
     // Create global variable
     let global_var = GlobalVariable::new(name_part.to_string(), value);
 
-    // Add to AST
+    // Add or replace in the AST while preserving the definition's position.
     app.ast_mut()
-        .add_global_variable(global_var)
+        .upsert_global_variable(global_var)
         .map_err(CommandError::AstError)?;
 
     Ok(())
@@ -1154,20 +1163,12 @@ pub fn cmd_funcdef(app: &mut App, func_def: &str) -> CommandResult<()> {
             ))
         })?;
 
-        // Check if function with this name already exists
-        if app.ast.find_function_define(func_name).is_some() {
-            return Err(CommandError::InvalidCommand(format!(
-                "Function '{}' already defined",
-                func_name
-            )));
-        }
-
         // Create FunctionDefinition for AST
         let function_def = FunctionDefinition::new(func_name.to_string(), parameters.clone(), body);
 
         // Add to AST
         app.ast_mut()
-            .add_function_define(function_def)
+            .upsert_function_define(function_def)
             .map_err(CommandError::AstError)?;
     } else {
         // No parentheses found - just a function name with no parameters
@@ -1180,21 +1181,13 @@ pub fn cmd_funcdef(app: &mut App, func_def: &str) -> CommandResult<()> {
             )));
         }
 
-        // Check if function with this name already exists
-        if app.ast.find_function_define(func_name).is_some() {
-            return Err(CommandError::InvalidCommand(format!(
-                "Function '{}' already defined",
-                func_name
-            )));
-        }
-
         // Create FunctionDefinition for AST with empty parameters and placeholder body
         let function_def =
             FunctionDefinition::new(func_name.to_string(), Vec::new(), Expr::Integer(0));
 
         // Add to AST
         app.ast_mut()
-            .add_function_define(function_def)
+            .upsert_function_define(function_def)
             .map_err(CommandError::AstError)?;
     }
 
@@ -2310,7 +2303,7 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
             app.push_undo();
             cmd_delete(app, "")
         },
-        "Delete selected module subtrees, or the current subtree when nothing is selected",
+        "Delete selected module subtrees or the current node, global, or function definition",
         0,
         Some(0),
         "delete",
@@ -2799,7 +2792,7 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
             app.push_undo();
             cmd_funcdef(app, &full_command)
         },
-        "Define a new function",
+        "Define or redefine a function",
         1,
         None, // Variable number of parameters (optional)
         "function name(params) = expression",
@@ -2867,7 +2860,7 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
                 ));
             })
         },
-        "Define a global variable",
+        "Define or redefine a global variable",
         1,
         None,
         "global <name>=<value>",
@@ -4038,7 +4031,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cmd_global_duplicate() {
+    fn test_cmd_global_redefines_existing_variable() {
         use App;
 
         let mut app = App::new();
@@ -4047,15 +4040,16 @@ mod tests {
         let result = cmd_global(&mut app, "width=100");
         assert!(result.is_ok(), "First cmd_global should succeed");
 
-        // Try to add duplicate
+        // Redefine in place
         let result = cmd_global(&mut app, "width=200");
-        assert!(
-            result.is_err(),
-            "Second cmd_global with same name should fail"
-        );
+        assert!(result.is_ok());
 
-        // Check that only one variable was added to AST
+        // Check that only one variable remains and its value was replaced
         assert_eq!(app.ast.global_variables().len(), 1);
+        assert_eq!(
+            app.ast.global_variables()[0].value,
+            openscad_core::Expr::Integer(200)
+        );
     }
 
     #[test]
@@ -4157,7 +4151,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cmd_funcdef_duplicate_name() {
+    fn test_cmd_funcdef_redefines_existing_function() {
         use App;
 
         let mut app = App::new();
@@ -4166,12 +4160,37 @@ mod tests {
         let result = cmd_funcdef(&mut app, "my_func(x) = 10");
         assert!(result.is_ok());
 
-        // Second function definition with same name should fail
+        // Second function definition with the same name replaces it in place
         let result = cmd_funcdef(&mut app, "my_func(y) = 20");
-        assert!(result.is_err());
+        assert!(result.is_ok());
 
-        // Verify only one function in AST
+        // Verify only one, updated function in AST and library completion metadata
         assert_eq!(app.ast.function_defines.len(), 1);
+        assert_eq!(app.ast.function_defines[0].parameters[0].name, "y");
+        assert_eq!(
+            app.ast.function_defines[0].body,
+            openscad_core::Expr::Integer(20)
+        );
+        assert_eq!(
+            app.library.get_function("my_func").unwrap().parameters[0].name,
+            "y"
+        );
+    }
+
+    #[test]
+    fn test_cmd_delete_global_and_function_definitions_without_cascading() {
+        let mut app = App::new();
+        cmd_global(&mut app, "size=10").unwrap();
+        cmd_funcdef(&mut app, "double(x)=x*2").unwrap();
+        cmd_funcdef(&mut app, "uses_double(x)=double(x)").unwrap();
+
+        cmd_delete(&mut app, "__var_size").unwrap();
+        assert!(app.ast.find_global_variable("size").is_none());
+
+        cmd_delete(&mut app, "__func_double").unwrap();
+        assert!(app.ast.find_function_define("double").is_none());
+        assert!(app.ast.find_function_define("uses_double").is_some());
+        assert!(app.library.get_function("double").is_none());
     }
 
     #[test]
