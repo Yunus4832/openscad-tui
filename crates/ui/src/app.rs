@@ -318,6 +318,7 @@ pub struct App {
     // Command history
     pub command_history: Vec<String>,
     pub history_index: Option<usize>,
+    pub history_draft: Option<String>,
     pub history_max_size: usize,
 
     // 文件相关
@@ -362,6 +363,7 @@ impl App {
             completion_active: false,
             command_history: Vec::new(),
             history_index: None,
+            history_draft: None,
             history_max_size: 100,
             current_file: None,
             saved: true,
@@ -931,13 +933,18 @@ impl App {
 
         // Reset history index
         self.history_index = None;
+        self.history_draft = None;
     }
 
     /// Get previous command from history
-    pub fn get_previous_command(&mut self) -> Option<String> {
+    pub fn get_previous_command(&mut self, current_input: &str) -> Option<String> {
         if self.command_history.is_empty() {
             self.history_index = None;
             return None;
+        }
+
+        if self.history_index.is_none() {
+            self.history_draft = Some(current_input.to_string());
         }
 
         let index = match self.history_index {
@@ -965,9 +972,9 @@ impl App {
                     self.history_index = Some(next_index);
                     Some(self.command_history[next_index].clone())
                 } else {
-                    // Reached the most recent command, return empty string (back to normal input)
+                    // Return to the unfinished input captured before history navigation.
                     self.history_index = None;
-                    Some(String::new())
+                    Some(self.history_draft.take().unwrap_or_default())
                 }
             }
         }
@@ -1010,19 +1017,22 @@ mod tests {
 
         // Test getting previous commands (going backwards in history)
         assert_eq!(
-            app.get_previous_command(),
+            app.get_previous_command(""),
             Some("translate [10, 0, 0]".to_string())
         );
         assert_eq!(app.history_index, Some(2));
 
-        assert_eq!(app.get_previous_command(), Some("insert cube".to_string()));
+        assert_eq!(
+            app.get_previous_command(""),
+            Some("insert cube".to_string())
+        );
         assert_eq!(app.history_index, Some(1));
 
-        assert_eq!(app.get_previous_command(), Some("help".to_string()));
+        assert_eq!(app.get_previous_command(""), Some("help".to_string()));
         assert_eq!(app.history_index, Some(0));
 
         // Should stay at the first command when trying to go further back
-        assert_eq!(app.get_previous_command(), Some("help".to_string()));
+        assert_eq!(app.get_previous_command(""), Some("help".to_string()));
         assert_eq!(app.history_index, Some(0));
 
         // Test getting next commands (going forward in history)
@@ -1038,6 +1048,20 @@ mod tests {
         // Going forward past the end should clear the index and return empty string
         assert_eq!(app.get_next_command(), Some(String::new()));
         assert_eq!(app.history_index, None);
+    }
+
+    #[test]
+    fn test_command_history_restores_unfinished_input() {
+        let mut app = App::new();
+        app.add_to_history("insert cube");
+
+        assert_eq!(
+            app.get_previous_command("replace sph"),
+            Some("insert cube".to_string())
+        );
+        assert_eq!(app.get_next_command(), Some("replace sph".to_string()));
+        assert_eq!(app.history_index, None);
+        assert_eq!(app.history_draft, None);
     }
 
     #[test]
@@ -1058,7 +1082,7 @@ mod tests {
         let mut app = App::new();
 
         // Getting from empty history should return None
-        assert_eq!(app.get_previous_command(), None);
+        assert_eq!(app.get_previous_command(""), None);
         assert_eq!(app.get_next_command(), None);
     }
 

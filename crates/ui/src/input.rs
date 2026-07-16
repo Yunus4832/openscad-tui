@@ -174,7 +174,8 @@ fn handle_command_input(key: KeyEvent, app: &mut App) {
 
         // Ctrl+P to get previous command from history (vim-style)
         KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            if let Some(prev_cmd) = app.get_previous_command() {
+            let draft = app.input_buffer.content().to_string();
+            if let Some(prev_cmd) = app.get_previous_command(&draft) {
                 app.input_buffer.set_content(&prev_cmd);
             }
         }
@@ -224,7 +225,8 @@ fn handle_command_input(key: KeyEvent, app: &mut App) {
 
         // Up arrow to get previous command from history
         KeyCode::Up => {
-            if let Some(prev_cmd) = app.get_previous_command() {
+            let draft = app.input_buffer.content().to_string();
+            if let Some(prev_cmd) = app.get_previous_command(&draft) {
                 app.input_buffer.set_content(&prev_cmd);
             }
         }
@@ -241,7 +243,8 @@ fn handle_command_input(key: KeyEvent, app: &mut App) {
 
         // Ctrl+P to get previous command from history (vim-style)
         KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            if let Some(prev_cmd) = app.get_previous_command() {
+            let draft = app.input_buffer.content().to_string();
+            if let Some(prev_cmd) = app.get_previous_command(&draft) {
                 app.input_buffer.set_content(&prev_cmd);
             }
         }
