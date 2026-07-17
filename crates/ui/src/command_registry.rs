@@ -24,6 +24,8 @@ pub enum CommandType {
     NodeParam,
     /// Remove a parameter without completing a value assignment.
     NodeParamUnset,
+    Preview,
+    Camera,
 }
 
 /// Command type - used for dynamic completion context analysis

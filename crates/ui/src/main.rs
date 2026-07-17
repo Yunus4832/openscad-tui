@@ -11,6 +11,7 @@ use ratatui::{
     backend::{Backend, CrosstermBackend},
     Terminal,
 };
+use ratatui_image::picker::Picker;
 use std::error::Error;
 use std::io;
 
@@ -25,7 +26,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut terminal = Terminal::new(backend)?;
 
     // Create app and run it
-    let app = App::new();
+    let picker = Picker::from_query_stdio().unwrap_or_else(|_| Picker::from_fontsize((10, 20)));
+    let mut app = App::new();
+    app.configure_image_picker(picker);
     let res = run_app(&mut terminal, app);
 
     // Restore terminal
@@ -46,15 +49,25 @@ fn main() -> Result<(), Box<dyn Error>> {
 
 fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Result<()> {
     loop {
+        app.poll_render_events();
+        app.model_preview.tick(std::time::Instant::now());
+        if app.take_terminal_clear_request() {
+            terminal.clear()?;
+        }
         terminal.draw(|f| {
-            draw(f, &app);
+            draw(f, &mut app);
         })?;
 
         if app.should_quit {
             return Ok(());
         }
 
-        if crossterm::event::poll(std::time::Duration::from_millis(250))? {
+        let poll_interval = if app.model_preview.auto_rotate {
+            std::time::Duration::from_millis(33)
+        } else {
+            std::time::Duration::from_millis(100)
+        };
+        if crossterm::event::poll(poll_interval)? {
             match event::read()? {
                 Event::Key(key) => {
                     handle_key(key, &mut app);

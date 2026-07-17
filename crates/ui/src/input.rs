@@ -20,6 +20,7 @@ pub fn handle_key(key: KeyEvent, app: &mut App) {
         InputMode::Command => handle_command_input(key, app),
         InputMode::ModuleEnterParams => handle_module_params_input(key, app),
         InputMode::Help => handle_help_input(key, app),
+        InputMode::Camera => handle_camera_input(key, app),
     }
 }
 
@@ -153,7 +154,59 @@ fn handle_normal_input(key: KeyEvent, app: &mut App) {
             execute_command(app, "help");
         }
 
+        // M - enter direct model camera mode
+        KeyCode::Char('M') => {
+            app.model_preview.mode = crate::preview::PreviewMode::Model;
+            app.input_mode = InputMode::Camera;
+        }
+
         _ => {}
+    }
+}
+
+fn handle_camera_input(key: KeyEvent, app: &mut App) {
+    use openscad_render::{Projection, StandardView};
+
+    let result = match key.code {
+        KeyCode::Esc | KeyCode::Char('q') => {
+            app.input_mode = InputMode::Normal;
+            return;
+        }
+        KeyCode::Char('h') => app.model_preview.orbit(-5.0, 0.0),
+        KeyCode::Char('l') => app.model_preview.orbit(5.0, 0.0),
+        KeyCode::Char('j') => app.model_preview.orbit(0.0, -5.0),
+        KeyCode::Char('k') => app.model_preview.orbit(0.0, 5.0),
+        KeyCode::Left => app.model_preview.pan(-0.05, 0.0),
+        KeyCode::Right => app.model_preview.pan(0.05, 0.0),
+        KeyCode::Up => app.model_preview.pan(0.0, 0.05),
+        KeyCode::Down => app.model_preview.pan(0.0, -0.05),
+        KeyCode::Char('+') | KeyCode::Char('=') => app.model_preview.zoom(0.85),
+        KeyCode::Char('-') => app.model_preview.zoom(1.15),
+        KeyCode::Char('f') => app.model_preview.fit(),
+        KeyCode::Char('p') => {
+            let use_orthographic = matches!(
+                app.model_preview.camera.projection,
+                Projection::Perspective { .. }
+            );
+            app.model_preview.set_projection(use_orthographic)
+        }
+        KeyCode::Char(' ') => {
+            app.model_preview.auto_rotate = !app.model_preview.auto_rotate;
+            Ok(())
+        }
+        KeyCode::Char('1') => app.model_preview.set_view(StandardView::Front),
+        KeyCode::Char('2') => app.model_preview.set_view(StandardView::Back),
+        KeyCode::Char('3') => app.model_preview.set_view(StandardView::Left),
+        KeyCode::Char('4') => app.model_preview.set_view(StandardView::Right),
+        KeyCode::Char('5') => app.model_preview.set_view(StandardView::Top),
+        KeyCode::Char('6') => app.model_preview.set_view(StandardView::Bottom),
+        KeyCode::Char('7') => app.model_preview.set_view(StandardView::Isometric),
+        _ => return,
+    };
+    if let Err(error) = result {
+        app.set_error(&error);
+    } else {
+        app.clear_error();
     }
 }
 
@@ -779,9 +832,59 @@ fn analyze_input_context(input: &str, app: &App) -> CompletionContext {
                     CompletionContext::NodeParamUnset
                 }
             }
+            CommandType::Preview => {
+                literal_command_context(input, &parts, &["source", "model"], &[])
+            }
+            CommandType::Camera => {
+                let second_level: &[&str] = match parts.get(1).copied() {
+                    Some("projection") => &["perspective", "orthographic"],
+                    Some("view") => &["front", "back", "left", "right", "top", "bottom", "iso"],
+                    Some("auto-rotate") => &["on", "off"],
+                    _ => &[],
+                };
+                literal_command_context(
+                    input,
+                    &parts,
+                    &[
+                        "projection",
+                        "view",
+                        "orbit",
+                        "pan",
+                        "zoom",
+                        "fit",
+                        "auto-rotate",
+                    ],
+                    second_level,
+                )
+            }
         }
     } else {
         CompletionContext::Command
+    }
+}
+
+fn literal_command_context(
+    input: &str,
+    parts: &[&str],
+    first_level: &[&str],
+    second_level: &[&str],
+) -> CompletionContext {
+    let candidates = if (parts.len() == 1 && input.ends_with(' '))
+        || (parts.len() == 2 && !input.ends_with(' '))
+    {
+        first_level
+    } else if (parts.len() == 2 && input.ends_with(' '))
+        || (parts.len() == 3 && !input.ends_with(' '))
+    {
+        second_level
+    } else {
+        return CompletionContext::Command;
+    };
+    CompletionContext::Literal {
+        candidates: candidates
+            .iter()
+            .map(|value| (*value).to_string())
+            .collect(),
     }
 }
 
@@ -1382,6 +1485,16 @@ fn generate_completions(input: &str, app: &App) -> (Vec<CompletionCandidate>, Co
                 .collect();
             candidates
         }
+        CompletionContext::Literal { candidates } => {
+            let candidates = candidates
+                .iter()
+                .cloned()
+                .map(|value| CompletionCandidate::new(value, CandidateType::Command))
+                .collect::<Vec<_>>();
+            let prefix = input.split_whitespace().last().unwrap_or("");
+            let prefix = if input.ends_with(' ') { "" } else { prefix };
+            filter_by_prefix(&candidates, prefix)
+        }
     };
 
     (candidates, analysis)
@@ -1575,6 +1688,14 @@ fn get_replacement_range(input: &str, context: &CompletionContext, app: &App) ->
                     0 // 如果没有空格，从开头开始
                 };
                 (path_start, input.len()) // 替换从路径开始到末尾的所有内容
+            }
+        }
+        CompletionContext::Literal { .. } => {
+            if input.ends_with(' ') {
+                (input.len(), input.len())
+            } else {
+                let token_index = input.split_whitespace().count().saturating_sub(1);
+                whitespace_token_range(input, token_index).unwrap_or((input.len(), input.len()))
             }
         }
     }
@@ -1841,6 +1962,26 @@ mod tests {
         assert!(!candidates
             .iter()
             .any(|candidate| candidate.content == "[0,0,0]"));
+    }
+
+    #[test]
+    fn test_preview_and_camera_commands_complete_in_stages() {
+        let app = App::new();
+        let (preview, _) = generate_completions("preview ", &app);
+        assert_eq!(
+            preview
+                .iter()
+                .map(|candidate| candidate.content.as_str())
+                .collect::<Vec<_>>(),
+            vec!["source", "model"]
+        );
+
+        let (camera, _) = generate_completions("camera view ", &app);
+        assert!(camera.iter().any(|candidate| candidate.content == "iso"));
+        assert!(camera.iter().any(|candidate| candidate.content == "front"));
+
+        let (_, analysis) = generate_completions("camera projection per", &app);
+        assert_eq!(analysis.replacement_range, (18, 21));
     }
 
     #[test]

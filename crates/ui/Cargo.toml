@@ -14,8 +14,11 @@ thiserror.workspace = true
 unicode-width.workspace = true
 tui-tree-widget.workspace = true
 dirs.workspace = true
+image.workspace = true
+ratatui-image.workspace = true
 openscad-core = { path = "../core" }
 openscad-library = { path = "../library" }
+openscad-render = { path = "../render" }
 
 [[bin]]
 name = "openscad-tui"

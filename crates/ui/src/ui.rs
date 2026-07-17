@@ -1,6 +1,7 @@
 //! UI rendering module
 
 use crate::app::App;
+use crate::preview::{ModelPreviewStatus, PreviewMode};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -8,9 +9,10 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Paragraph},
     Frame,
 };
+use ratatui_image::StatefulImage;
 use tui_tree_widget::{Tree, TreeItem};
 
-pub fn draw(f: &mut Frame, app: &App) {
+pub fn draw(f: &mut Frame, app: &mut App) {
     // 主布局：上部是内容区，下部是命令行
     let main_chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -270,7 +272,7 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
     match app.input_mode {
         InputMode::Normal => {
             title = " Normal Mode ".to_string();
-            prompt = "i=insert  a/A=set/unset arg  y/p=yank/paste  x=remove  c=replace  d=delete  v=select  j/k=nav  h/l=fold  u/ctrl-r=undo/redo  :=cmd  ?=help  q=quit".to_string();
+            prompt = "i=insert  a/A=set/unset arg  y/p=yank/paste  x=remove  c=replace  d=delete  M=camera  v=select  j/k=nav  h/l=fold  u/ctrl-r=undo/redo  :=cmd  ?=help  q=quit".to_string();
             style_fg = Color::Yellow;
         }
         InputMode::Command => {
@@ -294,6 +296,11 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
             title = " Help ".to_string();
             prompt = "Press Esc or q to close".to_string();
             style_fg = Color::Cyan;
+        }
+        InputMode::Camera => {
+            title = " Camera Mode ".to_string();
+            prompt = "h/j/k/l=orbit  arrows=pan  +/-=zoom  f=fit  p=projection  1..7=view  space=auto-rotate  Esc/q=exit".to_string();
+            style_fg = Color::Magenta;
         }
     };
 
@@ -385,7 +392,11 @@ fn shows_input_buffer(mode: crate::app::InputMode) -> bool {
     )
 }
 
-fn draw_preview(f: &mut Frame, app: &App, area: Rect) {
+fn draw_preview(f: &mut Frame, app: &mut App, area: Rect) {
+    if app.model_preview.mode == PreviewMode::Model {
+        draw_model_preview(f, app, area);
+        return;
+    }
     let block = Block::default()
         .title(" Preview ")
         .borders(Borders::ALL)
@@ -428,6 +439,37 @@ fn draw_preview(f: &mut Frame, app: &App, area: Rect) {
     let paragraph = Paragraph::new(visible_lines).block(block).scroll((0, 0));
 
     f.render_widget(paragraph, area);
+}
+
+fn draw_model_preview(f: &mut Frame, app: &mut App, area: Rect) {
+    app.model_preview.set_area(area);
+    let status = match &app.model_preview.status {
+        ModelPreviewStatus::Empty => "not rendered".to_string(),
+        ModelPreviewStatus::Stale => "stale — run :render".to_string(),
+        ModelPreviewStatus::Generating => "OpenSCAD generating OFF…".to_string(),
+        ModelPreviewStatus::Rasterizing => "rasterizing…".to_string(),
+        ModelPreviewStatus::Ready { triangles } => format!("{triangles} triangles"),
+        ModelPreviewStatus::Failed(error) => format!("failed: {error}"),
+    };
+    let title = format!(
+        " Model [{:?}] — {} ",
+        app.model_preview.protocol_type(),
+        status
+    );
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .style(Style::default().fg(Color::Green));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    if let Some(protocol) = app.model_preview.protocol_mut() {
+        f.render_stateful_widget(StatefulImage::default(), inner, protocol);
+    } else {
+        f.render_widget(
+            Paragraph::new(status).style(Style::default().fg(Color::DarkGray)),
+            inner,
+        );
+    }
 }
 
 fn draw_help_modal(f: &mut Frame, app: &App) {
@@ -601,5 +643,6 @@ mod tests {
         assert!(shows_input_buffer(InputMode::Command));
         assert!(!shows_input_buffer(InputMode::Normal));
         assert!(!shows_input_buffer(InputMode::Help));
+        assert!(!shows_input_buffer(InputMode::Camera));
     }
 }

@@ -4,6 +4,7 @@ pub mod app;
 pub mod command_registry;
 pub mod commands;
 pub mod input;
+pub mod preview;
 pub mod ui;
 
 pub use app::App;

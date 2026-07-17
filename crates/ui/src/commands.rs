@@ -9,8 +9,80 @@ use thiserror::Error;
 
 use crate::app::{App, InputMode, PendingModuleAction};
 use crate::command_registry::CommandType;
+use crate::preview::PreviewMode;
 
 const MAX_RECURSION_DEPTH: usize = 1000;
+
+pub fn cmd_render(app: &mut App) -> CommandResult<()> {
+    let source = app.ast.to_scad();
+    let current_file = app.current_file.clone();
+    app.model_preview
+        .render(source, current_file.as_deref())
+        .map_err(CommandError::Custom)
+}
+
+pub fn cmd_preview(app: &mut App, mode: &str) -> CommandResult<()> {
+    app.model_preview.mode = match mode {
+        "source" => {
+            // Sixel/Kitty images live in a terminal graphics layer and are not
+            // necessarily erased when Ratatui paints text over the same cells.
+            app.terminal_clear_requested = true;
+            PreviewMode::Source
+        }
+        "model" => PreviewMode::Model,
+        _ => {
+            return Err(CommandError::InvalidCommand(
+                "Usage: preview source|model".to_string(),
+            ))
+        }
+    };
+    Ok(())
+}
+
+pub fn cmd_camera(app: &mut App, args: &[&str]) -> CommandResult<()> {
+    use openscad_render::StandardView;
+
+    let invalid = || {
+        CommandError::InvalidCommand(
+        "Usage: camera projection perspective|orthographic | view front|back|left|right|top|bottom|iso | orbit <yaw-deg> <pitch-deg> | pan <x> <y> | zoom <factor> | fit | auto-rotate on|off"
+            .to_string(),
+    )
+    };
+    let parse = |value: &str| value.parse::<f32>().map_err(|_| invalid());
+    let result = match args {
+        ["projection", "perspective"] => app.model_preview.set_projection(false),
+        ["projection", "orthographic"] => app.model_preview.set_projection(true),
+        ["view", name] => {
+            let view = match *name {
+                "front" => StandardView::Front,
+                "back" => StandardView::Back,
+                "left" => StandardView::Left,
+                "right" => StandardView::Right,
+                "top" => StandardView::Top,
+                "bottom" => StandardView::Bottom,
+                "iso" | "isometric" => StandardView::Isometric,
+                _ => return Err(invalid()),
+            };
+            app.model_preview.set_view(view)
+        }
+        ["orbit", yaw, pitch] => app.model_preview.orbit(parse(yaw)?, parse(pitch)?),
+        ["pan", horizontal, vertical] => {
+            app.model_preview.pan(parse(horizontal)?, parse(vertical)?)
+        }
+        ["zoom", factor] => app.model_preview.zoom(parse(factor)?),
+        ["fit"] => app.model_preview.fit(),
+        ["auto-rotate", value] => {
+            app.model_preview.auto_rotate = match *value {
+                "on" => true,
+                "off" => false,
+                _ => return Err(invalid()),
+            };
+            Ok(())
+        }
+        _ => return Err(invalid()),
+    };
+    result.map_err(CommandError::Custom)
+}
 
 #[derive(Error, Debug)]
 pub enum CommandError {
@@ -880,6 +952,7 @@ pub fn cmd_load_force(app: &mut App, filename: &str) -> CommandResult<()> {
 
     // Replace AST
     app.ast = Arc::new(ast);
+    app.model_preview.mark_stale();
 
     // First, reload custom modules in library manager
     app.library
@@ -2880,6 +2953,56 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
         true,
         true,
     ));
+
+    registry.register(CommandDef::new(
+        "render",
+        Vec::<&str>::new(),
+        |app, args| {
+            if args.is_empty() {
+                cmd_render(app)
+            } else {
+                Err(CommandError::InvalidCommand(
+                    "render command takes no arguments".to_string(),
+                ))
+            }
+        },
+        "Generate and display the current model with OpenSCAD",
+        0,
+        Some(0),
+        "render",
+        vec!["render"],
+        CommandType::NoArg,
+        false,
+        true,
+    ));
+
+    registry.register(CommandDef::new(
+        "preview",
+        Vec::<&str>::new(),
+        |app, args| cmd_preview(app, args[0]),
+        "Switch between source and model preview",
+        1,
+        Some(1),
+        "preview source|model",
+        vec!["preview source", "preview model"],
+        CommandType::Preview,
+        false,
+        true,
+    ));
+
+    registry.register(CommandDef::new(
+        "camera",
+        Vec::<&str>::new(),
+        cmd_camera,
+        "Change model preview projection and camera",
+        1,
+        Some(3),
+        "camera <projection|view|orbit|pan|zoom|fit> ...",
+        vec!["camera view iso", "camera orbit 10 -5", "camera zoom 0.8"],
+        CommandType::Camera,
+        false,
+        true,
+    ));
 }
 
 #[cfg(test)]
@@ -2904,6 +3027,18 @@ mod tests {
             .help_doc
             .iter()
             .any(|line| line.contains("replace <module_name> [params]")));
+    }
+
+    #[test]
+    fn test_source_preview_requests_terminal_graphics_clear() {
+        let mut app = App::new();
+        app.model_preview.mode = PreviewMode::Model;
+
+        cmd_preview(&mut app, "source").unwrap();
+
+        assert_eq!(app.model_preview.mode, PreviewMode::Source);
+        assert!(app.take_terminal_clear_request());
+        assert!(!app.take_terminal_clear_request());
     }
 
     #[test]

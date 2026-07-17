@@ -251,7 +251,29 @@ wq
 - 布尔操作：`union`、`difference`、`intersection`
 - 定义：`global`、`function`、`module`
 - 文件：`write`、`write!`、`edit`、`edit!`、`export`、`library`
+- 预览：`render`、`preview source|model`、`camera ...`
 - 系统：`help`、`quit`、`quit!`、`wq`
+
+## 模型预览
+
+执行 `render` 会调用本机 `openscad`，把当前模型导出为 OFF 并在后台进行 CPU
+光栅化；编辑 AST 只会把已有预览标记为过期，不会自动启动 OpenSCAD。终端支持
+Sixel 时使用 Sixel，否则自动退回 Unicode 半块显示。
+
+```text
+render
+preview source|model
+camera projection perspective|orthographic
+camera view front|back|left|right|top|bottom|iso
+camera orbit <yaw-deg> <pitch-deg>
+camera pan <x> <y>
+camera zoom <factor>
+camera fit
+camera auto-rotate on|off
+```
+
+Normal Mode 按 `M` 进入 Camera Mode：`h/j/k/l` 环绕，方向键平移，`+/-` 缩放，
+`f` 适配模型，`p` 切换投影，`1..7` 选择标准视角，空格切换自动旋转，`Esc/q` 返回。
 
 节点操作示例：
 
@@ -274,6 +296,7 @@ openscad-tui/
 ├── crates/
 │   ├── core/       # AST、表达式解析和 OpenSCAD 代码生成
 │   ├── library/    # 内置/外部模块与函数元数据
+│   ├── render/     # OFF、相机、CPU 光栅化和异步渲染服务
 │   └── ui/         # TUI、输入、命令和应用状态
 ├── stdlib.json     # 内置模块与函数元数据
 └── Cargo.toml      # Cargo workspace

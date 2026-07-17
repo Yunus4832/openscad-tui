@@ -226,6 +226,8 @@ pub enum InputMode {
     ModuleEnterParams,
     /// Help modal - displaying help information
     Help,
+    /// Direct camera manipulation for the model preview.
+    Camera,
     /// Legacy modes (no longer used, kept for compatibility)
     Normal,
 }
@@ -274,6 +276,9 @@ pub enum CompletionContext {
         kind: ExpressionCompletionKind,
         local_identifiers: Vec<String>,
     },
+    Literal {
+        candidates: Vec<String>,
+    },
     /// File name completion (for write/edit/library commands)
     File {
         /// Current path being completed
@@ -297,6 +302,7 @@ pub struct App {
     pub ast: Arc<AstRoot>,
     pub library: LibraryManager,
     pub command_registry: CommandRegistry,
+    pub model_preview: crate::preview::ModelPreview,
     pub selected_nodes: Vec<String>,
     pub undo_stack: VecDeque<Arc<AstRoot>>,
     pub redo_stack: VecDeque<Arc<AstRoot>>,
@@ -320,6 +326,8 @@ pub struct App {
     pub pending_module_name: Option<String>,
     pub preview_offset: usize,
     pub should_quit: bool,
+    /// Request a backend clear before the next draw (needed to erase terminal graphics).
+    pub terminal_clear_requested: bool,
     pub message: Option<String>,
     pub message_type: MessageType,
 
@@ -355,6 +363,7 @@ impl App {
             ast: Arc::new(AstRoot::new()),
             library: LibraryManager::new(),
             command_registry: CommandRegistry::new(),
+            model_preview: crate::preview::ModelPreview::default(),
             selected_nodes: Vec::new(),
             undo_stack: VecDeque::with_capacity(100),
             redo_stack: VecDeque::with_capacity(100),
@@ -369,6 +378,7 @@ impl App {
             pending_module_name: None,
             preview_offset: 0,
             should_quit: false,
+            terminal_clear_requested: false,
             message: None,
             message_type: MessageType::Info,
             completion_candidates: Vec::new(),
@@ -732,6 +742,7 @@ impl App {
         if let Some(prev) = self.undo_stack.pop_back() {
             self.redo_stack.push_back(self.ast.clone());
             self.ast = prev;
+            self.model_preview.mark_stale();
             self.restore_tree_selection();
             self.clear_error();
         } else {
@@ -743,6 +754,7 @@ impl App {
         if let Some(next) = self.redo_stack.pop_back() {
             self.undo_stack.push_back(self.ast.clone());
             self.ast = next;
+            self.model_preview.mark_stale();
             self.restore_tree_selection();
             self.clear_error();
         } else {
@@ -911,6 +923,19 @@ impl App {
 
     pub fn mark_dirty(&mut self) {
         self.saved = false;
+        self.model_preview.mark_stale();
+    }
+
+    pub fn configure_image_picker(&mut self, picker: ratatui_image::picker::Picker) {
+        self.model_preview.set_picker(picker);
+    }
+
+    pub fn poll_render_events(&mut self) {
+        self.model_preview.poll();
+    }
+
+    pub fn take_terminal_clear_request(&mut self) -> bool {
+        std::mem::take(&mut self.terminal_clear_requested)
     }
 
     pub fn mark_saved(&mut self) {
