@@ -266,6 +266,7 @@ pub enum CompletionContext {
         module_param_name: String,
     },
     NodeParam,
+    NodeParamUnset,
     NodeParamValue {
         parameter_name: String,
     },

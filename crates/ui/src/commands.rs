@@ -193,11 +193,7 @@ fn insert_prepared_module(
                 app.ast_mut().module_defines[mod_def_idx].body.push(module);
             } else {
                 // Insert after the selected node in module definition body
-                insert_after_node(
-                    &mut app.ast_mut().module_defines[mod_def_idx].body,
-                    &selected_id,
-                    module,
-                )?;
+                app.ast_mut().insert_after(&selected_id, module)?;
             }
         } else {
             // Check if selected node is in Modules section (not a section header)
@@ -214,7 +210,7 @@ fn insert_prepared_module(
                 app.ast_mut().add_module(module)?;
             } else if let Some(selected_id) = selected {
                 // Find the selected node and insert after it
-                insert_after_node(&mut app.ast_mut().modules, &selected_id, module)?;
+                app.ast_mut().insert_after(&selected_id, module)?;
             }
         }
 
@@ -255,40 +251,6 @@ fn insert_prepared_module(
     }
 }
 
-/// Helper function to insert a node after a specific target node
-/// This function searches for the target node and inserts the new module immediately after it
-/// at the same level in the tree hierarchy.
-///
-/// Returns Ok if the target was found and insertion was successful.
-/// Returns Err if the target node ID was not found anywhere in the tree.
-fn insert_after_node(
-    modules: &mut Vec<ModuleNode>,
-    target_id: &str,
-    new_module: ModuleNode,
-) -> CommandResult<()> {
-    // First, check if the target is at this level
-    for i in 0..modules.len() {
-        if modules[i].id == target_id {
-            // Found the target at this level, insert after it
-            modules.insert(i + 1, new_module);
-            return Ok(());
-        }
-    }
-
-    // Target not at this level, search in children recursively
-    for module in modules {
-        if let Ok(()) = insert_after_node(&mut module.children, target_id, new_module.clone()) {
-            return Ok(());
-        }
-    }
-
-    // Target node not found in any branch
-    Err(CommandError::InvalidCommand(format!(
-        "Target node not found: {}",
-        target_id
-    )))
-}
-
 /// Delete command
 pub fn cmd_delete(app: &mut App, node_id: &str) -> CommandResult<()> {
     let node_ids = if !node_id.is_empty() {
@@ -305,10 +267,12 @@ pub fn cmd_delete(app: &mut App, node_id: &str) -> CommandResult<()> {
             .ok_or(CommandError::NoNodeSelected)?]
     };
 
-    if let Some(section_id) = node_ids
-        .iter()
-        .find(|id| id.starts_with("__") && !id.starts_with("__var_") && !id.starts_with("__func_"))
-    {
+    if let Some(section_id) = node_ids.iter().find(|id| {
+        id.starts_with("__")
+            && !id.starts_with("__var_")
+            && !id.starts_with("__func_")
+            && !id.starts_with("__moddef_")
+    }) {
         return Err(CommandError::Custom(format!(
             "Cannot delete section header: {}",
             section_id
@@ -320,26 +284,17 @@ pub fn cmd_delete(app: &mut App, node_id: &str) -> CommandResult<()> {
             app.ast_mut().remove_global_variable(name)?;
         } else if let Some(name) = target_id.strip_prefix("__func_") {
             app.ast_mut().remove_function_define(name)?;
-        } else if let Some(module_name) = app.find_module_definition_for_node(target_id) {
-            let definition = app
-                .ast_mut()
-                .module_defines
-                .iter_mut()
-                .find(|definition| definition.name == module_name)
-                .ok_or_else(|| {
-                    CommandError::InvalidCommand(format!(
-                        "Module definition not found: {}",
-                        module_name
-                    ))
-                })?;
+        } else if let Some(name) = target_id.strip_prefix("__moddef_") {
+            app.ast_mut().remove_module_define(name)?;
+        } else if app.ast.find_node_anywhere(target_id).is_some() {
             // A selected descendant may already have been removed with its parent.
-            let _ = delete_node_from_module_definition(&mut definition.body, target_id);
-        } else if app.ast.find_node_by_id(target_id).is_some() {
-            app.ast_mut().delete_node(target_id)?;
+            let _ = app.ast_mut().delete_node(target_id);
         }
     }
     app.library
         .reload_custom_functions_from_ast(&app.ast.function_defines);
+    app.library
+        .reload_custom_modules_from_ast(&app.ast.module_defines);
     app.selected_nodes.clear();
 
     app.restore_tree_selection();
@@ -1333,7 +1288,6 @@ fn expand_tilde<P: AsRef<Path>>(path: P) -> PathBuf {
 /// Define a new custom module
 pub fn cmd_moddef(app: &mut App, module_name: &str, params: Option<&str>) -> CommandResult<()> {
     use openscad_core::ModuleDefinition;
-    use openscad_library::{ModuleDef, ParameterDef};
 
     // Parse parameters
     let parameters = if let Some(param_str) = params {
@@ -1354,39 +1308,15 @@ pub fn cmd_moddef(app: &mut App, module_name: &str, params: Option<&str>) -> Com
     // Clear selection after copying
     app.selected_nodes.clear();
 
-    // Determine if module accepts children (contains a children module in its body)
-    let accepts_children = contains_children_module(&children);
-
     // Create ModuleDefinition for AST
-    let module_def = ModuleDefinition::new(module_name.to_string(), parameters.clone(), children);
+    let module_def = ModuleDefinition::new(module_name.to_string(), parameters, children);
 
-    // Add to AST
+    // Add or replace in the AST while preserving the definition's position.
     app.ast_mut()
-        .add_module_define(module_def)
+        .upsert_module_define(module_def)
         .map_err(CommandError::AstError)?;
-
-    // Create ModuleDef for library manager
-    let library_params: Vec<ParameterDef> = parameters
-        .iter()
-        .map(|p| {
-            ParameterDef {
-                name: p.name.clone(),
-                param_type: "any".to_string(), // Default type, could be inferred
-                default: p.default.as_ref().map(|e| e.to_scad()),
-                description: None,
-            }
-        })
-        .collect();
-
-    let module_lib_def = ModuleDef {
-        name: module_name.to_string(),
-        description: Some(format!("User-defined module: {}", module_name)),
-        parameters: library_params,
-        accepts_children, // Custom modules accept children if they contain a children module
-    };
-
-    // Add to library manager
-    app.library.add_custom_module(module_lib_def);
+    app.library
+        .reload_custom_modules_from_ast(&app.ast.module_defines);
 
     // Update UI selection to show the new module definition
     if let Some(path) = app.find_node_path(&format!("__moddef_{}", module_name)) {
@@ -1528,28 +1458,6 @@ fn plan_parameter_update(
     Ok(PlannedParameterUpdate::AddNamed)
 }
 
-fn find_node_mut_in<'a>(nodes: &'a mut [ModuleNode], node_id: &str) -> Option<&'a mut ModuleNode> {
-    for node in nodes {
-        if node.id == node_id {
-            return Some(node);
-        }
-        if let Some(found) = find_node_mut_in(&mut node.children, node_id) {
-            return Some(found);
-        }
-    }
-    None
-}
-
-fn find_module_node_mut<'a>(app: &'a mut App, node_id: &str) -> Option<&'a mut ModuleNode> {
-    if app.ast.find_node_by_id(node_id).is_some() {
-        return app.ast_mut().find_node_mut(node_id);
-    }
-    app.ast_mut()
-        .module_defines
-        .iter_mut()
-        .find_map(|definition| find_node_mut_in(&mut definition.body, node_id))
-}
-
 pub fn cmd_set_parameter(app: &mut App, parameter_spec: &str) -> CommandResult<()> {
     let (parameter_name, value_source) = parameter_spec.split_once('=').ok_or_else(|| {
         CommandError::InvalidCommand("Usage: set <parameter_name>=<expression>".to_string())
@@ -1584,7 +1492,9 @@ pub fn cmd_set_parameter(app: &mut App, parameter_spec: &str) -> CommandResult<(
         .collect::<CommandResult<Vec<_>>>()?;
 
     for (node_id, update) in updates {
-        let node = find_module_node_mut(app, &node_id)
+        let node = app
+            .ast_mut()
+            .find_node_anywhere_mut(&node_id)
             .ok_or_else(|| CommandError::InvalidCommand(format!("Node not found: {}", node_id)))?;
         match update {
             PlannedParameterUpdate::Existing(selector) => {
@@ -1603,42 +1513,50 @@ pub fn cmd_set_parameter(app: &mut App, parameter_spec: &str) -> CommandResult<(
     Ok(())
 }
 
-fn find_module_node(app: &App, node_id: &str) -> Option<ModuleNode> {
-    if let Some(node) = app.ast.find_node_by_id(node_id) {
-        return Some(node.clone());
+pub fn cmd_unset_parameter(app: &mut App, parameter_name: &str) -> CommandResult<()> {
+    let parameter_name = parameter_name.trim();
+    if parameter_name.is_empty() {
+        return Err(CommandError::InvalidCommand(
+            "Usage: unset <parameter_name>".to_string(),
+        ));
     }
-    app.ast
-        .module_defines
+    let target_ids = selected_or_current_node_ids(app)?;
+    if target_ids.iter().any(|node_id| node_id.starts_with("__")) {
+        return Err(CommandError::InvalidCommand(
+            "Only module node parameters can be removed".to_string(),
+        ));
+    }
+
+    // Resolve every selector before mutating anything so multi-node edits are atomic.
+    let removals = target_ids
         .iter()
-        .find_map(|definition| find_node_in_module_definition(&definition.body, node_id))
+        .map(
+            |node_id| match plan_parameter_update(app, node_id, parameter_name)? {
+                PlannedParameterUpdate::Existing(selector) => Ok((node_id.clone(), selector)),
+                PlannedParameterUpdate::AddNamed => Err(CommandError::InvalidCommand(format!(
+                    "Parameter '{}' is not explicitly set on node '{}'",
+                    parameter_name, node_id
+                ))),
+            },
+        )
+        .collect::<CommandResult<Vec<_>>>()?;
+
+    for (node_id, selector) in removals {
+        app.ast_mut()
+            .find_node_anywhere_mut(&node_id)
+            .ok_or_else(|| CommandError::InvalidCommand(format!("Node not found: {}", node_id)))?
+            .remove_argument(&selector)?;
+    }
+    app.set_info(&format!(
+        "Unset '{}' on {} node(s)",
+        parameter_name,
+        target_ids.len()
+    ));
+    Ok(())
 }
 
-fn remove_node_and_promote_children(nodes: &mut Vec<ModuleNode>, node_id: &str) -> bool {
-    if let Some(index) = nodes.iter().position(|node| node.id == node_id) {
-        let removed = nodes.remove(index);
-        nodes.splice(index..index, removed.children);
-        return true;
-    }
-    nodes
-        .iter_mut()
-        .any(|node| remove_node_and_promote_children(&mut node.children, node_id))
-}
-
-fn replace_node_at_position(
-    nodes: &mut [ModuleNode],
-    node_id: &str,
-    replacement: &mut Option<ModuleNode>,
-) -> bool {
-    for node in nodes {
-        if node.id == node_id {
-            *node = replacement.take().expect("replacement is consumed once");
-            return true;
-        }
-        if replace_node_at_position(&mut node.children, node_id, replacement) {
-            return true;
-        }
-    }
-    false
+fn find_module_node(app: &App, node_id: &str) -> Option<ModuleNode> {
+    app.ast.find_node_anywhere(node_id).cloned()
 }
 
 pub fn cmd_yank(app: &mut App, node_id: Option<&str>) -> CommandResult<()> {
@@ -1689,21 +1607,8 @@ pub fn cmd_paste(app: &mut App) -> CommandResult<String> {
         return Err(CommandError::InvalidCommand(
             "Select a module node or the Modules section before pasting".to_string(),
         ));
-    } else if let Some(module_name) = app.find_module_definition_for_node(&target_id) {
-        let definition = app
-            .ast_mut()
-            .module_defines
-            .iter_mut()
-            .find(|definition| definition.name == module_name)
-            .ok_or_else(|| {
-                CommandError::InvalidCommand(format!(
-                    "Module definition not found: {}",
-                    module_name
-                ))
-            })?;
-        insert_after_node(&mut definition.body, &target_id, pasted)?;
     } else {
-        insert_after_node(&mut app.ast_mut().modules, &target_id, pasted)?;
+        app.ast_mut().insert_after(&target_id, pasted)?;
     }
 
     if let Some(path) = app.find_node_path(&pasted_id) {
@@ -1729,27 +1634,7 @@ pub fn cmd_remove(app: &mut App, node_id: Option<&str>) -> CommandResult<()> {
     }
 
     for node_id in &node_ids {
-        if let Some(module_name) = app.find_module_definition_for_node(node_id) {
-            let definition = app
-                .ast_mut()
-                .module_defines
-                .iter_mut()
-                .find(|definition| definition.name == module_name)
-                .ok_or_else(|| {
-                    CommandError::InvalidCommand(format!(
-                        "Module definition not found: {}",
-                        module_name
-                    ))
-                })?;
-            let _ = remove_node_and_promote_children(&mut definition.body, node_id);
-        } else if remove_node_and_promote_children(&mut app.ast_mut().modules, node_id) {
-            // Removed from the top-level modules tree.
-        } else {
-            return Err(CommandError::InvalidCommand(format!(
-                "Node not found: {}",
-                node_id
-            )));
-        }
+        app.ast_mut().remove_node_promote_children(node_id)?;
     }
 
     app.selected_nodes.clear();
@@ -1810,29 +1695,7 @@ fn replace_with_prepared_module(
     let replacement_id = prepared.node.id.clone();
     add_module_include(app, prepared.source_file.as_ref());
 
-    let mut replacement = Some(prepared.node);
-    let replaced = if let Some(module_name) = app.find_module_definition_for_node(node_id) {
-        let definition = app
-            .ast_mut()
-            .module_defines
-            .iter_mut()
-            .find(|definition| definition.name == module_name)
-            .ok_or_else(|| {
-                CommandError::InvalidCommand(format!(
-                    "Module definition not found: {}",
-                    module_name
-                ))
-            })?;
-        replace_node_at_position(&mut definition.body, node_id, &mut replacement)
-    } else {
-        replace_node_at_position(&mut app.ast_mut().modules, node_id, &mut replacement)
-    };
-    if !replaced {
-        return Err(CommandError::InvalidCommand(format!(
-            "Node not found: {}",
-            node_id
-        )));
-    }
+    app.ast_mut().replace_node(node_id, prepared.node)?;
 
     app.selected_nodes.retain(|selected| selected != node_id);
     if let Some(path) = app.find_node_path(&replacement_id) {
@@ -2069,30 +1932,6 @@ fn delete_node_from_module_definition(
     }
 
     Err(format!("Node {} not found", target_id))
-}
-
-/// Check if a module tree contains a children module
-fn contains_children_module(nodes: &[openscad_core::ModuleNode]) -> bool {
-    // Use explicit stack to avoid recursion depth issues
-    let mut stack: Vec<(&openscad_core::ModuleNode, usize)> =
-        nodes.iter().map(|n| (n, 0)).collect();
-
-    while let Some((node, depth)) = stack.pop() {
-        if depth >= MAX_RECURSION_DEPTH {
-            continue;
-        }
-
-        if node.name == "children" {
-            return true;
-        }
-
-        // Push children to stack
-        for child in &node.children {
-            stack.push((child, depth + 1));
-        }
-    }
-
-    false
 }
 
 /// Initialize the command registry with all available commands
@@ -2824,7 +2663,7 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
                 app.set_info(&format!("Module '{}' defined", module_name));
             })
         },
-        "Define a new module",
+        "Define or redefine a module",
         1,
         None,
         "module <module_name> [params]",
@@ -2961,6 +2800,34 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
         "set <parameter_name>=<expression>",
         vec!["set size=size", "set center=true", "set v=offset"],
         CommandType::NodeParam,
+        true,
+        true,
+    ));
+
+    registry.register(CommandDef::new(
+        "unset",
+        vec![] as Vec<String>,
+        |app, args| {
+            if args.len() != 1 {
+                return Err(CommandError::InvalidCommand(
+                    "Usage: unset <parameter_name>".to_string(),
+                ));
+            }
+            let snapshot = app.ast.clone();
+            cmd_unset_parameter(app, args[0])?;
+            if app.undo_stack.len() >= 100 {
+                app.undo_stack.pop_front();
+            }
+            app.undo_stack.push_back(snapshot);
+            app.redo_stack.clear();
+            Ok(())
+        },
+        "Remove an explicitly set parameter from selected module nodes, or the current node",
+        1,
+        Some(1),
+        "unset <parameter_name>",
+        vec!["unset size", "unset center"],
+        CommandType::NodeParamUnset,
         true,
         true,
     ));
@@ -3163,6 +3030,38 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn test_cmd_unset_parameter_supports_positional_named_and_atomic_failure() {
+        let mut app = App::new();
+        app.ast_mut().modules = vec![
+            ModuleNode::new_leaf(
+                "cube_1".to_string(),
+                "cube".to_string(),
+                vec![Argument::Positional(Expr::Integer(10))],
+            ),
+            ModuleNode::new_leaf(
+                "cube_2".to_string(),
+                "cube".to_string(),
+                vec![Argument::Named {
+                    name: "size".to_string(),
+                    value: Expr::Integer(20),
+                }],
+            ),
+        ];
+        app.selected_nodes = vec!["cube_1".to_string(), "cube_2".to_string()];
+
+        cmd_unset_parameter(&mut app, "size").unwrap();
+        assert!(app.ast.modules.iter().all(|node| node.args.is_empty()));
+
+        app.ast_mut().modules[0].args.push(Argument::Named {
+            name: "center".to_string(),
+            value: Expr::Boolean(true),
+        });
+        let result = cmd_unset_parameter(&mut app, "center");
+        assert!(result.is_err());
+        assert_eq!(app.ast.modules[0].args.len(), 1);
     }
 
     #[test]
@@ -3465,21 +3364,26 @@ mod tests {
     }
 
     #[test]
-    fn test_cmd_moddef_duplicate_name() {
+    fn test_cmd_moddef_redefines_existing_module() {
         use App;
 
         let mut app = App::new();
 
         // First module definition should succeed
-        let result = cmd_moddef(&mut app, "my_module", None);
+        let result = cmd_moddef(&mut app, "my_module", Some("size=10"));
         assert!(result.is_ok());
 
-        // Second module definition with same name should fail
-        let result = cmd_moddef(&mut app, "my_module", None);
-        assert!(result.is_err());
+        // A second definition replaces the first one in place.
+        let result = cmd_moddef(&mut app, "my_module", Some("height=20"));
+        assert!(result.is_ok());
 
-        // Verify only one module in AST
+        // Verify the AST and completion library both contain the replacement.
         assert_eq!(app.ast.module_defines.len(), 1);
+        assert_eq!(app.ast.module_defines[0].parameters[0].name, "height");
+        assert_eq!(
+            app.library.get_module("my_module").unwrap().parameters[0].name,
+            "height"
+        );
     }
 
     #[test]
@@ -4178,11 +4082,12 @@ mod tests {
     }
 
     #[test]
-    fn test_cmd_delete_global_and_function_definitions_without_cascading() {
+    fn test_cmd_delete_global_function_and_module_definitions_without_cascading() {
         let mut app = App::new();
         cmd_global(&mut app, "size=10").unwrap();
         cmd_funcdef(&mut app, "double(x)=x*2").unwrap();
         cmd_funcdef(&mut app, "uses_double(x)=double(x)").unwrap();
+        cmd_moddef(&mut app, "part", Some("size=10")).unwrap();
 
         cmd_delete(&mut app, "__var_size").unwrap();
         assert!(app.ast.find_global_variable("size").is_none());
@@ -4191,6 +4096,10 @@ mod tests {
         assert!(app.ast.find_function_define("double").is_none());
         assert!(app.ast.find_function_define("uses_double").is_some());
         assert!(app.library.get_function("double").is_none());
+
+        cmd_delete(&mut app, "__moddef_part").unwrap();
+        assert!(app.ast.find_module_define("part").is_none());
+        assert!(app.library.get_module("part").is_none());
     }
 
     #[test]

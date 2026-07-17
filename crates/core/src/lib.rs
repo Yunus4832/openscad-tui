@@ -510,6 +510,27 @@ impl ModuleNode {
         Ok(())
     }
 
+    /// Remove and return an argument selected by name or positional index.
+    pub fn remove_argument(&mut self, selector: &ArgumentSelector) -> Result<Expr> {
+        let position = match selector {
+            ArgumentSelector::Named(expected_name) => self.args.iter().position(|argument| {
+                matches!(argument, Argument::Named { name, .. } if name == expected_name)
+            }),
+            ArgumentSelector::Position(expected_position) => self
+                .args
+                .iter()
+                .enumerate()
+                .filter(|(_, argument)| matches!(argument, Argument::Positional(_)))
+                .nth(*expected_position)
+                .map(|(position, _)| position),
+        }
+        .ok_or_else(|| AstError::InvalidParameter(format!("Argument not found: {selector:?}")))?;
+
+        Ok(match self.args.remove(position) {
+            Argument::Positional(value) | Argument::Named { value, .. } => value,
+        })
+    }
+
     /// Get the display name, fallback to module name with args
     pub fn get_display_name(&self) -> String {
         if let Some(ref name) = self.display_name {
@@ -690,7 +711,7 @@ impl AstRoot {
     /// Add a module to the root level
     pub fn add_module(&mut self, module: ModuleNode) -> Result<()> {
         // Check for duplicate identifiers
-        if self.find_node_by_id(&module.id).is_some() {
+        if self.find_node_anywhere(&module.id).is_some() {
             return Err(AstError::DuplicateIdentifier(module.id.clone()));
         }
         self.modules.push(module);
@@ -716,6 +737,25 @@ impl AstRoot {
     /// Find a mutable node by ID
     pub fn find_node_mut(&mut self, id: &str) -> Option<&mut ModuleNode> {
         Self::find_in_vec_mut(&mut self.modules, id)
+    }
+
+    /// Find a node in either the top-level modules or a module definition body.
+    pub fn find_node_anywhere(&self, id: &str) -> Option<&ModuleNode> {
+        self.find_node_by_id(id).or_else(|| {
+            self.module_defines
+                .iter()
+                .find_map(|definition| Self::find_in_vec(&definition.body, id))
+        })
+    }
+
+    /// Find a mutable node in either the top-level modules or a module definition body.
+    pub fn find_node_anywhere_mut(&mut self, id: &str) -> Option<&mut ModuleNode> {
+        if self.find_node_by_id(id).is_some() {
+            return self.find_node_mut(id);
+        }
+        self.module_defines
+            .iter_mut()
+            .find_map(|definition| Self::find_in_vec_mut(&mut definition.body, id))
     }
 
     fn find_in_vec_mut<'a>(modules: &'a mut [ModuleNode], id: &str) -> Option<&'a mut ModuleNode> {
@@ -744,16 +784,22 @@ impl AstRoot {
     /// Insert a child module into a parent module
     pub fn insert_child(&mut self, parent_id: &str, child: ModuleNode) -> Result<()> {
         // Check for duplicate identifiers first
-        if self.find_node_by_id(&child.id).is_some() {
+        if self.find_node_anywhere(&child.id).is_some() {
             return Err(AstError::DuplicateIdentifier(child.id.clone()));
         }
 
-        // Find parent and insert
-        if Self::insert_child_in_vec(&mut self.modules, parent_id, child) {
-            Ok(())
-        } else {
-            Err(AstError::NodeNotFound(parent_id.to_string()))
+        // Find the parent in either top-level modules or module definition bodies.
+        if Self::insert_child_in_vec(&mut self.modules, parent_id, child.clone()) {
+            return Ok(());
         }
+        let child = self.module_defines.iter_mut().find_map(|definition| {
+            if Self::insert_child_in_vec(&mut definition.body, parent_id, child.clone()) {
+                Some(())
+            } else {
+                None
+            }
+        });
+        child.ok_or_else(|| AstError::NodeNotFound(parent_id.to_string()))
     }
 
     fn insert_child_in_vec(modules: &mut [ModuleNode], parent_id: &str, child: ModuleNode) -> bool {
@@ -781,34 +827,116 @@ impl AstRoot {
         insert_recursive(modules, parent_id, &child, 0)
     }
 
-    /// Delete a node and all its children
-    pub fn delete_node(&mut self, id: &str) -> Result<()> {
-        Self::delete_node_in_vec(&mut self.modules, id);
-        Ok(())
+    /// Delete and return a node subtree from either root modules or a module definition body.
+    pub fn delete_node(&mut self, id: &str) -> Result<ModuleNode> {
+        if let Some(node) = Self::take_node_in_vec(&mut self.modules, id) {
+            return Ok(node);
+        }
+        self.module_defines
+            .iter_mut()
+            .find_map(|definition| Self::take_node_in_vec(&mut definition.body, id))
+            .ok_or_else(|| AstError::NodeNotFound(id.to_string()))
     }
 
-    fn delete_node_in_vec(modules: &mut Vec<ModuleNode>, id: &str) -> bool {
+    fn take_node_in_vec(modules: &mut Vec<ModuleNode>, id: &str) -> Option<ModuleNode> {
         const MAX_DEPTH: usize = 1000;
-        fn delete_recursive(modules: &mut Vec<ModuleNode>, id: &str, depth: usize) -> bool {
+        fn take_recursive(
+            modules: &mut Vec<ModuleNode>,
+            id: &str,
+            depth: usize,
+        ) -> Option<ModuleNode> {
             if depth >= MAX_DEPTH {
-                return false;
+                return None;
             }
-            for i in (0..modules.len()).rev() {
-                if modules[i].id == id {
-                    modules.remove(i);
-                    return true;
-                }
+            if let Some(position) = modules.iter().position(|module| module.id == id) {
+                return Some(modules.remove(position));
             }
-
             for module in modules {
-                if delete_recursive(&mut module.children, id, depth + 1) {
-                    return true;
+                if let Some(removed) = take_recursive(&mut module.children, id, depth + 1) {
+                    return Some(removed);
                 }
             }
-
-            false
+            None
         }
-        delete_recursive(modules, id, 0)
+        take_recursive(modules, id, 0)
+    }
+
+    /// Remove a node while promoting its children at the same position.
+    pub fn remove_node_promote_children(&mut self, id: &str) -> Result<ModuleNode> {
+        if let Some(node) = Self::remove_promoting_in_vec(&mut self.modules, id) {
+            return Ok(node);
+        }
+        self.module_defines
+            .iter_mut()
+            .find_map(|definition| Self::remove_promoting_in_vec(&mut definition.body, id))
+            .ok_or_else(|| AstError::NodeNotFound(id.to_string()))
+    }
+
+    fn remove_promoting_in_vec(modules: &mut Vec<ModuleNode>, id: &str) -> Option<ModuleNode> {
+        if let Some(position) = modules.iter().position(|module| module.id == id) {
+            let removed = modules.remove(position);
+            let result = removed.clone();
+            modules.splice(position..position, removed.children);
+            return Some(result);
+        }
+        modules
+            .iter_mut()
+            .find_map(|module| Self::remove_promoting_in_vec(&mut module.children, id))
+    }
+
+    /// Replace a node at its current position and return the previous subtree.
+    pub fn replace_node(&mut self, id: &str, replacement: ModuleNode) -> Result<ModuleNode> {
+        if self.find_node_anywhere(&replacement.id).is_some() && replacement.id != id {
+            return Err(AstError::DuplicateIdentifier(replacement.id));
+        }
+        let target = self
+            .find_node_anywhere_mut(id)
+            .ok_or_else(|| AstError::NodeNotFound(id.to_string()))?;
+        Ok(std::mem::replace(target, replacement))
+    }
+
+    /// Insert a node immediately before an existing node in the same tree.
+    pub fn insert_before(&mut self, target_id: &str, node: ModuleNode) -> Result<()> {
+        self.insert_relative(target_id, node, false)
+    }
+
+    /// Insert a node immediately after an existing node in the same tree.
+    pub fn insert_after(&mut self, target_id: &str, node: ModuleNode) -> Result<()> {
+        self.insert_relative(target_id, node, true)
+    }
+
+    fn insert_relative(&mut self, target_id: &str, node: ModuleNode, after: bool) -> Result<()> {
+        if self.find_node_anywhere(&node.id).is_some() {
+            return Err(AstError::DuplicateIdentifier(node.id));
+        }
+        let mut node = Some(node);
+        if Self::insert_relative_in_vec(&mut self.modules, target_id, &mut node, after)
+            || self.module_defines.iter_mut().any(|definition| {
+                Self::insert_relative_in_vec(&mut definition.body, target_id, &mut node, after)
+            })
+        {
+            Ok(())
+        } else {
+            Err(AstError::NodeNotFound(target_id.to_string()))
+        }
+    }
+
+    fn insert_relative_in_vec(
+        modules: &mut Vec<ModuleNode>,
+        target_id: &str,
+        node: &mut Option<ModuleNode>,
+        after: bool,
+    ) -> bool {
+        if let Some(position) = modules.iter().position(|module| module.id == target_id) {
+            modules.insert(
+                position + usize::from(after),
+                node.take().expect("inserted once"),
+            );
+            return true;
+        }
+        modules.iter_mut().any(|module| {
+            Self::insert_relative_in_vec(&mut module.children, target_id, node, after)
+        })
     }
 
     /// Add a function definition
@@ -869,6 +997,38 @@ impl AstRoot {
         }
         self.module_defines.push(module_def);
         Ok(())
+    }
+
+    /// Add a module definition or replace the existing definition with the same name.
+    /// Returns the previous definition when one was replaced.
+    pub fn upsert_module_define(
+        &mut self,
+        module_def: ModuleDefinition,
+    ) -> Result<Option<ModuleDefinition>> {
+        if !is_valid_identifier(&module_def.name) {
+            return Err(AstError::InvalidParameter(format!(
+                "Invalid module name: {}",
+                module_def.name
+            )));
+        }
+        if let Some(existing) = self
+            .module_defines
+            .iter_mut()
+            .find(|existing| existing.name == module_def.name)
+        {
+            return Ok(Some(std::mem::replace(existing, module_def)));
+        }
+        self.module_defines.push(module_def);
+        Ok(None)
+    }
+
+    /// Remove and return a module definition. References are left unchanged.
+    pub fn remove_module_define(&mut self, name: &str) -> Result<ModuleDefinition> {
+        self.module_defines
+            .iter()
+            .position(|definition| definition.name == name)
+            .map(|position| self.module_defines.remove(position))
+            .ok_or_else(|| AstError::NodeNotFound(name.to_string()))
     }
 
     /// Find a function definition by name
@@ -1498,6 +1658,67 @@ mod tests {
     }
 
     #[test]
+    fn test_module_node_remove_argument() {
+        let mut node = ModuleNode::new_leaf(
+            "cube_1".to_string(),
+            "cube".to_string(),
+            vec![
+                Argument::Positional(Expr::Integer(10)),
+                Argument::Named {
+                    name: "center".to_string(),
+                    value: Expr::Boolean(true),
+                },
+            ],
+        );
+
+        assert_eq!(
+            node.remove_argument(&ArgumentSelector::Named("center".to_string()))
+                .unwrap(),
+            Expr::Boolean(true)
+        );
+        assert_eq!(
+            node.remove_argument(&ArgumentSelector::Position(0))
+                .unwrap(),
+            Expr::Integer(10)
+        );
+        assert!(node.args.is_empty());
+    }
+
+    #[test]
+    fn test_node_operations_cover_module_definition_bodies() {
+        let child = ModuleNode::new_leaf("cube_1".to_string(), "cube".to_string(), vec![]);
+        let sibling = ModuleNode::new_leaf("sphere_1".to_string(), "sphere".to_string(), vec![]);
+        let mut container =
+            ModuleNode::new_container("translate_1".to_string(), "translate".to_string(), vec![]);
+        container.children.push(child);
+        let mut ast = AstRoot::new();
+        ast.add_module_define(ModuleDefinition::new(
+            "part".to_string(),
+            vec![],
+            vec![container],
+        ))
+        .unwrap();
+
+        assert_eq!(ast.find_node_anywhere("cube_1").unwrap().name, "cube");
+        ast.insert_after("cube_1", sibling).unwrap();
+        let replacement =
+            ModuleNode::new_leaf("cylinder_1".to_string(), "cylinder".to_string(), vec![]);
+        assert_eq!(
+            ast.replace_node("sphere_1", replacement).unwrap().name,
+            "sphere"
+        );
+        let removed = ast.remove_node_promote_children("translate_1").unwrap();
+        assert_eq!(removed.children.len(), 2);
+        assert_eq!(ast.module_defines[0].body[0].id, "cube_1");
+        assert_eq!(ast.module_defines[0].body[1].id, "cylinder_1");
+        assert_eq!(ast.delete_node("cube_1").unwrap().name, "cube");
+        assert!(matches!(
+            ast.delete_node("missing"),
+            Err(AstError::NodeNotFound(_))
+        ));
+    }
+
+    #[test]
     fn test_ast_root_basic() {
         let mut ast = AstRoot::new();
         let module = ModuleNode::new_leaf("cube1".to_string(), "cube".to_string(), vec![]);
@@ -1600,6 +1821,23 @@ mod tests {
         let removed = ast.remove_function_define("f").unwrap();
         assert_eq!(removed.name, replacement.name);
         assert_eq!(removed.body, replacement.body);
+    }
+
+    #[test]
+    fn test_upsert_and_remove_module_definition() {
+        let mut ast = AstRoot::new();
+        let original = ModuleDefinition::new("part".to_string(), vec![], vec![]);
+        assert!(ast.upsert_module_define(original).unwrap().is_none());
+
+        let replacement = ModuleDefinition::new(
+            "part".to_string(),
+            vec![Parameter::new("size".to_string())],
+            vec![],
+        );
+        let replaced = ast.upsert_module_define(replacement).unwrap().unwrap();
+        assert!(replaced.parameters.is_empty());
+        assert_eq!(ast.module_defines[0].parameters[0].name, "size");
+        assert_eq!(ast.remove_module_define("part").unwrap().name, "part");
     }
 
     #[test]

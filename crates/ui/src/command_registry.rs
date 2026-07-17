@@ -22,6 +22,8 @@ pub enum CommandType {
     Replace,
     /// Change a parameter on the selected or current module node.
     NodeParam,
+    /// Remove a parameter without completing a value assignment.
+    NodeParamUnset,
 }
 
 /// Command type - used for dynamic completion context analysis

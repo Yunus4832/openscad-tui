@@ -38,6 +38,12 @@ fn handle_normal_input(key: KeyEvent, app: &mut App) {
             app.input_buffer.set_content("set ");
         }
 
+        // A - remove an explicitly set argument
+        KeyCode::Char('A') => {
+            app.input_mode = InputMode::Command;
+            app.input_buffer.set_content("unset ");
+        }
+
         // t - translate
         KeyCode::Char('t') => {
             app.input_mode = InputMode::Command;
@@ -766,6 +772,13 @@ fn analyze_input_context(input: &str, app: &App) -> CompletionContext {
                     }
                 }
             }
+            CommandType::NodeParamUnset => {
+                if parts.len() == 1 && !input.ends_with(' ') {
+                    CompletionContext::Command
+                } else {
+                    CompletionContext::NodeParamUnset
+                }
+            }
         }
     } else {
         CompletionContext::Command
@@ -1316,7 +1329,7 @@ fn generate_completions(input: &str, app: &App) -> (Vec<CompletionCandidate>, Co
             }
             candidates
         }
-        CompletionContext::NodeParam => {
+        CompletionContext::NodeParam | CompletionContext::NodeParamUnset => {
             let candidates: Vec<CompletionCandidate> = node_parameter_names(app)
                 .into_iter()
                 .map(|name| CompletionCandidate::new(name, CandidateType::ModuleParam))
@@ -1515,7 +1528,7 @@ fn get_replacement_range(input: &str, context: &CompletionContext, app: &App) ->
                 (input.len(), input.len())
             }
         }
-        CompletionContext::NodeParam => {
+        CompletionContext::NodeParam | CompletionContext::NodeParamUnset => {
             whitespace_token_range(input, 1).unwrap_or((input.len(), input.len()))
         }
         CompletionContext::NodeParamValue { .. } | CompletionContext::ExpressionValue { .. } => {
@@ -1626,6 +1639,7 @@ fn apply_completion(app: &mut App) {
                 app.input_buffer.insert_str("(");
             }
         }
+        CompletionContext::NodeParamUnset => {}
         _ => {
             app.input_buffer
                 .insert_str(candidate.candidate_type.separator());
@@ -1858,6 +1872,26 @@ mod tests {
         assert!(value_candidates
             .iter()
             .any(|candidate| candidate.content == "size"));
+
+        let (unset_candidates, unset_analysis) = generate_completions("unset si", &app);
+        assert_eq!(unset_analysis.context, CompletionContext::NodeParamUnset);
+        assert!(unset_candidates
+            .iter()
+            .any(|candidate| candidate.content == "size"));
+
+        let mut completion_app = app;
+        let size_index = unset_candidates
+            .iter()
+            .position(|candidate| candidate.content == "size")
+            .unwrap();
+        completion_app.input_buffer.set_content("unset si");
+        completion_app.completion_candidates = unset_candidates;
+        completion_app.completion_context = unset_analysis.context;
+        completion_app.completion_replacement_range = unset_analysis.replacement_range;
+        completion_app.completion_index = size_index;
+        completion_app.completion_active = true;
+        apply_completion(&mut completion_app);
+        assert_eq!(completion_app.input_buffer.content(), "unset size");
     }
 
     #[test]
@@ -2077,6 +2111,15 @@ mod tests {
         );
         assert_eq!(app.input_mode, InputMode::Command);
         assert_eq!(app.input_buffer.content(), "set ");
+
+        app.input_mode = InputMode::Normal;
+        app.input_buffer.clear();
+        handle_key(
+            KeyEvent::new(KeyCode::Char('A'), KeyModifiers::SHIFT),
+            &mut app,
+        );
+        assert_eq!(app.input_mode, InputMode::Command);
+        assert_eq!(app.input_buffer.content(), "unset ");
     }
 
     #[test]
