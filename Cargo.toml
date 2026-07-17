@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/core", "crates/library", "crates/ui"]
+members = ["crates/core", "crates/library", "crates/render", "crates/ui"]
 resolver = "2"
 
 [workspace.package]
@@ -18,3 +18,8 @@ tui-tree-widget = "0.23"
 clap = { version = "4.4", features = ["derive"] }
 thiserror = "1.0"
 dirs = "5.0"
+glam = "0.30"
+tempfile = "3.20"
+wait-timeout = "0.2"
+image = { version = "0.25", default-features = false }
+ratatui-image = { version = "5.0", default-features = false, features = ["crossterm"] }
