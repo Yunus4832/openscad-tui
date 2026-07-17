@@ -1,5 +1,6 @@
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 use crate::{Aabb, Camera, Mesh, MeshGenerator, PixelSize, RenderError, Result, RgbaFrame};
 
@@ -20,6 +21,8 @@ pub struct RenderedFrame {
     pub frame: RgbaFrame,
     pub triangle_count: usize,
     pub bounds: Aabb,
+    pub generation_time: Duration,
+    pub raster_time: Duration,
 }
 
 #[derive(Debug, PartialEq)]
@@ -126,7 +129,7 @@ fn worker_loop(
     generator: Box<dyn MeshGenerator>,
     renderer: Box<dyn FrameRenderer>,
 ) {
-    let mut cached_mesh: Option<(u64, Mesh)> = None;
+    let mut cached_mesh: Option<(u64, Mesh, Duration)> = None;
     let mut pending = None;
     loop {
         let first = match pending.take().map(Ok).unwrap_or_else(|| requests.recv()) {
@@ -147,7 +150,13 @@ fn worker_loop(
             } => {
                 let _ = events.send(RenderEvent::Generating { mesh_revision });
                 match generator.generate(&scad_source) {
-                    Ok(generation) => cached_mesh = Some((mesh_revision, generation.mesh)),
+                    Ok(generation) => {
+                        cached_mesh = Some((
+                            mesh_revision,
+                            generation.mesh,
+                            generation.diagnostics.elapsed,
+                        ))
+                    }
                     Err(error) => {
                         let _ = events.send(RenderEvent::Failed {
                             mesh_revision,
@@ -165,7 +174,7 @@ fn worker_loop(
                 camera,
                 size,
             } => {
-                let Some((mesh_revision, _)) = cached_mesh.as_ref() else {
+                let Some((mesh_revision, _, _)) = cached_mesh.as_ref() else {
                     let _ = events.send(RenderEvent::Failed {
                         mesh_revision: 0,
                         camera_revision,
@@ -190,23 +199,23 @@ fn worker_loop(
             DrainResult::Empty => {}
         }
 
-        let Some((_, mesh)) = &cached_mesh else {
+        let Some((_, mesh, generation_time)) = &cached_mesh else {
             continue;
         };
         let _ = events.send(RenderEvent::Rasterizing {
             mesh_revision,
             camera_revision,
         });
+        let raster_started = Instant::now();
         let rendered = renderer.render_frame(mesh, &camera, size);
+        let raster_time = raster_started.elapsed();
 
-        // Never publish a frame when a newer request arrived during rasterization.
-        match drain_latest(&requests) {
-            DrainResult::Shutdown => return,
-            DrainResult::Pending(request) => {
-                pending = Some(request);
-                continue;
-            }
-            DrainResult::Empty => {}
+        // Preserve the newest pending request, but still publish this completed camera frame.
+        // Continuous input otherwise starves presentation: every finished frame would be dropped
+        // merely because the mouse moved again while it was being rasterized.
+        let next = drain_latest(&requests);
+        if matches!(next, DrainResult::Shutdown) {
+            return;
         }
 
         match rendered {
@@ -217,6 +226,8 @@ fn worker_loop(
                     frame,
                     triangle_count: mesh.triangle_count(),
                     bounds: mesh.bounds,
+                    generation_time: *generation_time,
+                    raster_time,
                 }));
             }
             Err(error) => {
@@ -227,6 +238,9 @@ fn worker_loop(
                     error,
                 });
             }
+        }
+        if let DrainResult::Pending(request) = next {
+            pending = Some(request);
         }
     }
 }
@@ -395,6 +409,33 @@ mod tests {
         let frame = wait_ready(&service);
         assert_eq!(frame.mesh_revision, 1);
         assert_eq!(frame.camera_revision, 3);
+    }
+
+    #[test]
+    fn completed_camera_frame_is_published_before_latest_pending_frame() {
+        let service = service(
+            Arc::new(AtomicUsize::new(0)),
+            Arc::new(AtomicUsize::new(0)),
+            Duration::from_millis(20),
+        );
+        let size = PixelSize::new(8, 8).unwrap();
+        service
+            .generate(1, 1, "cube(1);".to_string(), Camera::default(), size)
+            .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        let mut started = false;
+        while std::time::Instant::now() < deadline {
+            if matches!(service.try_recv(), Some(RenderEvent::Rasterizing { .. })) {
+                started = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert!(started, "first camera frame did not start rasterizing");
+        service.rasterize(2, Camera::default(), size).unwrap();
+
+        assert_eq!(wait_ready(&service).camera_revision, 1);
+        assert_eq!(wait_ready(&service).camera_revision, 2);
     }
 
     #[test]

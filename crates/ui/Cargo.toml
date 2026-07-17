@@ -16,6 +16,9 @@ tui-tree-widget.workspace = true
 dirs.workspace = true
 image.workspace = true
 ratatui-image.workspace = true
+icy_sixel.workspace = true
+base64.workspace = true
+flate2.workspace = true
 openscad-core = { path = "../core" }
 openscad-library = { path = "../library" }
 openscad-render = { path = "../render" }

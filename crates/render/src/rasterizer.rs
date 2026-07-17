@@ -113,15 +113,28 @@ impl CpuRenderer {
             .ceil()
             .min(size.height.saturating_sub(1) as f32) as u32;
 
+        let edges = [
+            (screen[1].position, screen[2].position),
+            (screen[2].position, screen[0].position),
+            (screen[0].position, screen[1].position),
+        ];
+        let step_x = edges.map(|(a, b)| -(b.y - a.y));
+        let step_y = edges.map(|(a, b)| b.x - a.x);
+        let first_sample = Vec2::new(min_x as f32 + 0.5, min_y as f32 + 0.5);
+        let mut row_edges = edges.map(|(a, b)| edge(a, b, first_sample));
+        let inverse_area = area.recip();
+
         for y in min_y..=max_y {
+            let mut edge_values = row_edges;
             for x in min_x..=max_x {
-                let sample = Vec2::new(x as f32 + 0.5, y as f32 + 0.5);
-                let weights = [
-                    edge(screen[1].position, screen[2].position, sample) / area,
-                    edge(screen[2].position, screen[0].position, sample) / area,
-                    edge(screen[0].position, screen[1].position, sample) / area,
-                ];
-                if weights.iter().any(|weight| *weight < -AREA_EPSILON) {
+                let weights = edge_values.map(|value| value * inverse_area);
+                if weights[0] < -AREA_EPSILON
+                    || weights[1] < -AREA_EPSILON
+                    || weights[2] < -AREA_EPSILON
+                {
+                    for index in 0..3 {
+                        edge_values[index] += step_x[index];
+                    }
                     continue;
                 }
                 let depth = screen[0].depth * weights[0]
@@ -130,6 +143,12 @@ impl CpuRenderer {
                 if (0.0..=1.0).contains(&depth) {
                     framebuffer.write_pixel(x, y, depth, color);
                 }
+                for index in 0..3 {
+                    edge_values[index] += step_x[index];
+                }
+            }
+            for index in 0..3 {
+                row_edges[index] += step_y[index];
             }
         }
     }

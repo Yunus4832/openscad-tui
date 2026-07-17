@@ -251,29 +251,58 @@ wq
 - 布尔操作：`union`、`difference`、`intersection`
 - 定义：`global`、`function`、`module`
 - 文件：`write`、`write!`、`edit`、`edit!`、`export`、`library`
-- 预览：`render`、`preview source|model`、`camera ...`
+- 预览：`render`、`preview source|model|toggle`、`camera ...`
 - 系统：`help`、`quit`、`quit!`、`wq`
 
 ## 模型预览
 
 执行 `render` 会调用本机 `openscad`，把当前模型导出为 OFF 并在后台进行 CPU
 光栅化；编辑 AST 只会把已有预览标记为过期，不会自动启动 OpenSCAD。终端支持
-Sixel 时使用 Sixel，否则自动退回 Unicode 半块显示。
+Kitty Graphics 或 Sixel 时会自动选择对应图像协议，否则退回 Unicode 半块显示。
+图像协议编码在后台执行，前台缓冲会一直保留到新帧编码完成；动画积压时只处理
+最新待编码帧。Kitty 路径使用 RGB24 与快速 zlib 压缩，减少每帧写入终端的
+数据量；Sixel 的静止与运动帧使用同一套快速编码参数。模型预览中的鼠标拖动会
+连续提交相机更新，并由后台队列合并过期帧。
+
+默认自动探测图像协议，也可以通过环境变量强制选择协议，方便比较终端中的实际
+表现：
+
+```bash
+OPENSCAD_TUI_IMAGE_PROTOCOL=sixel ./target/release/openscad-tui
+```
+
+可选值为 `auto`、`kitty`、`sixel`、`halfblocks` 和 `iterm2`。强制选择终端不支持的
+图像协议可能导致预览空白或显示转义字符。
 
 ```text
 render
-preview source|model
-camera projection perspective|orthographic
+preview source|model|toggle
+camera projection perspective|orthographic|toggle
 camera view front|back|left|right|top|bottom|iso
 camera orbit <yaw-deg> <pitch-deg>
 camera pan <x> <y>
 camera zoom <factor>
 camera fit
-camera auto-rotate on|off
+camera auto-rotate on|off|toggle
 ```
 
-Normal Mode 按 `M` 进入 Camera Mode：`h/j/k/l` 环绕，方向键平移，`+/-` 缩放，
+Model Screen 的键盘映射、鼠标手势和底部按钮都是这些 `preview`、`camera` 命令的
+快捷入口，实际行为统一由命令处理函数执行。
+`preview model` 在尚无模型预览时会自动执行一次渲染；已有预览时只切换 Screen，
+不会强制重新运行 OpenSCAD。
+
+进入模型预览时会切换到独立的 Model Preview Screen：`h/j/k/l` 环绕，方向键平移，`+/-` 缩放，
 `f` 适配模型，`p` 切换投影，`1..7` 选择标准视角，空格切换自动旋转，`Esc/q` 返回。
+在 Editor 或 Model Preview Screen 按 `P` 可以直接切换源码和模型预览。
+Model Preview Screen 同样可以按 `:` 进入 Command Mode，支持命令历史、Tab 补全和
+直接执行 `camera`、`preview` 等命令。
+
+鼠标操作会根据所在面板分发：节点树中单击定位（再次点击展开/折叠）、Ctrl+单击
+切换多选、滚轮滚动；源码预览中滚轮滚动代码；模型预览中左键拖动旋转、
+Shift+左键拖动或中键拖动平移、滚轮缩放。
+
+模型预览使用全宽布局并隐藏节点树。底部工具栏可以用鼠标执行 Source、Fit、
+投影切换、Front、Top、Iso 和自动旋转等常用操作。
 
 节点操作示例：
 

@@ -9,19 +9,193 @@ use crate::app::{
 };
 use crate::command_registry::CommandType;
 use crate::commands;
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use openscad_core::ModuleNode;
+use ratatui::layout::Position;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
 pub fn handle_key(key: KeyEvent, app: &mut App) {
     match app.input_mode {
-        InputMode::Normal => handle_normal_input(key, app),
         InputMode::Command => handle_command_input(key, app),
         InputMode::ModuleEnterParams => handle_module_params_input(key, app),
         InputMode::Help => handle_help_input(key, app),
-        InputMode::Camera => handle_camera_input(key, app),
+        InputMode::Normal => match app.screen {
+            crate::app::Screen::Editor => handle_normal_input(key, app),
+            crate::app::Screen::ModelPreview => handle_model_key(key, app),
+        },
     }
+}
+
+pub fn handle_mouse(event: MouseEvent, app: &mut App) {
+    if app.input_mode == InputMode::Help {
+        match event.kind {
+            MouseEventKind::ScrollUp => {
+                app.help_scroll_offset = app.help_scroll_offset.saturating_sub(3)
+            }
+            MouseEventKind::ScrollDown => {
+                app.help_scroll_offset =
+                    (app.help_scroll_offset + 3).min(app.help_scroll_offset_max)
+            }
+            _ => {}
+        }
+        return;
+    }
+    match app.screen {
+        crate::app::Screen::Editor => handle_editor_mouse(event, app),
+        crate::app::Screen::ModelPreview => handle_model_mouse(event, app),
+    }
+}
+
+fn handle_editor_mouse(event: MouseEvent, app: &mut App) {
+    let position = Position::new(event.column, event.row);
+    if app.ui_regions.tree.contains(position) {
+        handle_tree_mouse(event, app, position);
+        return;
+    }
+
+    if app.ui_regions.preview.contains(position) {
+        handle_preview_mouse(event, app);
+    }
+}
+
+fn handle_model_mouse(event: MouseEvent, app: &mut App) {
+    let position = Position::new(event.column, event.row);
+    if matches!(event.kind, MouseEventKind::Up(_)) {
+        if app.mouse_drag.is_some() {
+            update_model_drag(app, event.column, event.row);
+        }
+        app.mouse_drag = None;
+        return;
+    }
+    if app.mouse_drag.is_some() && matches!(event.kind, MouseEventKind::Drag(_)) {
+        handle_preview_mouse(event, app);
+        return;
+    }
+    if event.kind == MouseEventKind::Down(MouseButton::Left) {
+        if let Some(command) = app
+            .ui_regions
+            .camera_buttons
+            .iter()
+            .copied()
+            .find(|button| button.area.contains(position))
+            .map(|button| button.command)
+        {
+            execute_shortcut(app, command);
+            return;
+        }
+    }
+    if app.ui_regions.preview.contains(position) {
+        handle_preview_mouse(event, app);
+    }
+}
+
+fn handle_tree_mouse(event: MouseEvent, app: &mut App, position: Position) {
+    match event.kind {
+        MouseEventKind::ScrollUp => {
+            app.tree_state.borrow_mut().scroll_up(3);
+        }
+        MouseEventKind::ScrollDown => {
+            app.tree_state.borrow_mut().scroll_down(3);
+        }
+        MouseEventKind::Down(MouseButton::Left) => {
+            if event.modifiers.contains(KeyModifiers::CONTROL) {
+                let path = app
+                    .tree_state
+                    .borrow()
+                    .rendered_at(position)
+                    .map(<[String]>::to_vec);
+                if let Some(path) = path {
+                    app.tree_state.borrow_mut().select(path.clone());
+                    if let Some(node_id) = path.last().filter(|id| !id.starts_with("__")) {
+                        if app.selected_nodes.contains(node_id) {
+                            app.selected_nodes.retain(|selected| selected != node_id);
+                        } else {
+                            app.selected_nodes.push(node_id.clone());
+                        }
+                    }
+                }
+            } else {
+                app.tree_state.borrow_mut().click_at(position);
+            }
+            app.update_navigation_status();
+        }
+        _ => {}
+    }
+}
+
+fn handle_preview_mouse(event: MouseEvent, app: &mut App) {
+    use crate::app::MouseDrag;
+    if app.screen == crate::app::Screen::Editor {
+        let line_count = app.ast.to_scad().lines().count();
+        match event.kind {
+            MouseEventKind::ScrollUp => app.preview_offset = app.preview_offset.saturating_sub(3),
+            MouseEventKind::ScrollDown => {
+                app.preview_offset = (app.preview_offset + 3).min(line_count.saturating_sub(1))
+            }
+            _ => {}
+        }
+        return;
+    }
+
+    match event.kind {
+        MouseEventKind::Down(MouseButton::Left | MouseButton::Middle) => {
+            app.mouse_drag = Some(MouseDrag {
+                last_column: event.column,
+                last_row: event.row,
+                pan: event.kind == MouseEventKind::Down(MouseButton::Middle)
+                    || event.modifiers.contains(KeyModifiers::SHIFT),
+            });
+        }
+        MouseEventKind::Drag(MouseButton::Left | MouseButton::Middle) => {
+            update_model_drag(app, event.column, event.row);
+        }
+        MouseEventKind::ScrollUp => {
+            execute_shortcut(app, "camera zoom 0.85");
+        }
+        MouseEventKind::ScrollDown => {
+            execute_shortcut(app, "camera zoom 1.15");
+        }
+        _ => {}
+    }
+}
+
+fn update_model_drag(app: &mut App, column: u16, row: u16) {
+    let Some(mut drag) = app.mouse_drag else {
+        return;
+    };
+    let delta_x = i32::from(column) - i32::from(drag.last_column);
+    let delta_y = i32::from(row) - i32::from(drag.last_row);
+    if delta_x == 0 && delta_y == 0 {
+        return;
+    }
+
+    drag.last_column = column;
+    drag.last_row = row;
+    app.mouse_drag = Some(drag);
+    let command = if drag.pan {
+        let width = f32::from(app.ui_regions.preview.width.max(1));
+        let height = f32::from(app.ui_regions.preview.height.max(1));
+        format!(
+            "camera pan {} {}",
+            -(delta_x as f32) / width,
+            (delta_y as f32) / height
+        )
+    } else {
+        let (yaw, pitch) = mouse_orbit_delta(delta_x, delta_y);
+        format!("camera orbit {yaw} {pitch}")
+    };
+    execute_shortcut(app, &command);
+}
+
+fn mouse_orbit_delta(delta_x: i32, delta_y: i32) -> (f32, f32) {
+    const DEGREES_PER_CELL: f32 = 3.2;
+    // Orbit moves the camera, while dragging conventionally moves the object
+    // under the pointer, so mouse deltas use the opposite camera direction.
+    (
+        -(delta_x as f32) * DEGREES_PER_CELL,
+        delta_y as f32 * DEGREES_PER_CELL,
+    )
 }
 
 /// Normal mode: Quick keybindings
@@ -59,32 +233,32 @@ fn handle_normal_input(key: KeyEvent, app: &mut App) {
 
         // Navigation: j (next), k (prev), h (back/collapse), l (forward/expand)
         KeyCode::Char('j') | KeyCode::Down => {
-            execute_command(app, "next");
+            execute_shortcut(app, "next");
         }
         KeyCode::Char('k') | KeyCode::Up => {
-            execute_command(app, "prev");
+            execute_shortcut(app, "prev");
         }
         KeyCode::Char('h') | KeyCode::Left => {
-            execute_command(app, "collapse");
+            execute_shortcut(app, "collapse");
         }
         KeyCode::Char('l') | KeyCode::Right => {
-            execute_command(app, "expand");
+            execute_shortcut(app, "expand");
         }
 
         // v - select/toggle node
         KeyCode::Char('v') => {
-            execute_command(app, "select");
+            execute_shortcut(app, "select");
         }
 
         // Vim-style structural editing
         KeyCode::Char('y') => {
-            execute_command(app, "yank");
+            execute_shortcut(app, "yank");
         }
         KeyCode::Char('p') => {
-            execute_command(app, "paste");
+            execute_shortcut(app, "paste");
         }
         KeyCode::Char('x') => {
-            execute_command(app, "remove");
+            execute_shortcut(app, "remove");
         }
         KeyCode::Char('c') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
             app.input_mode = InputMode::Command;
@@ -93,12 +267,12 @@ fn handle_normal_input(key: KeyEvent, app: &mut App) {
 
         // u - undo
         KeyCode::Char('u') => {
-            execute_command(app, "undo");
+            execute_shortcut(app, "undo");
         }
 
         // r - rotate (Ctrl+r for redo)
         KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            execute_command(app, "redo");
+            execute_shortcut(app, "redo");
         }
         KeyCode::Char('r') => {
             app.input_mode = InputMode::Command;
@@ -107,7 +281,7 @@ fn handle_normal_input(key: KeyEvent, app: &mut App) {
 
         // d - delete node
         KeyCode::Char('d') => {
-            execute_command(app, "delete");
+            execute_shortcut(app, "delete");
         }
 
         // w - write (save to JSON)
@@ -136,77 +310,68 @@ fn handle_normal_input(key: KeyEvent, app: &mut App) {
 
         // Enter - toggle expand/collapse node
         KeyCode::Enter => {
-            execute_command(app, "toggle");
+            execute_shortcut(app, "toggle");
         }
 
         // q - quit
         KeyCode::Char('q') => {
-            execute_command(app, "quit");
+            execute_shortcut(app, "quit");
         }
 
         // Ctrl+C to quit
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            execute_command(app, "quit");
+            execute_shortcut(app, "quit");
         }
 
         // ? - show help
         KeyCode::Char('?') => {
-            execute_command(app, "help");
+            execute_shortcut(app, "help");
         }
 
-        // M - enter direct model camera mode
-        KeyCode::Char('M') => {
-            app.model_preview.mode = crate::preview::PreviewMode::Model;
-            app.input_mode = InputMode::Camera;
-        }
+        // P - switch between source and model preview
+        KeyCode::Char('P') => execute_shortcut(app, "preview toggle"),
 
         _ => {}
     }
 }
 
-fn handle_camera_input(key: KeyEvent, app: &mut App) {
-    use openscad_render::{Projection, StandardView};
-
-    let result = match key.code {
-        KeyCode::Esc | KeyCode::Char('q') => {
-            app.input_mode = InputMode::Normal;
-            return;
-        }
-        KeyCode::Char('h') => app.model_preview.orbit(-5.0, 0.0),
-        KeyCode::Char('l') => app.model_preview.orbit(5.0, 0.0),
-        KeyCode::Char('j') => app.model_preview.orbit(0.0, -5.0),
-        KeyCode::Char('k') => app.model_preview.orbit(0.0, 5.0),
-        KeyCode::Left => app.model_preview.pan(-0.05, 0.0),
-        KeyCode::Right => app.model_preview.pan(0.05, 0.0),
-        KeyCode::Up => app.model_preview.pan(0.0, 0.05),
-        KeyCode::Down => app.model_preview.pan(0.0, -0.05),
-        KeyCode::Char('+') | KeyCode::Char('=') => app.model_preview.zoom(0.85),
-        KeyCode::Char('-') => app.model_preview.zoom(1.15),
-        KeyCode::Char('f') => app.model_preview.fit(),
-        KeyCode::Char('p') => {
-            let use_orthographic = matches!(
-                app.model_preview.camera.projection,
-                Projection::Perspective { .. }
-            );
-            app.model_preview.set_projection(use_orthographic)
-        }
-        KeyCode::Char(' ') => {
-            app.model_preview.auto_rotate = !app.model_preview.auto_rotate;
-            Ok(())
-        }
-        KeyCode::Char('1') => app.model_preview.set_view(StandardView::Front),
-        KeyCode::Char('2') => app.model_preview.set_view(StandardView::Back),
-        KeyCode::Char('3') => app.model_preview.set_view(StandardView::Left),
-        KeyCode::Char('4') => app.model_preview.set_view(StandardView::Right),
-        KeyCode::Char('5') => app.model_preview.set_view(StandardView::Top),
-        KeyCode::Char('6') => app.model_preview.set_view(StandardView::Bottom),
-        KeyCode::Char('7') => app.model_preview.set_view(StandardView::Isometric),
-        _ => return,
-    };
-    if let Err(error) = result {
-        app.set_error(&error);
-    } else {
+fn handle_model_key(key: KeyEvent, app: &mut App) {
+    if key.code == KeyCode::Char(':') {
+        app.input_mode = InputMode::Command;
+        app.input_buffer.clear();
         app.clear_error();
+        return;
+    }
+    if let Some(command) = model_key_command(key) {
+        execute_shortcut(app, command);
+    }
+}
+
+fn model_key_command(key: KeyEvent) -> Option<&'static str> {
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('P') => Some("preview source"),
+        KeyCode::Char('h') => Some("camera orbit -5 0"),
+        KeyCode::Char('l') => Some("camera orbit 5 0"),
+        KeyCode::Char('j') => Some("camera orbit 0 -5"),
+        KeyCode::Char('k') => Some("camera orbit 0 5"),
+        KeyCode::Left => Some("camera pan -0.05 0"),
+        KeyCode::Right => Some("camera pan 0.05 0"),
+        KeyCode::Up => Some("camera pan 0 0.05"),
+        KeyCode::Down => Some("camera pan 0 -0.05"),
+        KeyCode::Char('+') | KeyCode::Char('=') => Some("camera zoom 0.85"),
+        KeyCode::Char('-') => Some("camera zoom 1.15"),
+        KeyCode::Char('f') => Some("camera fit"),
+        KeyCode::Char('p') => Some("camera projection toggle"),
+        KeyCode::Char(' ') => Some("camera auto-rotate toggle"),
+        KeyCode::Char('1') => Some("camera view front"),
+        KeyCode::Char('2') => Some("camera view back"),
+        KeyCode::Char('3') => Some("camera view left"),
+        KeyCode::Char('4') => Some("camera view right"),
+        KeyCode::Char('5') => Some("camera view top"),
+        KeyCode::Char('6') => Some("camera view bottom"),
+        KeyCode::Char('7') => Some("camera view iso"),
+        KeyCode::Char('?') => Some("help"),
+        _ => None,
     }
 }
 
@@ -331,7 +496,7 @@ fn handle_command_input(key: KeyEvent, app: &mut App) {
                 apply_completion(app);
             } else {
                 let cmd = app.input_buffer.content().to_string();
-                execute_command(app, &cmd);
+                execute_user_command(app, &cmd);
             }
         }
 
@@ -457,10 +622,17 @@ fn handle_help_input(key: KeyEvent, app: &mut App) {
     }
 }
 
-/// Execute a command using the new command registry
-/// This is a transitional function that will eventually replace the old execute_command
-fn execute_command_registry(app: &mut App, cmd: &str) -> bool {
-    app.input_buffer.clear();
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CommandOrigin {
+    UserInput,
+    Shortcut,
+}
+
+/// Execute user-entered commands and shortcuts through the same command registry.
+fn execute_command_registry(app: &mut App, cmd: &str, origin: CommandOrigin) -> bool {
+    if origin == CommandOrigin::UserInput {
+        app.input_buffer.clear();
+    }
 
     if cmd.is_empty() {
         return true;
@@ -479,7 +651,7 @@ fn execute_command_registry(app: &mut App, cmd: &str) -> bool {
         let change_ast = cmd_def.change_ast;
         let write_to_history = cmd_def.write_to_history;
 
-        if write_to_history {
+        if write_to_history && origin == CommandOrigin::UserInput {
             app.add_to_history(cmd);
         }
 
@@ -519,17 +691,23 @@ fn execute_command_registry(app: &mut App, cmd: &str) -> bool {
         "Unknown command: '{}'. Type 'help' for commands.",
         cmd_name
     ));
-    // Add unknown command to history so user can recall and edit it
-    app.add_to_history(cmd);
+    // Add unknown commands typed by the user to history so they can recall and edit them.
+    if origin == CommandOrigin::UserInput {
+        app.add_to_history(cmd);
+    }
     true
 }
 
-fn execute_command(app: &mut App, cmd: &str) {
-    execute_command_registry(app, cmd);
+fn execute_user_command(app: &mut App, cmd: &str) {
+    execute_command_registry(app, cmd, CommandOrigin::UserInput);
 
     if app.input_mode == InputMode::Command {
         app.input_mode = InputMode::Normal;
     }
+}
+
+fn execute_shortcut(app: &mut App, command: &str) {
+    execute_command_registry(app, command, CommandOrigin::Shortcut);
 }
 
 /// Handle Tab key for autocompletion
@@ -833,13 +1011,13 @@ fn analyze_input_context(input: &str, app: &App) -> CompletionContext {
                 }
             }
             CommandType::Preview => {
-                literal_command_context(input, &parts, &["source", "model"], &[])
+                literal_command_context(input, &parts, &["source", "model", "toggle"], &[])
             }
             CommandType::Camera => {
                 let second_level: &[&str] = match parts.get(1).copied() {
-                    Some("projection") => &["perspective", "orthographic"],
+                    Some("projection") => &["perspective", "orthographic", "toggle"],
                     Some("view") => &["front", "back", "left", "right", "top", "bottom", "iso"],
-                    Some("auto-rotate") => &["on", "off"],
+                    Some("auto-rotate") => &["on", "off", "toggle"],
                     _ => &[],
                 };
                 literal_command_context(
@@ -1973,7 +2151,7 @@ mod tests {
                 .iter()
                 .map(|candidate| candidate.content.as_str())
                 .collect::<Vec<_>>(),
-            vec!["source", "model"]
+            vec!["source", "model", "toggle"]
         );
 
         let (camera, _) = generate_completions("camera view ", &app);
@@ -1982,6 +2160,15 @@ mod tests {
 
         let (_, analysis) = generate_completions("camera projection per", &app);
         assert_eq!(analysis.replacement_range, (18, 21));
+
+        let (projection, _) = generate_completions("camera projection ", &app);
+        assert!(projection
+            .iter()
+            .any(|candidate| candidate.content == "toggle"));
+        let (auto_rotate, _) = generate_completions("camera auto-rotate ", &app);
+        assert!(auto_rotate
+            .iter()
+            .any(|candidate| candidate.content == "toggle"));
     }
 
     #[test]
@@ -2349,5 +2536,268 @@ mod tests {
         assert!(app.ast.find_node_by_id("shape_1").is_some());
         assert!(app.pending_module_action.is_none());
         assert!(app.pending_module_name.is_none());
+    }
+
+    fn mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn test_preview_shortcut_reuses_existing_render_and_requests_clear() {
+        let mut app = App::new();
+        app.model_preview.status = crate::preview::ModelPreviewStatus::Ready { triangles: 12 };
+        app.model_preview.set_auto_rotate(true);
+        handle_key(
+            KeyEvent::new(KeyCode::Char('P'), KeyModifiers::SHIFT),
+            &mut app,
+        );
+        assert_eq!(app.screen, crate::app::Screen::ModelPreview);
+
+        handle_key(
+            KeyEvent::new(KeyCode::Char('P'), KeyModifiers::SHIFT),
+            &mut app,
+        );
+        assert_eq!(app.screen, crate::app::Screen::Editor);
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert!(!app.model_preview.auto_rotate);
+        assert!(app.take_terminal_clear_request());
+    }
+
+    #[test]
+    fn test_preview_shortcut_renders_when_preview_is_empty() {
+        let mut app = App::new();
+
+        handle_key(
+            KeyEvent::new(KeyCode::Char('P'), KeyModifiers::SHIFT),
+            &mut app,
+        );
+
+        assert_eq!(app.screen, crate::app::Screen::ModelPreview);
+        assert!(matches!(
+            app.model_preview.status,
+            crate::preview::ModelPreviewStatus::Generating
+        ));
+    }
+
+    #[test]
+    fn test_model_mouse_drag_is_captured_until_button_up() {
+        let mut app = App::new();
+        app.enter_model_screen();
+        app.ui_regions.preview = ratatui::layout::Rect::new(20, 0, 60, 20);
+
+        handle_mouse(
+            mouse(MouseEventKind::Down(MouseButton::Left), 30, 5),
+            &mut app,
+        );
+        assert!(app.mouse_drag.is_some());
+
+        // A drag remains captured even after leaving the Preview rectangle.
+        handle_mouse(
+            mouse(MouseEventKind::Drag(MouseButton::Left), 10, 5),
+            &mut app,
+        );
+        assert_eq!(app.mouse_drag.unwrap().last_column, 10);
+        handle_mouse(
+            mouse(MouseEventKind::Up(MouseButton::Left), 10, 5),
+            &mut app,
+        );
+        assert!(app.mouse_drag.is_none());
+    }
+
+    #[test]
+    fn test_mouse_orbit_follows_drag_direction() {
+        assert_eq!(mouse_orbit_delta(5, 0), (-16.0, 0.0));
+        assert_eq!(mouse_orbit_delta(0, -5), (0.0, -16.0));
+    }
+
+    #[test]
+    fn test_tree_mouse_click_uses_widget_hit_testing() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let mut app = App::new();
+        app.ast_mut()
+            .modules
+            .push(openscad_core::ModuleNode::new_leaf(
+                "cube_mouse".to_string(),
+                "cube".to_string(),
+                Vec::new(),
+            ));
+        app.init_tree_selection();
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| crate::ui::draw(frame, &mut app))
+            .unwrap();
+
+        // First click opens the already selected Modules section; second selects its child.
+        handle_mouse(
+            mouse(MouseEventKind::Down(MouseButton::Left), 1, 1),
+            &mut app,
+        );
+        terminal
+            .draw(|frame| crate::ui::draw(frame, &mut app))
+            .unwrap();
+        handle_mouse(
+            mouse(MouseEventKind::Down(MouseButton::Left), 2, 2),
+            &mut app,
+        );
+        assert_eq!(
+            app.tree_state
+                .borrow()
+                .selected()
+                .last()
+                .map(String::as_str),
+            Some("cube_mouse")
+        );
+    }
+
+    #[test]
+    fn test_camera_source_button_returns_to_normal_source_preview() {
+        let mut app = App::new();
+        app.enter_model_screen();
+        app.ui_regions
+            .camera_buttons
+            .push(crate::app::CameraButtonRegion {
+                area: ratatui::layout::Rect::new(2, 20, 8, 1),
+                command: "preview source",
+            });
+
+        handle_mouse(
+            mouse(MouseEventKind::Down(MouseButton::Left), 3, 20),
+            &mut app,
+        );
+
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert_eq!(app.screen, crate::app::Screen::Editor);
+        assert!(app.take_terminal_clear_request());
+    }
+
+    #[test]
+    fn test_model_keys_map_to_registered_commands() {
+        assert_eq!(
+            model_key_command(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE)),
+            Some("camera orbit -5 0")
+        );
+        assert_eq!(
+            model_key_command(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE)),
+            Some("camera projection toggle")
+        );
+        assert_eq!(
+            model_key_command(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE)),
+            Some("camera auto-rotate toggle")
+        );
+        assert_eq!(
+            model_key_command(KeyEvent::new(KeyCode::Char('7'), KeyModifiers::NONE)),
+            Some("camera view iso")
+        );
+        assert_eq!(
+            model_key_command(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            Some("preview source")
+        );
+    }
+
+    #[test]
+    fn test_toolbar_and_model_keys_share_the_same_commands() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let mut app = App::new();
+        app.enter_model_screen();
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal
+            .draw(|frame| crate::ui::draw(frame, &mut app))
+            .unwrap();
+
+        let keys = [
+            KeyCode::Char('P'),
+            KeyCode::Char('f'),
+            KeyCode::Char('p'),
+            KeyCode::Char('1'),
+            KeyCode::Char('5'),
+            KeyCode::Char('7'),
+            KeyCode::Char(' '),
+        ];
+        for key in keys {
+            let command = model_key_command(KeyEvent::new(key, KeyModifiers::NONE)).unwrap();
+            assert!(
+                app.ui_regions
+                    .camera_buttons
+                    .iter()
+                    .any(|button| button.command == command),
+                "toolbar is missing the key command {command}"
+            );
+            let command_name = command.split_whitespace().next().unwrap();
+            assert!(app.command_registry.find(command_name).is_some());
+        }
+    }
+
+    #[test]
+    fn test_shortcut_commands_do_not_pollute_user_history() {
+        let mut app = App::new();
+
+        execute_shortcut(&mut app, "camera auto-rotate toggle");
+        assert!(app.model_preview.auto_rotate);
+        assert!(app.command_history.is_empty());
+
+        execute_user_command(&mut app, "camera auto-rotate off");
+        assert!(!app.model_preview.auto_rotate);
+        assert_eq!(app.command_history, ["camera auto-rotate off"]);
+    }
+
+    #[test]
+    fn test_model_screen_accepts_camera_commands() {
+        let mut app = App::new();
+        app.model_preview.status = crate::preview::ModelPreviewStatus::Ready { triangles: 12 };
+        app.enter_model_screen();
+
+        handle_key(
+            KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE),
+            &mut app,
+        );
+        assert_eq!(app.input_mode, InputMode::Command);
+
+        // Command mode takes priority over model shortcuts: `h` edits the command line.
+        handle_key(
+            KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE),
+            &mut app,
+        );
+        assert_eq!(app.input_buffer.content(), "h");
+
+        app.input_buffer.set_content("camera auto-rotate on");
+        handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &mut app);
+
+        assert_eq!(app.screen, crate::app::Screen::ModelPreview);
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert!(app.model_preview.auto_rotate);
+        assert_eq!(app.command_history, ["camera auto-rotate on"]);
+    }
+
+    #[test]
+    fn test_model_command_mode_supports_completion_and_escape() {
+        let mut app = App::new();
+        app.enter_model_screen();
+        handle_key(
+            KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE),
+            &mut app,
+        );
+        app.input_buffer.set_content("camera projection ");
+
+        handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), &mut app);
+        assert!(app.completion_active);
+        assert!(app
+            .completion_candidates
+            .iter()
+            .any(|candidate| candidate.content == "toggle"));
+
+        handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &mut app);
+        assert_eq!(app.input_mode, InputMode::Command);
+        assert!(!app.completion_active);
+        handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &mut app);
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert_eq!(app.screen, crate::app::Screen::ModelPreview);
     }
 }

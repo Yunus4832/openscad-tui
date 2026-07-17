@@ -2,6 +2,7 @@
 
 use openscad_core::AstRoot;
 use openscad_library::LibraryManager;
+use ratatui::layout::Rect;
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -226,10 +227,14 @@ pub enum InputMode {
     ModuleEnterParams,
     /// Help modal - displaying help information
     Help,
-    /// Direct camera manipulation for the model preview.
-    Camera,
     /// Legacy modes (no longer used, kept for compatibility)
     Normal,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Screen {
+    Editor,
+    ModelPreview,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -247,6 +252,27 @@ pub enum MessageType {
     Error,
     /// Warning message (potential issue)
     Warning,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CameraButtonRegion {
+    pub area: Rect,
+    pub command: &'static str,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct UiRegions {
+    pub tree: Rect,
+    pub preview: Rect,
+    pub input: Rect,
+    pub camera_buttons: Vec<CameraButtonRegion>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MouseDrag {
+    pub last_column: u16,
+    pub last_row: u16,
+    pub pan: bool,
 }
 
 /// Context for tab completion
@@ -302,6 +328,7 @@ pub struct App {
     pub ast: Arc<AstRoot>,
     pub library: LibraryManager,
     pub command_registry: CommandRegistry,
+    pub screen: Screen,
     pub model_preview: crate::preview::ModelPreview,
     pub selected_nodes: Vec<String>,
     pub undo_stack: VecDeque<Arc<AstRoot>>,
@@ -311,6 +338,8 @@ pub struct App {
 
     // UI state - Tree navigation (using RefCell for interior mutability)
     pub tree_state: RefCell<TreeState<String>>,
+    pub ui_regions: UiRegions,
+    pub mouse_drag: Option<MouseDrag>,
     #[allow(dead_code)]
     pub tree_cursor: usize,
     #[allow(dead_code)]
@@ -363,12 +392,15 @@ impl App {
             ast: Arc::new(AstRoot::new()),
             library: LibraryManager::new(),
             command_registry: CommandRegistry::new(),
+            screen: Screen::Editor,
             model_preview: crate::preview::ModelPreview::default(),
             selected_nodes: Vec::new(),
             undo_stack: VecDeque::with_capacity(100),
             redo_stack: VecDeque::with_capacity(100),
             node_clipboard: None,
             tree_state: RefCell::new(TreeState::default()),
+            ui_regions: UiRegions::default(),
+            mouse_drag: None,
             tree_cursor: 0,
             expanded_nodes: std::collections::HashSet::new(),
             input_buffer: InputBuffer::new(),
@@ -932,6 +964,22 @@ impl App {
 
     pub fn poll_render_events(&mut self) {
         self.model_preview.poll();
+    }
+
+    pub fn enter_model_screen(&mut self) {
+        self.model_preview.prepare_for_display();
+        self.screen = Screen::ModelPreview;
+    }
+
+    pub fn enter_editor_screen(&mut self) {
+        // Model animation belongs to the model screen. Stop scheduling camera frames as soon as
+        // the user returns to source; an already-running CPU frame may still finish in the
+        // background, but it cannot start another rotation frame.
+        self.model_preview.stop_auto_rotate();
+        self.mouse_drag = None;
+        self.screen = Screen::Editor;
+        self.input_mode = InputMode::Normal;
+        self.terminal_clear_requested = true;
     }
 
     pub fn take_terminal_clear_request(&mut self) -> bool {

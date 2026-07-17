@@ -7,9 +7,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use thiserror::Error;
 
-use crate::app::{App, InputMode, PendingModuleAction};
+use crate::app::{App, InputMode, PendingModuleAction, Screen};
 use crate::command_registry::CommandType;
-use crate::preview::PreviewMode;
 
 const MAX_RECURSION_DEPTH: usize = 1000;
 
@@ -18,21 +17,30 @@ pub fn cmd_render(app: &mut App) -> CommandResult<()> {
     let current_file = app.current_file.clone();
     app.model_preview
         .render(source, current_file.as_deref())
-        .map_err(CommandError::Custom)
+        .map_err(CommandError::Custom)?;
+    app.enter_model_screen();
+    Ok(())
 }
 
 pub fn cmd_preview(app: &mut App, mode: &str) -> CommandResult<()> {
-    app.model_preview.mode = match mode {
-        "source" => {
-            // Sixel/Kitty images live in a terminal graphics layer and are not
-            // necessarily erased when Ratatui paints text over the same cells.
-            app.terminal_clear_requested = true;
-            PreviewMode::Source
+    match mode {
+        "source" => app.enter_editor_screen(),
+        "model"
+            if matches!(
+                app.model_preview.status,
+                crate::preview::ModelPreviewStatus::Empty
+            ) =>
+        {
+            return cmd_render(app)
         }
-        "model" => PreviewMode::Model,
+        "model" => app.enter_model_screen(),
+        "toggle" => match app.screen {
+            Screen::Editor => return cmd_preview(app, "model"),
+            Screen::ModelPreview => return cmd_preview(app, "source"),
+        },
         _ => {
             return Err(CommandError::InvalidCommand(
-                "Usage: preview source|model".to_string(),
+                "Usage: preview source|model|toggle".to_string(),
             ))
         }
     };
@@ -40,11 +48,11 @@ pub fn cmd_preview(app: &mut App, mode: &str) -> CommandResult<()> {
 }
 
 pub fn cmd_camera(app: &mut App, args: &[&str]) -> CommandResult<()> {
-    use openscad_render::StandardView;
+    use openscad_render::{Projection, StandardView};
 
     let invalid = || {
         CommandError::InvalidCommand(
-        "Usage: camera projection perspective|orthographic | view front|back|left|right|top|bottom|iso | orbit <yaw-deg> <pitch-deg> | pan <x> <y> | zoom <factor> | fit | auto-rotate on|off"
+        "Usage: camera projection perspective|orthographic|toggle | view front|back|left|right|top|bottom|iso | orbit <yaw-deg> <pitch-deg> | pan <x> <y> | zoom <factor> | fit | auto-rotate on|off|toggle"
             .to_string(),
     )
     };
@@ -52,6 +60,13 @@ pub fn cmd_camera(app: &mut App, args: &[&str]) -> CommandResult<()> {
     let result = match args {
         ["projection", "perspective"] => app.model_preview.set_projection(false),
         ["projection", "orthographic"] => app.model_preview.set_projection(true),
+        ["projection", "toggle"] => {
+            let use_orthographic = matches!(
+                app.model_preview.camera.projection,
+                Projection::Perspective { .. }
+            );
+            app.model_preview.set_projection(use_orthographic)
+        }
         ["view", name] => {
             let view = match *name {
                 "front" => StandardView::Front,
@@ -72,11 +87,13 @@ pub fn cmd_camera(app: &mut App, args: &[&str]) -> CommandResult<()> {
         ["zoom", factor] => app.model_preview.zoom(parse(factor)?),
         ["fit"] => app.model_preview.fit(),
         ["auto-rotate", value] => {
-            app.model_preview.auto_rotate = match *value {
+            let enabled = match *value {
                 "on" => true,
                 "off" => false,
+                "toggle" => !app.model_preview.auto_rotate,
                 _ => return Err(invalid()),
             };
+            app.model_preview.set_auto_rotate(enabled);
             Ok(())
         }
         _ => return Err(invalid()),
@@ -2980,11 +2997,11 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
         "preview",
         Vec::<&str>::new(),
         |app, args| cmd_preview(app, args[0]),
-        "Switch between source and model preview",
+        "Show source or model preview; model renders once when no preview exists",
         1,
         Some(1),
-        "preview source|model",
-        vec!["preview source", "preview model"],
+        "preview source|model|toggle",
+        vec!["preview source", "preview model", "preview toggle"],
         CommandType::Preview,
         false,
         true,
@@ -2997,8 +3014,13 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
         "Change model preview projection and camera",
         1,
         Some(3),
-        "camera <projection|view|orbit|pan|zoom|fit> ...",
-        vec!["camera view iso", "camera orbit 10 -5", "camera zoom 0.8"],
+        "camera <projection|view|orbit|pan|zoom|fit|auto-rotate> ...",
+        vec![
+            "camera view iso",
+            "camera orbit 10 -5",
+            "camera zoom 0.8",
+            "camera auto-rotate toggle",
+        ],
         CommandType::Camera,
         false,
         true,
@@ -3032,13 +3054,66 @@ mod tests {
     #[test]
     fn test_source_preview_requests_terminal_graphics_clear() {
         let mut app = App::new();
-        app.model_preview.mode = PreviewMode::Model;
+        app.enter_model_screen();
+        app.model_preview.set_auto_rotate(true);
 
         cmd_preview(&mut app, "source").unwrap();
 
-        assert_eq!(app.model_preview.mode, PreviewMode::Source);
+        assert_eq!(app.screen, crate::app::Screen::Editor);
+        assert!(!app.model_preview.auto_rotate);
         assert!(app.take_terminal_clear_request());
         assert!(!app.take_terminal_clear_request());
+    }
+
+    #[test]
+    fn test_model_preview_enters_independent_screen() {
+        let mut app = App::new();
+
+        cmd_preview(&mut app, "model").unwrap();
+
+        assert_eq!(app.screen, crate::app::Screen::ModelPreview);
+        assert!(matches!(
+            app.model_preview.status,
+            crate::preview::ModelPreviewStatus::Generating
+        ));
+
+        app.input_mode = InputMode::ModuleEnterParams;
+        assert_eq!(app.screen, crate::app::Screen::ModelPreview);
+    }
+
+    #[test]
+    fn test_preview_model_reuses_an_existing_render() {
+        let mut app = App::new();
+        app.model_preview.status = crate::preview::ModelPreviewStatus::Ready { triangles: 12 };
+
+        cmd_preview(&mut app, "model").unwrap();
+
+        assert_eq!(app.screen, crate::app::Screen::ModelPreview);
+        assert_eq!(
+            app.model_preview.status,
+            crate::preview::ModelPreviewStatus::Ready { triangles: 12 }
+        );
+    }
+
+    #[test]
+    fn test_preview_toggle_switches_existing_preview_without_rendering() {
+        let mut app = App::new();
+        app.model_preview.status = crate::preview::ModelPreviewStatus::Ready { triangles: 12 };
+
+        cmd_preview(&mut app, "toggle").unwrap();
+        assert_eq!(app.screen, crate::app::Screen::ModelPreview);
+        cmd_preview(&mut app, "toggle").unwrap();
+        assert_eq!(app.screen, crate::app::Screen::Editor);
+    }
+
+    #[test]
+    fn test_camera_auto_rotate_toggle_is_a_command_operation() {
+        let mut app = App::new();
+
+        cmd_camera(&mut app, &["auto-rotate", "toggle"]).unwrap();
+        assert!(app.model_preview.auto_rotate);
+        cmd_camera(&mut app, &["auto-rotate", "toggle"]).unwrap();
+        assert!(!app.model_preview.auto_rotate);
     }
 
     #[test]

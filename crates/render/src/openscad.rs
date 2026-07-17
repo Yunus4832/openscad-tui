@@ -209,15 +209,19 @@ mod tests {
     fn reports_failure_and_timeout() {
         let (failure_directory, failure_executable) =
             executable_script("#!/bin/sh\necho broken >&2\nexit 7\n");
-        assert!(matches!(
-            OpenScadGenerator::new(failure_executable)
-                .with_working_directory(failure_directory.path())
-                .generate("cube(1);"),
-            Err(RenderError::OpenScadFailed {
-                exit_code: Some(7),
-                ..
-            })
-        ));
+        let failure = OpenScadGenerator::new(failure_executable)
+            .with_working_directory(failure_directory.path())
+            .generate("cube(1);");
+        assert!(
+            matches!(
+                failure,
+                Err(RenderError::OpenScadFailed {
+                    exit_code: Some(7),
+                    ..
+                })
+            ),
+            "unexpected failure result: {failure:?}"
+        );
 
         let (timeout_directory, timeout_executable) = executable_script("#!/bin/sh\nsleep 1\n");
         assert!(matches!(

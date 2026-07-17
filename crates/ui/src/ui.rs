@@ -1,7 +1,7 @@
 //! UI rendering module
 
-use crate::app::App;
-use crate::preview::{ModelPreviewStatus, PreviewMode};
+use crate::app::{App, CameraButtonRegion, Screen};
+use crate::preview::ModelPreviewStatus;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -9,38 +9,134 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Paragraph},
     Frame,
 };
-use ratatui_image::StatefulImage;
 use tui_tree_widget::{Tree, TreeItem};
+use unicode_width::UnicodeWidthChar;
+
+const MODEL_PROTOCOL_WIDTH: usize = 10;
+const MODEL_STATUS_WIDTH: usize = 18;
+const MODEL_FRAME_SIZE_WIDTH: usize = 9;
+const MODEL_TIME_WIDTH: usize = 4;
+const MODEL_FPS_WIDTH: usize = 4;
+const MODEL_SIZE_KB_WIDTH: usize = 5;
 
 pub fn draw(f: &mut Frame, app: &mut App) {
-    // 主布局：上部是内容区，下部是命令行
+    match app.screen {
+        Screen::Editor => draw_editor_screen(f, app),
+        Screen::ModelPreview => draw_model_screen(f, app),
+    }
+}
+
+fn draw_model_screen(f: &mut Frame, app: &mut App) {
     let main_chunks = Layout::default()
         .direction(Direction::Vertical)
-        .margin(0)
-        .constraints([Constraint::Min(10), Constraint::Length(4)].as_ref())
+        .constraints([Constraint::Min(8), Constraint::Length(4)])
         .split(f.area());
+    app.ui_regions.camera_buttons.clear();
+    app.ui_regions.tree = Rect::default();
+    app.ui_regions.preview = main_chunks[0];
+    app.ui_regions.input = main_chunks[1];
+    draw_model_preview(f, app, main_chunks[0]);
+    match app.input_mode {
+        crate::app::InputMode::Command | crate::app::InputMode::ModuleEnterParams => {
+            if app.completion_active && !app.completion_candidates.is_empty() {
+                draw_completion_popup(f, app, main_chunks[1]);
+            }
+            draw_input(f, app, main_chunks[1]);
+        }
+        crate::app::InputMode::Normal | crate::app::InputMode::Help => {
+            draw_camera_toolbar(f, app, main_chunks[1]);
+        }
+    }
+    if app.input_mode == crate::app::InputMode::Help {
+        draw_help_modal(f, app);
+    }
+}
 
-    // 上部内容区：左侧树形图，右侧预览
+fn draw_editor_screen(f: &mut Frame, app: &mut App) {
+    let main_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(10), Constraint::Length(4)])
+        .split(f.area());
+    app.ui_regions.camera_buttons.clear();
+
     let content_chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(30), Constraint::Percentage(70)].as_ref())
         .split(main_chunks[0]);
 
-    // 绘制各个组件
+    app.ui_regions.tree = content_chunks[0];
+    app.ui_regions.preview = content_chunks[1];
+    app.ui_regions.input = main_chunks[1];
+
     draw_tree(f, app, content_chunks[0]);
     draw_preview(f, app, content_chunks[1]);
 
-    // Draw completion popup if active
     if app.completion_active && !app.completion_candidates.is_empty() {
         draw_completion_popup(f, app, main_chunks[1]);
     }
 
     draw_input(f, app, main_chunks[1]);
 
-    // 如果在帮助模式，绘制帮助弹窗
     if app.input_mode == crate::app::InputMode::Help {
         draw_help_modal(f, app);
     }
+}
+
+fn draw_camera_toolbar(f: &mut Frame, app: &mut App, area: Rect) {
+    let projection = match app.model_preview.camera.projection {
+        openscad_render::Projection::Perspective { .. } => "Ortho",
+        openscad_render::Projection::Orthographic { .. } => "Persp",
+    };
+    let auto = if app.model_preview.auto_rotate {
+        "Stop"
+    } else {
+        "Auto"
+    };
+    let buttons = [
+        ("P", "Source", "preview source"),
+        ("f", "Fit", "camera fit"),
+        ("p", projection, "camera projection toggle"),
+        ("1", "Front", "camera view front"),
+        ("5", "Top", "camera view top"),
+        ("7", "Iso", "camera view iso"),
+        ("Space", auto, "camera auto-rotate toggle"),
+    ];
+    let block = Block::default()
+        .title(" Camera Controls ")
+        .borders(Borders::ALL)
+        .style(Style::default().fg(Color::Magenta));
+    let inner = block.inner(area);
+    let mut spans = Vec::new();
+    let mut x = inner.x;
+    for (shortcut, label, command) in buttons {
+        let text = format!("[{shortcut} {label}]");
+        let width = text.chars().count() as u16;
+        if x.saturating_add(width) > inner.right() {
+            break;
+        }
+        app.ui_regions.camera_buttons.push(CameraButtonRegion {
+            area: Rect::new(x, inner.y, width, 1),
+            command,
+        });
+        spans.push(Span::styled(
+            text,
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::raw(" "));
+        x = x.saturating_add(width + 1);
+    }
+    let shortcut_help = Line::styled(
+        "h/j/k/l Orbit  Arrows Pan  +/- Zoom  1..7 Views  Esc/q Source  : Command",
+        Style::default().fg(Color::DarkGray),
+    );
+    f.render_widget(
+        Paragraph::new(vec![Line::from(spans), shortcut_help]),
+        inner,
+    );
+    f.render_widget(block, area);
 }
 
 fn draw_tree(f: &mut Frame, app: &App, area: Rect) {
@@ -272,7 +368,8 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
     match app.input_mode {
         InputMode::Normal => {
             title = " Normal Mode ".to_string();
-            prompt = "i=insert  a/A=set/unset arg  y/p=yank/paste  x=remove  c=replace  d=delete  M=camera  v=select  j/k=nav  h/l=fold  u/ctrl-r=undo/redo  :=cmd  ?=help  q=quit".to_string();
+            prompt = "i insert  a args  j/k move  v select  P model  : command  ? help  q quit"
+                .to_string();
             style_fg = Color::Yellow;
         }
         InputMode::Command => {
@@ -296,11 +393,6 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
             title = " Help ".to_string();
             prompt = "Press Esc or q to close".to_string();
             style_fg = Color::Cyan;
-        }
-        InputMode::Camera => {
-            title = " Camera Mode ".to_string();
-            prompt = "h/j/k/l=orbit  arrows=pan  +/-=zoom  f=fit  p=projection  1..7=view  space=auto-rotate  Esc/q=exit".to_string();
-            style_fg = Color::Magenta;
         }
     };
 
@@ -393,10 +485,6 @@ fn shows_input_buffer(mode: crate::app::InputMode) -> bool {
 }
 
 fn draw_preview(f: &mut Frame, app: &mut App, area: Rect) {
-    if app.model_preview.mode == PreviewMode::Model {
-        draw_model_preview(f, app, area);
-        return;
-    }
     let block = Block::default()
         .title(" Preview ")
         .borders(Borders::ALL)
@@ -443,6 +531,24 @@ fn draw_preview(f: &mut Frame, app: &mut App, area: Rect) {
 
 fn draw_model_preview(f: &mut Frame, app: &mut App, area: Rect) {
     app.model_preview.set_area(area);
+    let title = model_preview_title(app);
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .style(Style::default().fg(Color::Green));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    if matches!(app.model_preview.status, ModelPreviewStatus::Empty) {
+        f.render_widget(
+            Paragraph::new(model_preview_status(app)).style(Style::default().fg(Color::DarkGray)),
+            inner,
+        );
+    } else if let Some(image) = app.model_preview.image_widget() {
+        f.render_widget(image, inner);
+    }
+}
+
+fn model_preview_status(app: &App) -> String {
     let status = match &app.model_preview.status {
         ModelPreviewStatus::Empty => "not rendered".to_string(),
         ModelPreviewStatus::Stale => "stale — run :render".to_string(),
@@ -451,25 +557,91 @@ fn draw_model_preview(f: &mut Frame, app: &mut App, area: Rect) {
         ModelPreviewStatus::Ready { triangles } => format!("{triangles} triangles"),
         ModelPreviewStatus::Failed(error) => format!("failed: {error}"),
     };
-    let title = format!(
-        " Model [{:?}] — {} ",
-        app.model_preview.protocol_type(),
-        status
+    status
+}
+
+fn model_preview_title(app: &App) -> String {
+    let protocol = fixed_display_width(
+        &format!("{:?}", app.model_preview.protocol_type()),
+        MODEL_PROTOCOL_WIDTH,
     );
-    let block = Block::default()
-        .title(title)
-        .borders(Borders::ALL)
-        .style(Style::default().fg(Color::Green));
-    let inner = block.inner(area);
-    f.render_widget(block, area);
-    if let Some(protocol) = app.model_preview.protocol_mut() {
-        f.render_stateful_widget(StatefulImage::default(), inner, protocol);
+    let status = fixed_display_width(&model_preview_status(app), MODEL_STATUS_WIDTH);
+    let frame_size = app
+        .model_preview
+        .metrics
+        .frame_size
+        .map(|size| format!("{}x{}", size.width, size.height))
+        .unwrap_or_else(|| "-".to_string());
+    let frame_size = fixed_display_width(&frame_size, MODEL_FRAME_SIZE_WIDTH);
+    let metrics = &app.model_preview.metrics;
+    let generation = fixed_metric(
+        metrics.generation_time.as_secs_f64() * 1000.0,
+        MODEL_TIME_WIDTH,
+        0,
+    );
+    let raster = fixed_metric(
+        metrics.raster_time.as_secs_f64() * 1000.0,
+        MODEL_TIME_WIDTH,
+        0,
+    );
+    let encode = fixed_metric(
+        metrics.encode_time.as_secs_f64() * 1000.0,
+        MODEL_TIME_WIDTH,
+        0,
+    );
+    let draw = fixed_metric(
+        metrics.ui_draw_time.as_secs_f64() * 1000.0,
+        MODEL_TIME_WIDTH,
+        0,
+    );
+    let fps = fixed_metric(metrics.presented_fps.into(), MODEL_FPS_WIDTH, 1);
+    let size_kb = fixed_metric(
+        (metrics.encoded_bytes / 1024) as f64,
+        MODEL_SIZE_KB_WIDTH,
+        0,
+    );
+    let size_estimate_marker = if metrics.encoded_bytes_estimated {
+        "~"
     } else {
-        f.render_widget(
-            Paragraph::new(status).style(Style::default().fg(Color::DarkGray)),
-            inner,
-        );
+        " "
+    };
+
+    format!(
+        " Model [{protocol}] {status} | {frame_size} G:{generation} R:{raster} E:{encode} D:{draw}ms {fps}fps {size_estimate_marker}{size_kb}KB ",
+    )
+}
+
+fn fixed_display_width(value: &str, width: usize) -> String {
+    let mut result = String::new();
+    let mut display_width = 0;
+    for character in value.chars() {
+        let character_width = UnicodeWidthChar::width(character).unwrap_or(0);
+        if display_width + character_width > width {
+            break;
+        }
+        result.push(character);
+        display_width += character_width;
     }
+    result.extend(std::iter::repeat_n(' ', width - display_width));
+    result
+}
+
+fn fixed_metric(value: f64, width: usize, precision: usize) -> String {
+    let formatted = if value.is_finite() {
+        format!("{value:.precision$}")
+    } else {
+        "-".to_string()
+    };
+    if formatted.len() > width {
+        return if width == 0 {
+            String::new()
+        } else if width == 1 {
+            "+".to_string()
+        } else {
+            format!("{}+", "9".repeat(width - 1))
+        };
+    }
+    format!("{formatted:>width$}")
 }
 
 fn draw_help_modal(f: &mut Frame, app: &App) {
@@ -618,8 +790,12 @@ fn draw_completion_popup(f: &mut Frame, app: &App, input_area: Rect) {
 
 #[cfg(test)]
 mod tests {
-    use super::shows_input_buffer;
+    use super::{draw, model_preview_title, shows_input_buffer};
     use crate::app::{App, InputMode};
+    use crate::preview::ModelPreviewStatus;
+    use ratatui::{backend::TestBackend, Terminal};
+    use std::time::Duration;
+    use unicode_width::UnicodeWidthStr;
 
     #[test]
     fn test_tree_state_with_empty_ast() {
@@ -643,6 +819,98 @@ mod tests {
         assert!(shows_input_buffer(InputMode::Command));
         assert!(!shows_input_buffer(InputMode::Normal));
         assert!(!shows_input_buffer(InputMode::Help));
-        assert!(!shows_input_buffer(InputMode::Camera));
+    }
+
+    #[test]
+    fn test_model_preview_uses_full_width_and_camera_toolbar_with_shortcuts() {
+        let mut app = App::new();
+        app.enter_model_screen();
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+        assert_eq!(app.ui_regions.tree.width, 0);
+        assert_eq!(app.ui_regions.preview.width, 100);
+        assert!(app
+            .ui_regions
+            .camera_buttons
+            .iter()
+            .any(|button| button.command == "preview source"));
+        assert!(app
+            .ui_regions
+            .camera_buttons
+            .iter()
+            .any(|button| button.command == "camera view iso"));
+
+        let buffer = terminal.backend().buffer();
+        let row = |y| {
+            (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        };
+        let buttons = row(27);
+        assert!(buttons.contains("[P Source]"));
+        assert!(buttons.contains("[f Fit]"));
+        assert!(buttons.contains("[p Ortho]"));
+        assert!(buttons.contains("[Space Auto]"));
+        let shortcuts = row(28);
+        assert!(shortcuts.contains("h/j/k/l Orbit"));
+        assert!(shortcuts.contains("Arrows Pan"));
+        assert!(shortcuts.contains("+/- Zoom"));
+        assert!(shortcuts.contains("1..7 Views"));
+        assert!(shortcuts.contains("Esc/q Source"));
+    }
+
+    #[test]
+    fn test_model_preview_metric_labels_stay_in_fixed_columns() {
+        let mut app = App::new();
+        app.model_preview.status = ModelPreviewStatus::Rasterizing;
+        app.model_preview.metrics.generation_time = Duration::from_millis(1);
+        app.model_preview.metrics.raster_time = Duration::from_millis(9);
+        app.model_preview.metrics.encode_time = Duration::from_millis(99);
+        app.model_preview.metrics.ui_draw_time = Duration::from_millis(999);
+        app.model_preview.metrics.presented_fps = 1.0;
+        app.model_preview.metrics.encoded_bytes = 1024;
+        let short_values = model_preview_title(&app);
+
+        app.model_preview.status = ModelPreviewStatus::Ready { triangles: 123_456 };
+        app.model_preview.metrics.generation_time = Duration::from_secs(120);
+        app.model_preview.metrics.raster_time = Duration::from_secs(12);
+        app.model_preview.metrics.encode_time = Duration::from_millis(1_234);
+        app.model_preview.metrics.ui_draw_time = Duration::from_millis(10_000);
+        app.model_preview.metrics.presented_fps = 1200.0;
+        app.model_preview.metrics.encoded_bytes = 128 * 1024 * 1024;
+        app.model_preview.metrics.encoded_bytes_estimated = true;
+        let long_values = model_preview_title(&app);
+
+        for label in [" G:", " R:", " E:", " D:", "fps", "KB"] {
+            let short_index = short_values.find(label).unwrap();
+            let long_index = long_values.find(label).unwrap();
+            assert_eq!(
+                UnicodeWidthStr::width(&short_values[..short_index]),
+                UnicodeWidthStr::width(&long_values[..long_index]),
+                "{label} moved when its preceding value changed"
+            );
+        }
+    }
+
+    #[test]
+    fn test_model_preview_replaces_toolbar_with_command_input() {
+        let mut app = App::new();
+        app.enter_model_screen();
+        app.input_mode = InputMode::Command;
+        app.input_buffer.set_content("camera view iso");
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+        assert!(app.ui_regions.camera_buttons.is_empty());
+        assert_eq!(app.ui_regions.input.height, 4);
+        let buffer = terminal.backend().buffer();
+        let screen = (0..buffer.area.height)
+            .flat_map(|y| (0..buffer.area.width).map(move |x| buffer[(x, y)].symbol()))
+            .collect::<String>();
+        assert!(screen.contains("Command Mode"));
+        assert!(screen.contains("camera view iso"));
     }
 }
