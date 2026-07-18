@@ -8,7 +8,8 @@ pub struct RenderSettings {
     pub base_color: [u8; 4],
     pub ambient: f32,
     pub diffuse: f32,
-    /// Unit direction from the surface toward the light.
+    /// Unit direction from the surface toward the light in camera/view space.
+    /// The light therefore follows camera orbit and roll.
     pub light_direction: Vec3,
     pub backface_culling: bool,
 }
@@ -20,7 +21,7 @@ impl Default for RenderSettings {
             base_color: [135, 180, 220, 255],
             ambient: 0.28,
             diffuse: 0.72,
-            light_direction: Vec3::new(-0.4, -0.6, 0.7).normalize(),
+            light_direction: Vec3::new(-1.0, 1.0, 1.0).normalize(),
             backface_culling: true,
         }
     }
@@ -47,6 +48,7 @@ impl CpuRenderer {
     pub fn render(&self, mesh: &Mesh, camera: &Camera, size: PixelSize) -> RgbaFrame {
         let mut framebuffer = Framebuffer::new(size, self.settings.background);
         let view_projection = camera.view_projection(size.aspect_ratio());
+        let light_direction = world_light_direction(self.settings, camera);
 
         for (triangle, normal) in mesh.triangles.iter().zip(&mesh.triangle_normals) {
             let clip_triangle =
@@ -55,7 +57,7 @@ impl CpuRenderer {
             if polygon.len() < 3 {
                 continue;
             }
-            let color = shade(self.settings, *normal);
+            let color = shade(self.settings, *normal, light_direction);
             for offset in 1..polygon.len() - 1 {
                 self.rasterize_triangle(
                     &mut framebuffer,
@@ -181,10 +183,20 @@ fn edge(a: Vec2, b: Vec2, point: Vec2) -> f32 {
     (b.x - a.x) * (point.y - a.y) - (b.y - a.y) * (point.x - a.x)
 }
 
-fn shade(settings: RenderSettings, normal: Vec3) -> [u8; 4] {
-    let intensity = (settings.ambient
-        + settings.diffuse * normal.dot(settings.light_direction).max(0.0))
-    .clamp(0.0, 1.0);
+fn world_light_direction(settings: RenderSettings, camera: &Camera) -> Vec3 {
+    camera
+        .view_matrix()
+        .inverse()
+        .transform_vector3(settings.light_direction)
+        .normalize_or_zero()
+}
+
+fn shade(settings: RenderSettings, normal: Vec3, light_direction: Vec3) -> [u8; 4] {
+    // Match OpenSCAD's pair of opposed directional lights. The contribution
+    // max(N·L, 0) + max(N·-L, 0) simplifies to abs(N·L), giving every
+    // orientation a camera-relative fill light while preserving hard CAD edges.
+    let intensity =
+        (settings.ambient + settings.diffuse * normal.dot(light_direction).abs()).clamp(0.0, 1.0);
     [
         (settings.base_color[0] as f32 * intensity).round() as u8,
         (settings.base_color[1] as f32 * intensity).round() as u8,
@@ -324,14 +336,35 @@ mod tests {
     }
 
     #[test]
-    fn shading_changes_with_face_direction() {
+    fn opposed_lights_illuminate_both_face_directions_equally() {
         let settings = RenderSettings {
             ambient: 0.2,
             diffuse: 0.8,
             light_direction: Vec3::Z,
             ..RenderSettings::default()
         };
-        assert!(shade(settings, Vec3::Z)[0] > shade(settings, -Vec3::Z)[0]);
+        assert_eq!(
+            shade(settings, Vec3::Z, Vec3::Z),
+            shade(settings, -Vec3::Z, Vec3::Z)
+        );
+        assert!(shade(settings, Vec3::Z, Vec3::Z)[0] > shade(settings, Vec3::X, Vec3::Z)[0]);
+    }
+
+    #[test]
+    fn light_direction_remains_fixed_in_camera_space() {
+        let settings = RenderSettings::default();
+        let mesh = Mesh::new(vec![Vec3::ZERO, Vec3::X, Vec3::Y], vec![[0, 1, 2]]).unwrap();
+        let mut camera = top_camera(&mesh);
+
+        for (yaw, pitch) in [(0.0, 0.0), (0.7, -0.2), (-1.1, 0.4)] {
+            camera.orbit(yaw, pitch);
+            let world_direction = world_light_direction(settings, &camera);
+            let view_direction = camera
+                .view_matrix()
+                .transform_vector3(world_direction)
+                .normalize();
+            assert!(view_direction.distance(settings.light_direction) < 1.0e-5);
+        }
     }
 
     #[test]

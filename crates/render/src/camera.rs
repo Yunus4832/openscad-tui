@@ -6,6 +6,8 @@ const MIN_DISTANCE: f32 = 1.0e-4;
 const MIN_SCALE: f32 = 1.0e-4;
 const MAX_PITCH: f32 = FRAC_PI_2 - 1.0e-3;
 const FIT_MARGIN: f32 = 1.15;
+const CLIP_MARGIN: f32 = 1.05;
+const MIN_NEAR_FRACTION: f32 = 1.0e-4;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Projection {
@@ -162,17 +164,30 @@ impl Camera {
                 self.distance = radius * 3.0;
             }
         }
-        self.near = (self.distance - radius * 1.5).max(radius * 1.0e-3);
-        self.far = (self.distance + radius * 1.5).max(self.near + radius);
+        self.update_clip_planes(bounds);
+    }
+
+    /// Recomputes the depth range so the complete model remains between the
+    /// clipping planes after zooming, orbiting, or panning the camera.
+    pub fn update_clip_planes(&mut self, bounds: Aabb) {
+        let radius = bounds.radius().max(MIN_DISTANCE);
+        let center_distance = self.position().distance(bounds.center());
+        let padded_radius = radius * CLIP_MARGIN;
+        let minimum_near = (radius * MIN_NEAR_FRACTION).max(MIN_DISTANCE);
+
+        self.near = (center_distance - padded_radius).max(minimum_near);
+        self.far = (center_distance + padded_radius).max(self.near + minimum_near);
     }
 
     fn camera_up(self) -> Vec3 {
-        let view_direction = (self.target - self.position()).normalize_or_zero();
-        if view_direction.dot(Vec3::Z).abs() > 0.999 {
-            Vec3::Y
-        } else {
-            Vec3::Z
-        }
+        // Use the tangent of the orbit sphere instead of a fixed world-up
+        // vector. At the top and bottom poles this keeps the view basis
+        // well-defined and lets yaw rotate the model in screen space.
+        Vec3::new(
+            -self.pitch.sin() * self.yaw.cos(),
+            -self.pitch.sin() * self.yaw.sin(),
+            self.pitch.cos(),
+        )
     }
 }
 
@@ -194,6 +209,32 @@ mod tests {
         camera.orbit(0.4, 100.0);
         assert!((camera.position().distance(camera.target) - distance).abs() < 1.0e-5);
         assert!(camera.pitch < FRAC_PI_2);
+    }
+
+    #[test]
+    fn horizontal_orbit_rotates_view_basis_at_top_and_bottom_poles() {
+        for view in [StandardView::Top, StandardView::Bottom] {
+            let mut camera = Camera::default();
+            camera.set_standard_view(view, bounds(), 1.0);
+            let before_up = camera.camera_up();
+            let before_clip = camera.view_projection(1.0) * Vec3::X.extend(1.0);
+            let before_ndc = before_clip.truncate() / before_clip.w;
+
+            camera.orbit(FRAC_PI_2, 0.0);
+
+            let after_clip = camera.view_projection(1.0) * Vec3::X.extend(1.0);
+            let after_ndc = after_clip.truncate() / after_clip.w;
+
+            assert!(camera.camera_up().distance(before_up) > 0.05);
+            assert!(
+                camera
+                    .camera_up()
+                    .dot(camera.target - camera.position())
+                    .abs()
+                    < 1.0e-5
+            );
+            assert!(after_ndc.distance(before_ndc) > 0.1);
+        }
     }
 
     #[test]
@@ -220,6 +261,31 @@ mod tests {
             camera.projection,
             Projection::Orthographic { vertical_size: 2.0 }
         );
+    }
+
+    #[test]
+    fn clip_planes_follow_perspective_zoom() {
+        let mut camera = Camera::default();
+        camera.fit(bounds(), 1.0);
+        let fitted_near = camera.near;
+
+        camera.zoom(0.25);
+        camera.update_clip_planes(bounds());
+
+        assert!(camera.near < fitted_near);
+        assert!(camera.near > 0.0);
+        assert!(camera.far >= camera.position().distance(bounds().center()) + bounds().radius());
+    }
+
+    #[test]
+    fn clip_planes_cover_bounds_after_pan() {
+        let mut camera = Camera::default();
+        camera.fit(bounds(), 1.0);
+        camera.pan(20.0, -10.0);
+        camera.update_clip_planes(bounds());
+
+        let center_distance = camera.position().distance(bounds().center());
+        assert!(camera.far >= center_distance + bounds().radius());
     }
 
     #[test]

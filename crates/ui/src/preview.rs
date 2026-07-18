@@ -591,6 +591,8 @@ impl ModelPreview {
             self.last_animation_tick = now;
             self.camera
                 .orbit(animation_elapsed.as_secs_f32() * 0.6, 0.0);
+            self.camera
+                .update_clip_planes(self.bounds.expect("bounds checked above"));
             render_trace(|| {
                 format!(
                     "auto-tick elapsed_ms={:.2} yaw={:.6} next_camera_rev={}",
@@ -653,23 +655,26 @@ impl ModelPreview {
     }
 
     pub fn orbit(&mut self, yaw_degrees: f32, pitch_degrees: f32) -> Result<(), String> {
-        self.require_bounds()?;
+        let bounds = self.require_bounds()?;
         self.camera
             .orbit(yaw_degrees.to_radians(), pitch_degrees.to_radians());
+        self.camera.update_clip_planes(bounds);
         self.request_rasterize();
         Ok(())
     }
 
     pub fn pan(&mut self, horizontal: f32, vertical: f32) -> Result<(), String> {
-        self.require_bounds()?;
+        let bounds = self.require_bounds()?;
         self.camera.pan_fraction(horizontal, vertical);
+        self.camera.update_clip_planes(bounds);
         self.request_rasterize();
         Ok(())
     }
 
     pub fn zoom(&mut self, factor: f32) -> Result<(), String> {
-        self.require_bounds()?;
+        let bounds = self.require_bounds()?;
         self.camera.zoom(factor);
+        self.camera.update_clip_planes(bounds);
         self.request_rasterize();
         Ok(())
     }
