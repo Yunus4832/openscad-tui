@@ -847,7 +847,7 @@ fn draw_completion_popup(f: &mut Frame, app: &App, input_area: Rect) {
 mod tests {
     use super::{draw, model_preview_title, shows_input_buffer};
     use crate::app::{App, InputMode};
-    use crate::commands::{cmd_edit_scad_force, cmd_load_library};
+    use crate::commands::{cmd_edit_scad, cmd_load_library};
     use crate::preview::ModelPreviewStatus;
     use ratatui::{backend::TestBackend, Terminal};
     use std::fs;
@@ -855,19 +855,16 @@ mod tests {
     use unicode_width::UnicodeWidthStr;
 
     #[test]
-    fn test_tree_state_with_empty_ast() {
+    fn test_new_app_selects_project_sources() {
         let app = App::new();
-        // TreeState should be empty when AST has no modules
-        assert!(app.tree_state.borrow().selected().is_empty());
+        assert_eq!(app.tree_state.borrow().selected(), ["__project_sources"]);
     }
 
     #[test]
     fn test_navigation_status_update() {
         let mut app = App::new();
-        // Test that update_navigation_status works without panicking
         app.update_navigation_status();
-        // When there's no selection, message should be None
-        assert!(app.message.is_none());
+        assert_eq!(app.message.as_deref(), Some("> [Project Sources]"));
     }
 
     #[test]
@@ -878,7 +875,7 @@ mod tests {
         fs::write(&main, "cube(1);").unwrap();
         fs::write(&library, "module helper() { sphere(1); }").unwrap();
         let mut app = App::new();
-        cmd_edit_scad_force(&mut app, main.to_str().unwrap()).unwrap();
+        cmd_edit_scad(&mut app, main.to_str().unwrap()).unwrap();
         cmd_load_library(&mut app, library.to_str().unwrap()).unwrap();
         app.clear_message();
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();

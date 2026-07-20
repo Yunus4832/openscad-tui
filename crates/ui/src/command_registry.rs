@@ -29,6 +29,7 @@ pub enum CommandType {
     Protocol,
     LibraryReference,
     ProjectSource,
+    New,
 }
 
 /// Command type - used for dynamic completion context analysis

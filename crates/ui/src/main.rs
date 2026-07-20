@@ -20,7 +20,7 @@ use std::path::PathBuf;
 
 use openscad_ui::{
     app::App,
-    commands::{cmd_edit_scad_force, cmd_load_force},
+    commands::{cmd_edit_scad, cmd_load_force},
     input::{handle_key, handle_mouse},
     ui::draw,
 };
@@ -51,7 +51,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             .and_then(|extension| extension.to_str())
             .is_some_and(|extension| extension.eq_ignore_ascii_case("scad"))
         {
-            cmd_edit_scad_force(&mut app, &filename)?;
+            cmd_edit_scad(&mut app, &filename)?;
         } else {
             cmd_load_force(&mut app, &filename)?;
         }

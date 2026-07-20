@@ -200,7 +200,8 @@ write! project.json
 open project.json
 open! project.json
 edit existing.scad
-edit! existing.scad
+new project
+new file part.scad
 export model.scad
 library gears.scad
 use gears.scad
@@ -213,8 +214,10 @@ wq
 ```
 
 - `write` 保存可继续编辑的 JSON 项目，`open` 读取 JSON 项目。
-- `edit` 解析 `.scad` 文件并创建新的结构化项目。解析出的自定义模块、函数、全局变量
-  和模块节点会进入 AST，因此可以参与树编辑、命令补全和模块补全。
+- `new project` 创建包含空白 `main.scad` 的项目，`new file part.scad` 在当前项目中新建
+  可编辑 source；`new! project` 可以明确丢弃未保存修改。
+- `edit` 将已有 `.scad` 文件及其本地依赖导入当前项目，连续执行会归集为多个可编辑
+  buffer，不会替换已有 source。导入后内容与原文件解耦。
 - `edit` 会递归收集能从项目目录或 OpenSCAD 库目录解析到的 `include` / `use` 文件，将
   完整源码 AST、定义索引和依赖类型一起嵌入 JSON。项目目录内的主文件与配件文件可编辑；
   BOSL 等外部库保持只读，但仍会参与补全和渲染。
@@ -226,7 +229,7 @@ wq
 - `render` 直接渲染当前编辑文件。渲染时所有项目文件都会从各自 AST 生成到临时目录，
   外部只读库则恢复导入时的原文，再由 OpenSCAD 按原有 `include` / `use` 关系处理。
 - `edit` 后需使用 `write project.json` 保存项目；不会覆盖原始 `.scad` 文件。
-- 带 `!` 的版本允许覆盖未保存状态相关的保护。
+- `open!` 和 `new! project` 允许明确丢弃未保存状态；`edit` 是增量操作，不需要 `edit!`。
 - `export` 只生成 `.scad` 文件，不会运行 OpenSCAD。
 - `library gears.scad` 加载 OpenSCAD 源码库并递归收集本地 SCAD 依赖，但不会修改
   当前主文件的语义。源码会直接嵌入 JSON 项目，不需要额外的库描述文件。
@@ -246,7 +249,7 @@ wq
 - 变换：`translate`、`rotate`、`scale`
 - 布尔操作：`union`、`difference`、`intersection`
 - 定义：`global`、`function`、`module`
-- 文件：`write`、`write!`、`open`、`open!`、`edit`、`edit!`、`buffer`、`export`、`library`、`use`、`include`
+- 文件：`new`、`new!`、`write`、`write!`、`open`、`open!`、`edit`、`buffer`、`export`、`library`、`use`、`include`
 - 预览：`render`、`preview source|model|toggle`、`camera ...`、`protocol ...`
 - 系统：`help`、`quit`、`quit!`、`wq`
 

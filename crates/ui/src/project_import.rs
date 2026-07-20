@@ -26,6 +26,130 @@ pub fn import_scad_project(entry: &Path) -> Result<AstRoot, String> {
     import_scad_project_with_library_roots(entry, &openscad_library_roots())
 }
 
+/// Import an existing SCAD source tree as project-owned editable documents.
+/// Existing documents remain in the project and the imported entry becomes active.
+pub fn attach_editable_scad(project: &mut AstRoot, entry: &Path) -> Result<String, String> {
+    let canonical_entry = entry
+        .canonicalize()
+        .map_err(|error| format!("Failed to resolve '{}': {error}", entry.display()))?;
+    if let Some(existing) = project.embedded_sources.iter().find(|source| {
+        source.editable
+            && source.original_path.as_deref() == Some(canonical_entry.to_string_lossy().as_ref())
+    }) {
+        let target = existing.virtual_path.clone();
+        project
+            .activate_source(&target)
+            .map_err(|error| error.to_string())?;
+        return Ok(target);
+    }
+
+    let mut imported = import_scad_project(&canonical_entry)?;
+    let placeholder = project.embedded_sources.len() == 1
+        && project.embedded_sources[0].editable
+        && project.embedded_sources[0].original_path.is_none()
+        && project.embedded_sources[0]
+            .generated_content()
+            .trim()
+            .is_empty();
+    if placeholder {
+        project.embedded_sources.clear();
+        project.source_dependencies.clear();
+        project.entry_source = None;
+        project.active_source = None;
+    } else {
+        project.sync_active_source();
+    }
+
+    let imported_entry = imported
+        .entry_source
+        .clone()
+        .ok_or_else(|| "Imported source has no entry path".to_string())?;
+    let occupied = project
+        .embedded_sources
+        .iter()
+        .map(|source| source.virtual_path.as_str())
+        .collect::<HashSet<_>>();
+    let has_collision = imported
+        .embedded_sources
+        .iter()
+        .any(|source| occupied.contains(source.virtual_path.as_str()));
+    let prefix = has_collision.then(|| unique_import_prefix(project, &canonical_entry));
+    let paths = imported
+        .embedded_sources
+        .iter()
+        .map(|source| {
+            let mapped = prefix
+                .as_ref()
+                .map(|prefix| format!("{prefix}/{}", source.virtual_path))
+                .unwrap_or_else(|| source.virtual_path.clone());
+            (source.virtual_path.clone(), mapped)
+        })
+        .collect::<HashMap<_, _>>();
+    let target = paths[&imported_entry].clone();
+    let first_project_source = project.entry_source.is_none();
+    for source in &mut imported.embedded_sources {
+        let is_entry = source.virtual_path == imported_entry;
+        source.virtual_path = paths[&source.virtual_path].clone();
+        source.role = if first_project_source && is_entry {
+            EmbeddedSourceRole::Entry
+        } else {
+            EmbeddedSourceRole::Dependency
+        };
+    }
+    for dependency in &mut imported.source_dependencies {
+        dependency.from = paths[&dependency.from].clone();
+        dependency.to = paths[&dependency.to].clone();
+    }
+    if first_project_source {
+        project.entry_source = Some(target.clone());
+    }
+    project.embedded_sources.extend(imported.embedded_sources);
+    project
+        .source_dependencies
+        .extend(imported.source_dependencies);
+    project
+        .activate_source(&target)
+        .map_err(|error| error.to_string())?;
+    Ok(target)
+}
+
+fn unique_import_prefix(project: &AstRoot, entry: &Path) -> String {
+    let base = entry
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|value| value.to_str())
+        .or_else(|| entry.file_stem().and_then(|value| value.to_str()))
+        .unwrap_or("import")
+        .chars()
+        .map(|ch| {
+            if ch.is_alphanumeric() || ch == '_' || ch == '-' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    let occupied = project
+        .embedded_sources
+        .iter()
+        .map(|source| source.virtual_path.as_str())
+        .collect::<HashSet<_>>();
+    (1..)
+        .map(|suffix| {
+            if suffix == 1 {
+                base.clone()
+            } else {
+                format!("{base}-{suffix}")
+            }
+        })
+        .find(|candidate| {
+            !occupied
+                .iter()
+                .any(|path| *path == candidate || path.starts_with(&format!("{candidate}/")))
+        })
+        .expect("an import namespace is always available")
+}
+
 fn import_scad_project_with_library_roots(
     entry: &Path,
     library_roots: &[PathBuf],
@@ -174,19 +298,9 @@ fn ensure_virtual_entry(project: &mut AstRoot) {
     }
     let entry = "main.scad".to_string();
     project.entry_source = Some(entry.clone());
-    project.embedded_sources.push(EmbeddedSourceFile {
-        virtual_path: entry,
-        original_path: None,
-        role: EmbeddedSourceRole::Entry,
-        editable: true,
-        content: String::new(),
-        global_variables: Vec::new(),
-        module_defines: Vec::new(),
-        function_defines: Vec::new(),
-        modules: Vec::new(),
-        includes: Vec::new(),
-        uses: Vec::new(),
-    });
+    project
+        .embedded_sources
+        .push(EmbeddedSourceFile::empty(entry, EmbeddedSourceRole::Entry));
 }
 
 fn collect_source(
@@ -474,5 +588,42 @@ mod tests {
             .iter()
             .any(|definition| definition.name == "right"));
         assert_eq!(project.source_dependencies.len(), 3);
+    }
+
+    #[test]
+    fn attaches_multiple_editable_source_trees_without_replacing_the_project() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        fs::write(first.path().join("main.scad"), "cube(1);").unwrap();
+        fs::write(second.path().join("main.scad"), "sphere(2);").unwrap();
+        let mut project = AstRoot::new_project("main.scad");
+
+        let first_target =
+            attach_editable_scad(&mut project, &first.path().join("main.scad")).unwrap();
+        let second_target =
+            attach_editable_scad(&mut project, &second.path().join("main.scad")).unwrap();
+
+        assert_eq!(first_target, "main.scad");
+        assert_ne!(second_target, first_target);
+        assert_eq!(
+            project.active_source.as_deref(),
+            Some(second_target.as_str())
+        );
+        assert_eq!(
+            project
+                .embedded_sources
+                .iter()
+                .filter(|source| source.editable)
+                .count(),
+            2
+        );
+        assert!(project
+            .source_code(&first_target)
+            .unwrap()
+            .contains("cube(1);"));
+        assert!(project
+            .source_code(&second_target)
+            .unwrap()
+            .contains("sphere(2);"));
     }
 }

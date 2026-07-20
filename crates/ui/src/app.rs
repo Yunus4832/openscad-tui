@@ -389,7 +389,7 @@ pub struct App {
 impl App {
     pub fn new() -> Self {
         let mut app = Self {
-            ast: Arc::new(AstRoot::new()),
+            ast: Arc::new(AstRoot::new_project("main.scad")),
             library: LibraryManager::new(),
             command_registry: CommandRegistry::new(),
             screen: Screen::Editor,

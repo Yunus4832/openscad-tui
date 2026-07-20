@@ -764,6 +764,19 @@ impl AstRoot {
         }
     }
 
+    /// Create an empty, but fully materialized, editable SCAD project.
+    pub fn new_project(entry_path: impl Into<String>) -> Self {
+        let entry_path = entry_path.into();
+        let mut project = Self::new();
+        project.entry_source = Some(entry_path.clone());
+        project.active_source = Some(entry_path.clone());
+        project.embedded_sources.push(EmbeddedSourceFile::empty(
+            entry_path,
+            EmbeddedSourceRole::Entry,
+        ));
+        project
+    }
+
     /// Add a module to the root level
     pub fn add_module(&mut self, module: ModuleNode) -> Result<()> {
         // Check for duplicate identifiers
@@ -1337,6 +1350,22 @@ pub struct EmbeddedSourceFile {
 }
 
 impl EmbeddedSourceFile {
+    pub fn empty(virtual_path: String, role: EmbeddedSourceRole) -> Self {
+        Self {
+            virtual_path,
+            original_path: None,
+            role,
+            editable: true,
+            content: String::new(),
+            global_variables: Vec::new(),
+            module_defines: Vec::new(),
+            function_defines: Vec::new(),
+            modules: Vec::new(),
+            includes: Vec::new(),
+            uses: Vec::new(),
+        }
+    }
+
     pub fn document_ast(&self) -> AstRoot {
         let mut document = AstRoot::new();
         document.global_variables.clone_from(&self.global_variables);

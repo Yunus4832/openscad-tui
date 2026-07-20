@@ -11,7 +11,7 @@ use thiserror::Error;
 
 use crate::app::{App, InputMode, PendingModuleAction, Screen};
 use crate::command_registry::CommandType;
-use crate::project_import::{attach_scad_library, import_scad_project};
+use crate::project_import::{attach_editable_scad, attach_scad_library};
 
 const MAX_RECURSION_DEPTH: usize = 1000;
 
@@ -1164,35 +1164,107 @@ pub fn cmd_load_force(app: &mut App, filename: &str) -> CommandResult<()> {
     Ok(())
 }
 
-/// Parse an OpenSCAD source file into a new structured project.
-pub fn cmd_edit_scad(app: &mut App, filename: &str) -> CommandResult<()> {
-    if !app.saved {
+pub fn cmd_new_project(app: &mut App, filename: Option<&str>, force: bool) -> CommandResult<()> {
+    if !force && !app.saved {
         return Err(CommandError::Custom(
-            "File is not saved; save or discard the current project before importing".to_string(),
+            "Project is not saved; use 'new! project' to discard changes".to_string(),
         ));
     }
-    cmd_edit_scad_force(app, filename)
+    app.ast = Arc::new(openscad_core::AstRoot::new_project("main.scad"));
+    app.library.reload_custom_modules_from_ast(&[]);
+    app.library.reload_custom_functions_from_ast(&[]);
+    app.selected_nodes.clear();
+    app.undo_stack.clear();
+    app.redo_stack.clear();
+    app.tree_state.borrow_mut().select(Vec::new());
+    app.current_file = filename.map(str::to_string);
+    app.saved = false;
+    app.model_preview.mark_stale();
+    app.init_tree_selection();
+    app.set_info("Created a new project with 'main.scad'");
+    Ok(())
 }
 
-pub fn cmd_edit_scad_force(app: &mut App, filename: &str) -> CommandResult<()> {
+pub fn cmd_new_file(app: &mut App, filename: &str) -> CommandResult<()> {
+    let virtual_path = normalize_project_source_path(filename)?;
+    if app
+        .ast
+        .embedded_sources
+        .iter()
+        .any(|source| source.virtual_path == virtual_path)
+    {
+        return Err(CommandError::Custom(format!(
+            "Project source '{virtual_path}' already exists"
+        )));
+    }
+    app.ast_mut().sync_active_source();
+    app.ast_mut()
+        .embedded_sources
+        .push(openscad_core::EmbeddedSourceFile::empty(
+            virtual_path.clone(),
+            openscad_core::EmbeddedSourceRole::Dependency,
+        ));
+    app.ast_mut().activate_source(&virtual_path)?;
+    reload_project_definitions(app);
+    app.selected_nodes.clear();
+    app.undo_stack.clear();
+    app.redo_stack.clear();
+    app.tree_state.borrow_mut().select(Vec::new());
+    app.init_tree_selection();
+    app.model_preview.mark_stale();
+    app.set_info(&format!("Created project source '{virtual_path}'"));
+    Ok(())
+}
+
+fn normalize_project_source_path(filename: &str) -> CommandResult<String> {
+    let path = Path::new(filename);
+    if path.is_absolute()
+        || path.components().any(|component| {
+            !matches!(
+                component,
+                std::path::Component::Normal(_) | std::path::Component::CurDir
+            )
+        })
+        || !has_extension(path, "scad")
+    {
+        return Err(CommandError::Custom(
+            "new file requires a safe relative .scad path".to_string(),
+        ));
+    }
+    let components = path
+        .components()
+        .filter_map(|component| match component {
+            std::path::Component::Normal(value) => Some(value.to_string_lossy()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if components.is_empty() {
+        return Err(CommandError::Custom(
+            "new file requires a non-empty .scad path".to_string(),
+        ));
+    }
+    Ok(components.join("/"))
+}
+
+/// Import an OpenSCAD source tree into the current structured project.
+pub fn cmd_edit_scad(app: &mut App, filename: &str) -> CommandResult<()> {
     let path = expand_tilde(filename);
     if !has_extension(&path, "scad") {
         return Err(CommandError::Custom(
             "edit requires a .scad source file".to_string(),
         ));
     }
-    app.ast = Arc::new(import_scad_project(&path).map_err(CommandError::Custom)?);
+    let target = attach_editable_scad(app.ast_mut(), &path).map_err(CommandError::Custom)?;
     reload_project_definitions(app);
     app.selected_nodes.clear();
     app.undo_stack.clear();
     app.redo_stack.clear();
     app.tree_state.borrow_mut().select(Vec::new());
-    app.current_file = None;
     app.saved = false;
     app.model_preview.mark_stale();
     app.set_info(&format!(
-        "Imported '{}' as a structured project; use write <project.json> to save it",
-        path.display()
+        "Imported '{}' as editable project source '{target}'",
+        path.display(),
     ));
     Ok(())
 }
@@ -2585,6 +2657,51 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
 
     // File operations
     registry.register(CommandDef::new(
+        "new",
+        Vec::<&str>::new(),
+        |app, args| match args {
+            ["project"] => cmd_new_project(app, None, false),
+            ["project", filename] => cmd_new_project(app, Some(filename), false),
+            ["file", filename] => cmd_new_file(app, filename),
+            _ => Err(CommandError::InvalidCommand(
+                "Usage: new project [project] | new file <source.scad>".to_string(),
+            )),
+        },
+        "Create a project or an editable SCAD source buffer",
+        1,
+        Some(2),
+        "new project [project] | new file <source.scad>",
+        vec![
+            "new project",
+            "new project model.scadtui",
+            "new file part.scad",
+        ],
+        CommandType::New,
+        true,
+        true,
+    ));
+
+    registry.register(CommandDef::new(
+        "new!",
+        Vec::<&str>::new(),
+        |app, args| match args {
+            ["project"] => cmd_new_project(app, None, true),
+            ["project", filename] => cmd_new_project(app, Some(filename), true),
+            _ => Err(CommandError::InvalidCommand(
+                "Usage: new! project [project]".to_string(),
+            )),
+        },
+        "Discard changes and create a new project",
+        1,
+        Some(2),
+        "new! project [project]",
+        vec!["new! project", "new! project model.scadtui"],
+        CommandType::New,
+        true,
+        true,
+    ));
+
+    registry.register(CommandDef::new(
         "write",
         vec!["save", "w"],
         |app, args| {
@@ -2691,32 +2808,11 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
             }
             cmd_edit_scad(app, args[0])
         },
-        "Parse an OpenSCAD source file into a structured project",
+        "Import an OpenSCAD source tree as editable project buffers",
         1,
         Some(1),
         "edit <file.scad>",
         vec!["edit existing.scad"],
-        CommandType::File,
-        false,
-        true,
-    ));
-
-    registry.register(CommandDef::new(
-        "edit!",
-        vec!["e!"],
-        |app, args| {
-            if args.len() != 1 {
-                return Err(CommandError::InvalidCommand(
-                    "Usage: edit! <file.scad>".to_string(),
-                ));
-            }
-            cmd_edit_scad_force(app, args[0])
-        },
-        "Parse an OpenSCAD file and discard unsaved changes",
-        1,
-        Some(1),
-        "edit! <file.scad>",
-        vec!["edit! existing.scad"],
         CommandType::File,
         false,
         true,
@@ -3578,7 +3674,7 @@ mod tests {
         fs::write(&source_path, source).unwrap();
         let mut app = App::new();
 
-        cmd_edit_scad_force(&mut app, source_path.to_str().unwrap()).unwrap();
+        cmd_edit_scad(&mut app, source_path.to_str().unwrap()).unwrap();
 
         assert_eq!(app.ast.includes, ["parts/common.scad"]);
         assert_eq!(app.ast.modules.len(), 1);
@@ -3586,6 +3682,25 @@ mod tests {
         assert!(app.library.get_module("bracket").is_some());
         assert_eq!(app.current_file, None);
         assert!(!app.saved);
+    }
+
+    #[test]
+    fn test_new_project_and_new_file_create_materialized_buffers() {
+        let mut app = App::new();
+        cmd_new_project(&mut app, Some("fixture.scadtui"), true).unwrap();
+        assert_eq!(app.current_file.as_deref(), Some("fixture.scadtui"));
+        assert_eq!(app.ast.active_source.as_deref(), Some("main.scad"));
+        assert!(!app.saved);
+
+        cmd_new_file(&mut app, "parts/bracket.scad").unwrap();
+        assert_eq!(app.ast.active_source.as_deref(), Some("parts/bracket.scad"));
+        assert!(app
+            .ast
+            .embedded_sources
+            .iter()
+            .any(|source| source.virtual_path == "parts/bracket.scad" && source.editable));
+        assert!(cmd_new_file(&mut app, "../escape.scad").is_err());
+        assert!(cmd_new_file(&mut app, "parts/bracket.scad").is_err());
     }
 
     #[test]
@@ -3600,7 +3715,7 @@ mod tests {
         let project_path = directory.path().join("shape-project.json");
         let mut app = App::new();
 
-        cmd_edit_scad_force(&mut app, source_path.to_str().unwrap()).unwrap();
+        cmd_edit_scad(&mut app, source_path.to_str().unwrap()).unwrap();
         assert!(app.library.get_module("part").is_some());
         cmd_write_force(&mut app, project_path.to_str().unwrap()).unwrap();
         fs::remove_dir_all(&source_directory).unwrap();
@@ -3622,7 +3737,7 @@ mod tests {
         let project_path = directory.path().join("project.json");
         let mut app = App::new();
 
-        cmd_edit_scad_force(&mut app, main_path.to_str().unwrap()).unwrap();
+        cmd_edit_scad(&mut app, main_path.to_str().unwrap()).unwrap();
         app.ast_mut().modules[0].name = "cylinder".to_string();
         cmd_buffer(&mut app, Some("part.scad")).unwrap();
         assert_eq!(app.ast.active_source.as_deref(), Some("part.scad"));

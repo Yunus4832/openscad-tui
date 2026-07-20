@@ -1046,6 +1046,7 @@ fn analyze_input_context(input: &str, app: &App) -> CompletionContext {
             }
             CommandType::Protocol => protocol_command_context(input, &parts),
             CommandType::ProjectSource => project_source_command_context(input, &parts, app),
+            CommandType::New => literal_command_context(input, &parts, &["project", "file"], &[]),
             CommandType::Camera => {
                 let second_level: &[&str] = match parts.get(1).copied() {
                     Some("projection") => &["perspective", "orthographic", "toggle"],
@@ -2345,7 +2346,7 @@ mod tests {
         fs::write(&main, "use <part.scad>; cube(1);").unwrap();
         fs::write(directory.path().join("part.scad"), "sphere(2);").unwrap();
         let mut app = App::new();
-        commands::cmd_edit_scad_force(&mut app, main.to_str().unwrap()).unwrap();
+        commands::cmd_edit_scad(&mut app, main.to_str().unwrap()).unwrap();
 
         let (buffers, _) = generate_completions("buffer ", &app);
         assert!(buffers.iter().any(|candidate| candidate.content == "next"));
@@ -2363,7 +2364,7 @@ mod tests {
         fs::write(&main, "use <part.scad>; cube(1);").unwrap();
         fs::write(directory.path().join("part.scad"), "sphere(2);").unwrap();
         let mut app = App::new();
-        commands::cmd_edit_scad_force(&mut app, main.to_str().unwrap()).unwrap();
+        commands::cmd_edit_scad(&mut app, main.to_str().unwrap()).unwrap();
         app.init_tree_selection();
         assert_eq!(app.tree_state.borrow().selected(), ["__project_sources"]);
 
@@ -2881,16 +2882,22 @@ mod tests {
             .draw(|frame| crate::ui::draw(frame, &mut app))
             .unwrap();
 
-        // First click opens the already selected Modules section; second selects its child.
+        app.tree_state
+            .borrow_mut()
+            .select(vec!["__modules".to_string()]);
+        terminal
+            .draw(|frame| crate::ui::draw(frame, &mut app))
+            .unwrap();
+        // Project Sources occupies the first row, so Modules and its child are rows 2 and 3.
         handle_mouse(
-            mouse(MouseEventKind::Down(MouseButton::Left), 1, 1),
+            mouse(MouseEventKind::Down(MouseButton::Left), 1, 2),
             &mut app,
         );
         terminal
             .draw(|frame| crate::ui::draw(frame, &mut app))
             .unwrap();
         handle_mouse(
-            mouse(MouseEventKind::Down(MouseButton::Left), 2, 2),
+            mouse(MouseEventKind::Down(MouseButton::Left), 2, 3),
             &mut app,
         );
         assert_eq!(
