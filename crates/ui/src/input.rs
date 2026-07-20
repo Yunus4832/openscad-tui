@@ -297,7 +297,7 @@ fn handle_normal_input(key: KeyEvent, app: &mut App) {
             app.input_buffer.set_content("edit ");
         }
 
-        // o - open a JSON project
+        // o - open a .scadtui project
         KeyCode::Char('o') => {
             app.input_mode = InputMode::Command;
             app.input_buffer.set_content("open ");

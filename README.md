@@ -13,8 +13,8 @@ Vim 风格按键和命令修改 OpenSCAD AST，可在终端中查看模型树、
 - 使用 `union`、`difference`、`intersection` 组合选中节点
 - 定义全局变量、自定义函数和自定义模块
 - 生成并导出 OpenSCAD 源码
-- 将可编辑项目保存为 JSON，并从 JSON 恢复
-- 将多文件 `.scad` 项目解析为 globals、functions、module definitions 和 module nodes，并嵌入 JSON 项目
+- 将可编辑项目保存为版本化 `.scadtui` 包，并从项目包恢复
+- 将多文件 `.scad` 项目解析为 globals、functions、module definitions 和 module nodes，并嵌入项目包
 - 在同一实例中切换、编辑多个项目源文件，并独立选择默认渲染入口
 - 直接加载 `.scad` 库并提取模块、函数定义用于补全
 - 撤销、重做和命令历史
@@ -39,7 +39,7 @@ cargo run --bin openscad-tui
 cargo run --bin openscad-tui -- existing.scad
 ```
 
-也可以直接打开 JSON 项目：`openscad-tui project.json`。直接打开 `.scad` 与执行
+也可以直接打开项目包：`openscad-tui project.scadtui`。直接传入 `.scad` 与执行
 `edit existing.scad` 的导入行为相同。
 
 发布构建：
@@ -195,10 +195,10 @@ unset center
 ### 文件操作
 
 ```text
-write project.json
-write! project.json
-open project.json
-open! project.json
+write project.scadtui
+write! project.scadtui
+open project.scadtui
+open! project.scadtui
 edit existing.scad
 new project
 new file part.scad
@@ -213,7 +213,8 @@ render
 wq
 ```
 
-- `write` 保存可继续编辑的 JSON 项目，`open` 读取 JSON 项目。
+- `write` 保存可继续编辑的 `.scadtui` 项目包，`open` 读取项目包。项目包是 ZIP 容器，
+  包含版本化 `manifest.json`、结构化项目数据和可检查的 `sources/` SCAD 快照。
 - `new project` 创建包含空白 `main.scad` 的项目，`new file part.scad` 在当前项目中新建
   可编辑 source；`new! project` 可以明确丢弃未保存修改。
 - `edit` 将已有 `.scad` 文件及其本地依赖导入当前项目，连续执行会归集为多个可编辑
@@ -228,11 +229,11 @@ wq
   都可使用。切换前会把当前 AST 写回其嵌入记录，切换后模块和函数补全按新文件的可达依赖重建。
 - `render` 直接渲染当前编辑文件。渲染时所有项目文件都会从各自 AST 生成到临时目录，
   外部只读库则恢复导入时的原文，再由 OpenSCAD 按原有 `include` / `use` 关系处理。
-- `edit` 后需使用 `write project.json` 保存项目；不会覆盖原始 `.scad` 文件。
+- `edit` 后需使用 `write project.scadtui` 保存项目；不会覆盖原始 `.scad` 文件。
 - `open!` 和 `new! project` 允许明确丢弃未保存状态；`edit` 是增量操作，不需要 `edit!`。
 - `export` 只生成 `.scad` 文件，不会运行 OpenSCAD。
 - `library gears.scad` 加载 OpenSCAD 源码库并递归收集本地 SCAD 依赖，但不会修改
-  当前主文件的语义。源码会直接嵌入 JSON 项目，不需要额外的库描述文件。
+  当前 source 的语义。源码会直接嵌入项目包，不需要额外的库描述文件。
 - `use gears.scad` 激活一个已经加载的库，在当前主文件中生成对应的 `use` 关系。
   它只导入模块和函数定义，不执行库文件的顶层建模语句。
 - `include gears.scad` 以 `include` 语义激活已加载的库。除公开定义外，库中的顶层

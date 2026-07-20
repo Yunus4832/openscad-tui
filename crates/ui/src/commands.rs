@@ -11,6 +11,7 @@ use thiserror::Error;
 
 use crate::app::{App, InputMode, PendingModuleAction, Screen};
 use crate::command_registry::CommandType;
+use crate::project_file::{load_project, save_project, PROJECT_EXTENSION};
 use crate::project_import::{attach_editable_scad, attach_scad_library};
 
 const MAX_RECURSION_DEPTH: usize = 1000;
@@ -1027,14 +1028,23 @@ fn split_parameters(input: &str) -> CommandResult<Vec<String>> {
     Ok(params)
 }
 
-/// Save AST to JSON file
+fn normalized_project_path(path: impl AsRef<Path>) -> PathBuf {
+    let path = path.as_ref();
+    if has_extension(path, PROJECT_EXTENSION) {
+        path.to_path_buf()
+    } else {
+        path.with_extension(PROJECT_EXTENSION)
+    }
+}
+
+/// Save the editable project package.
 pub fn cmd_write(app: &mut App, filename: &str) -> CommandResult<()> {
     if filename.is_empty() {
         app.current_file.clone().ok_or(CommandError::Custom(
             "No current file specified and no filename provided to write to".to_string(),
         ))?;
     } else {
-        let expanded = expand_tilde(filename);
+        let expanded = normalized_project_path(expand_tilde(filename));
 
         // Check if file exists and warn user if it's different from current file
         if expanded.exists() {
@@ -1057,7 +1067,7 @@ pub fn cmd_write(app: &mut App, filename: &str) -> CommandResult<()> {
     cmd_write_force(app, filename)
 }
 
-/// Force save AST to JSON file
+/// Force save the editable project package.
 pub fn cmd_write_force(app: &mut App, filename: &str) -> CommandResult<()> {
     app.ast_mut().sync_active_source();
     // Expand tilde in filename
@@ -1070,41 +1080,25 @@ pub fn cmd_write_force(app: &mut App, filename: &str) -> CommandResult<()> {
         expand_tilde(filename)
     };
 
-    // Ensure filename ends with .json
-    let filepath = if !expanded_filepath
-        .extension()
-        .map(|ext| ext == "json")
-        .unwrap_or(false)
-    {
-        expanded_filepath.with_extension("json")
-    } else {
-        expanded_filepath
-    };
-
-    // Serialize AST to JSON
-    let json = serde_json::to_string_pretty(&*app.ast)
-        .map_err(|e| CommandError::Custom(format!("Failed to serialize AST: {}", e)))?;
-
-    // Write to file
-    fs::write(&filepath, json).map_err(|e| {
+    let filepath = normalized_project_path(expanded_filepath);
+    save_project(&filepath, &app.ast).map_err(|error| {
         CommandError::Custom(format!(
-            "Failed to write file '{}': {}",
-            filepath.display(),
-            e
+            "Failed to write project '{}': {error}",
+            filepath.display()
         ))
     })?;
 
     // If app.current_file is None but we're saving with a filename, update current_file
     // This handles the case where we're saving a new unnamed file
-    if app.current_file.is_none() && !filename.is_empty() {
-        app.current_file = Some(filename.to_string());
+    if !filename.is_empty() || app.current_file.is_none() {
+        app.current_file = Some(filepath.to_string_lossy().into_owned());
     }
     app.mark_saved();
 
     Ok(())
 }
 
-/// Load a JSON project.
+/// Load a .scadtui project package.
 pub fn cmd_load(app: &mut App, filename: &str) -> CommandResult<()> {
     if !app.saved {
         return Err(CommandError::Custom(
@@ -1115,7 +1109,7 @@ pub fn cmd_load(app: &mut App, filename: &str) -> CommandResult<()> {
     cmd_load_force(app, filename)
 }
 
-/// Force load AST from JSON file
+/// Force load a .scadtui project package.
 pub fn cmd_load_force(app: &mut App, filename: &str) -> CommandResult<()> {
     // Expand tilde in filename
     let expanded_filename = expand_tilde(filename);
@@ -1128,23 +1122,17 @@ pub fn cmd_load_force(app: &mut App, filename: &str) -> CommandResult<()> {
         )));
     }
 
-    if has_extension(&expanded_filename, "scad") {
+    if !has_extension(&expanded_filename, PROJECT_EXTENSION) {
         return Err(CommandError::Custom(
-            "Use 'edit <file.scad>' to parse and edit OpenSCAD source files".to_string(),
+            "open requires a .scadtui project; use edit for .scad sources".to_string(),
         ));
     }
-
-    // Read file
-    let content = fs::read_to_string(&expanded_filename).map_err(|e| {
+    let ast = load_project(&expanded_filename).map_err(|error| {
         CommandError::Custom(format!(
-            "Failed to read file '{}': {}",
-            expanded_filename.display(),
-            e
+            "Failed to open project '{}': {error}",
+            expanded_filename.display()
         ))
     })?;
-
-    let ast = serde_json::from_str(&content)
-        .map_err(|e| CommandError::Custom(format!("Failed to parse JSON project: {}", e)))?;
 
     // Replace AST
     app.ast = Arc::new(ast);
@@ -2718,11 +2706,11 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
             };
             cmd_write(app, &file_name)
         },
-        "Save AST to JSON file",
+        "Save the editable .scadtui project",
         0,
         Some(1),
         "write [filename]",
-        vec!["write test.json", "save project.json"],
+        vec!["write model.scadtui", "save project.scadtui"],
         CommandType::File,
         false,
         true,
@@ -2745,11 +2733,11 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
             };
             cmd_write_force(app, &file_name)
         },
-        "Force save AST to JSON file",
+        "Force save the editable .scadtui project",
         0,
         Some(1),
         "write! [filename]",
-        vec!["write! test.json", "save! project.json"],
+        vec!["write! model.scadtui", "save! project.scadtui"],
         CommandType::File,
         false,
         true,
@@ -2761,16 +2749,16 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
         |app, args| {
             if args.len() != 1 {
                 return Err(CommandError::InvalidCommand(
-                    "Usage: open <project.json>".to_string(),
+                    "Usage: open <project.scadtui>".to_string(),
                 ));
             }
             cmd_load(app, args[0])
         },
-        "Open an existing JSON project",
+        "Open an existing .scadtui project",
         1,
         Some(1),
-        "open <project.json>",
-        vec!["open project.json"],
+        "open <project.scadtui>",
+        vec!["open project.scadtui"],
         CommandType::File,
         false,
         true,
@@ -2782,16 +2770,16 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
         |app, args| {
             if args.len() != 1 {
                 return Err(CommandError::InvalidCommand(
-                    "Usage: open! <project.json>".to_string(),
+                    "Usage: open! <project.scadtui>".to_string(),
                 ));
             }
             cmd_load_force(app, args[0])
         },
-        "Open a JSON project and discard unsaved changes",
+        "Open a .scadtui project and discard unsaved changes",
         1,
         Some(1),
-        "open! <project.json>",
-        vec!["open! project.json"],
+        "open! <project.scadtui>",
+        vec!["open! project.scadtui"],
         CommandType::File,
         false,
         true,
@@ -3594,7 +3582,7 @@ mod tests {
             "module helper() { cube(1); } function pitch(d, teeth) = d / teeth;",
         )
         .unwrap();
-        let project_path = directory.path().join("project.json");
+        let project_path = directory.path().join("project.scadtui");
         let mut app = App::new();
 
         cmd_load_library(&mut app, library_path.to_str().unwrap()).unwrap();
@@ -3704,7 +3692,7 @@ mod tests {
     }
 
     #[test]
-    fn test_imported_scad_is_stored_inside_saved_json_project() {
+    fn test_imported_scad_is_stored_inside_saved_project_package() {
         let directory = tempfile::tempdir().unwrap();
         let source_directory = directory.path().join("original");
         fs::create_dir(&source_directory).unwrap();
@@ -3712,7 +3700,7 @@ mod tests {
         let library_path = source_directory.join("parts.scad");
         fs::write(&source_path, "use <parts.scad>;\npart(size=5);\n").unwrap();
         fs::write(&library_path, "module part(size=1) { cube(size); }\n").unwrap();
-        let project_path = directory.path().join("shape-project.json");
+        let project_path = directory.path().join("shape-project.scadtui");
         let mut app = App::new();
 
         cmd_edit_scad(&mut app, source_path.to_str().unwrap()).unwrap();
@@ -3734,7 +3722,7 @@ mod tests {
         let main_path = directory.path().join("main.scad");
         fs::write(&main_path, "use <part.scad>; cube(1);").unwrap();
         fs::write(directory.path().join("part.scad"), "sphere(2);").unwrap();
-        let project_path = directory.path().join("project.json");
+        let project_path = directory.path().join("project.scadtui");
         let mut app = App::new();
 
         cmd_edit_scad(&mut app, main_path.to_str().unwrap()).unwrap();

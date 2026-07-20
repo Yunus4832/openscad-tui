@@ -5,6 +5,7 @@ pub mod command_registry;
 pub mod commands;
 pub mod input;
 pub mod preview;
+pub mod project_file;
 pub mod project_import;
 pub mod ui;
 

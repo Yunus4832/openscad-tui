@@ -34,7 +34,7 @@ const IMAGE_PROTOCOL_ENV: &str = "OPENSCAD_TUI_IMAGE_PROTOCOL";
     about = "A structured terminal editor for OpenSCAD"
 )]
 struct Cli {
-    /// JSON project or .scad source file to open
+    /// .scadtui project or .scad source file to open/import
     file: Option<PathBuf>,
 }
 

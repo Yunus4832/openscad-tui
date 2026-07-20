@@ -9,6 +9,9 @@ license.workspace = true
 ratatui.workspace = true
 crossterm.workspace = true
 serde_json.workspace = true
+serde.workspace = true
+zip.workspace = true
+tempfile.workspace = true
 thiserror.workspace = true
 clap.workspace = true
 unicode-width.workspace = true
@@ -23,6 +26,3 @@ openscad-terminal = { path = "../terminal" }
 [[bin]]
 name = "openscad-tui"
 path = "src/main.rs"
-
-[dev-dependencies]
-tempfile.workspace = true
