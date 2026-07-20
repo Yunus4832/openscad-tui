@@ -8,11 +8,12 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
+use openscad_terminal::DisplayProtocol;
 use ratatui::{
     backend::{Backend, CrosstermBackend},
     Terminal,
 };
-use ratatui_image::picker::{Picker, ProtocolType};
+use ratatui_image::picker::Picker;
 use std::error::Error;
 use std::io;
 use std::path::PathBuf;
@@ -27,7 +28,11 @@ use openscad_ui::{
 const IMAGE_PROTOCOL_ENV: &str = "OPENSCAD_TUI_IMAGE_PROTOCOL";
 
 #[derive(Debug, Parser)]
-#[command(version, about = "A structured terminal editor for OpenSCAD")]
+#[command(
+    name = "openscad-tui",
+    version,
+    about = "A structured terminal editor for OpenSCAD"
+)]
 struct Cli {
     /// JSON project or .scad source file to open
     file: Option<PathBuf>,
@@ -60,11 +65,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut terminal = Terminal::new(backend)?;
 
     // Create app and run it
-    let mut picker = Picker::from_query_stdio().unwrap_or_else(|_| Picker::from_fontsize((10, 20)));
-    if let Some(protocol_type) = protocol_override {
-        picker.set_protocol_type(protocol_type);
-    }
+    let picker = Picker::from_query_stdio().unwrap_or_else(|_| Picker::from_fontsize((10, 20)));
     app.configure_image_picker(picker);
+    if let Some(protocol_type) = protocol_override {
+        app.model_preview.set_protocol_type(protocol_type);
+    }
     let res = run_app(&mut terminal, app);
 
     // Restore terminal
@@ -83,7 +88,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn image_protocol_override_from_env() -> Result<Option<ProtocolType>, String> {
+fn image_protocol_override_from_env() -> Result<Option<DisplayProtocol>, String> {
     let Some(value) = std::env::var_os(IMAGE_PROTOCOL_ENV) else {
         return Ok(None);
     };
@@ -93,17 +98,16 @@ fn image_protocol_override_from_env() -> Result<Option<ProtocolType>, String> {
     parse_image_protocol_override(&value)
 }
 
-fn parse_image_protocol_override(value: &str) -> Result<Option<ProtocolType>, String> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "auto" => Ok(None),
-        "kitty" => Ok(Some(ProtocolType::Kitty)),
-        "sixel" => Ok(Some(ProtocolType::Sixel)),
-        "halfblocks" => Ok(Some(ProtocolType::Halfblocks)),
-        "iterm2" => Ok(Some(ProtocolType::Iterm2)),
-        _ => Err(format!(
-            "invalid {IMAGE_PROTOCOL_ENV} value {value:?}; expected auto, kitty, sixel, halfblocks, or iterm2"
-        )),
+fn parse_image_protocol_override(value: &str) -> Result<Option<DisplayProtocol>, String> {
+    if value.trim().eq_ignore_ascii_case("auto") {
+        return Ok(None);
     }
+    value.parse::<DisplayProtocol>().map(Some).map_err(|_| {
+        format!(
+            "invalid {IMAGE_PROTOCOL_ENV} value {value:?}; expected auto or one of {}",
+            DisplayProtocol::NAMES.join(", ")
+        )
+    })
 }
 
 fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Result<()> {
@@ -157,33 +161,41 @@ fn handle_event(event: Event, app: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::parse_image_protocol_override;
-    use ratatui_image::picker::ProtocolType;
+    use openscad_terminal::DisplayProtocol;
 
     #[test]
     fn image_protocol_override_accepts_supported_values() {
         assert_eq!(parse_image_protocol_override("auto"), Ok(None));
         assert_eq!(
             parse_image_protocol_override(" KITTY "),
-            Ok(Some(ProtocolType::Kitty))
+            Ok(Some(DisplayProtocol::Kitty))
         );
         assert_eq!(
             parse_image_protocol_override("sixel"),
-            Ok(Some(ProtocolType::Sixel))
+            Ok(Some(DisplayProtocol::Sixel))
         );
         assert_eq!(
             parse_image_protocol_override("halfblocks"),
-            Ok(Some(ProtocolType::Halfblocks))
+            Ok(Some(DisplayProtocol::Halfblocks))
+        );
+        assert_eq!(
+            parse_image_protocol_override("braille"),
+            Ok(Some(DisplayProtocol::Braille))
         );
         assert_eq!(
             parse_image_protocol_override("iterm2"),
-            Ok(Some(ProtocolType::Iterm2))
+            Ok(Some(DisplayProtocol::Iterm2))
+        );
+        assert_eq!(
+            parse_image_protocol_override("ascii"),
+            Ok(Some(DisplayProtocol::Ascii))
         );
     }
 
     #[test]
     fn image_protocol_override_rejects_unknown_or_empty_values() {
         let unknown = parse_image_protocol_override("png").unwrap_err();
-        assert!(unknown.contains("auto, kitty, sixel, halfblocks, or iterm2"));
+        assert!(unknown.contains("auto or one of kitty, sixel, iterm2, halfblocks, braille, ascii"));
         assert!(parse_image_protocol_override("").is_err());
     }
 }

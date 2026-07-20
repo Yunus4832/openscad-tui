@@ -32,6 +32,7 @@ impl PixelSize {
 pub struct RgbaFrame {
     size: PixelSize,
     pixels: Vec<u8>,
+    background: [u8; 4],
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -93,7 +94,11 @@ impl RgbaFrame {
         for pixel in pixels.chunks_exact_mut(4) {
             pixel.copy_from_slice(&color);
         }
-        Self { size, pixels }
+        Self {
+            size,
+            pixels,
+            background: color,
+        }
     }
 
     pub fn size(&self) -> PixelSize {
@@ -108,7 +113,16 @@ impl RgbaFrame {
         &mut self.pixels
     }
 
+    /// The color used to initialize or most recently clear this frame.
+    ///
+    /// Text terminal backends use this metadata to distinguish model pixels from the
+    /// background without guessing from the image corners.
+    pub fn background(&self) -> [u8; 4] {
+        self.background
+    }
+
     pub fn clear(&mut self, color: [u8; 4]) {
+        self.background = color;
         for pixel in self.pixels.chunks_exact_mut(4) {
             pixel.copy_from_slice(&color);
         }
@@ -140,6 +154,7 @@ mod tests {
             .all(|pixel| pixel == [1, 2, 3, 4]));
 
         frame.clear([5, 6, 7, 8]);
+        assert_eq!(frame.background(), [5, 6, 7, 8]);
         assert!(frame
             .pixels()
             .chunks_exact(4)

@@ -11,6 +11,7 @@ use crate::command_registry::CommandType;
 use crate::commands;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use openscad_core::ModuleNode;
+use openscad_terminal::DisplayProtocol;
 use ratatui::layout::Position;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -316,7 +317,22 @@ fn handle_normal_input(key: KeyEvent, app: &mut App) {
 
         // Enter - toggle expand/collapse node
         KeyCode::Enter => {
-            execute_shortcut(app, "toggle");
+            let selected = app.tree_state.borrow().selected().last().cloned();
+            let project_source = selected
+                .as_deref()
+                .and_then(|id| id.strip_prefix("__project_source_"))
+                .and_then(|index| index.parse::<usize>().ok())
+                .and_then(|index| app.ast.embedded_sources.get(index))
+                .map(|source| (source.virtual_path.clone(), source.editable));
+            match project_source {
+                Some((path, true)) => {
+                    if let Err(error) = commands::cmd_buffer(app, Some(&path)) {
+                        app.set_error(&error.to_string());
+                    }
+                }
+                Some((path, false)) => app.set_error(&format!("Source '{path}' is read-only")),
+                None => execute_shortcut(app, "toggle"),
+            }
         }
 
         // q - quit
@@ -1028,6 +1044,8 @@ fn analyze_input_context(input: &str, app: &App) -> CompletionContext {
             CommandType::Preview => {
                 literal_command_context(input, &parts, &["source", "model", "toggle"], &[])
             }
+            CommandType::Protocol => protocol_command_context(input, &parts),
+            CommandType::ProjectSource => project_source_command_context(input, &parts, app),
             CommandType::Camera => {
                 let second_level: &[&str] = match parts.get(1).copied() {
                     Some("projection") => &["perspective", "orthographic", "toggle"],
@@ -1109,6 +1127,39 @@ fn literal_command_context(
             .map(|value| (*value).to_string())
             .collect(),
     }
+}
+
+fn protocol_command_context(input: &str, parts: &[&str]) -> CompletionContext {
+    if !((parts.len() == 1 && input.ends_with(' ')) || (parts.len() == 2 && !input.ends_with(' ')))
+    {
+        return CompletionContext::Command;
+    }
+    CompletionContext::Literal {
+        candidates: ["auto", "next"]
+            .into_iter()
+            .chain(DisplayProtocol::NAMES.iter().copied())
+            .map(str::to_string)
+            .collect(),
+    }
+}
+
+fn project_source_command_context(input: &str, parts: &[&str], app: &App) -> CompletionContext {
+    if !((parts.len() == 1 && input.ends_with(' ')) || (parts.len() == 2 && !input.ends_with(' ')))
+    {
+        return CompletionContext::Command;
+    }
+    let mut candidates = match parts.first().copied() {
+        Some("buffer" | "b") => vec!["next".to_string(), "prev".to_string()],
+        _ => Vec::new(),
+    };
+    candidates.extend(
+        app.ast
+            .embedded_sources
+            .iter()
+            .filter(|source| source.editable)
+            .map(|source| source.virtual_path.clone()),
+    );
+    CompletionContext::Literal { candidates }
 }
 
 fn function_definition_parameters(input: &str) -> Vec<String> {
@@ -2214,6 +2265,17 @@ mod tests {
         assert!(auto_rotate
             .iter()
             .any(|candidate| candidate.content == "toggle"));
+
+        let (protocol, _) = generate_completions("protocol ", &app);
+        assert!(protocol
+            .iter()
+            .any(|candidate| candidate.content == "ascii"));
+        assert!(protocol
+            .iter()
+            .any(|candidate| candidate.content == "halfblocks"));
+        assert!(protocol
+            .iter()
+            .any(|candidate| candidate.content == "braille"));
     }
 
     #[test]
@@ -2226,6 +2288,10 @@ mod tests {
                 original_path: None,
                 role: openscad_core::EmbeddedSourceRole::Library,
                 content: String::new(),
+                editable: false,
+                modules: Vec::new(),
+                includes: Vec::new(),
+                uses: Vec::new(),
                 global_variables: Vec::new(),
                 module_defines: Vec::new(),
                 function_defines: Vec::new(),
@@ -2237,6 +2303,10 @@ mod tests {
                 original_path: None,
                 role: openscad_core::EmbeddedSourceRole::Dependency,
                 content: String::new(),
+                editable: false,
+                modules: Vec::new(),
+                includes: Vec::new(),
+                uses: Vec::new(),
                 global_variables: Vec::new(),
                 module_defines: Vec::new(),
                 function_defines: Vec::new(),
@@ -2266,6 +2336,68 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["gears.scad"]
         );
+    }
+
+    #[test]
+    fn test_project_source_commands_complete_editable_buffers() {
+        let directory = tempfile::tempdir().unwrap();
+        let main = directory.path().join("main.scad");
+        fs::write(&main, "use <part.scad>; cube(1);").unwrap();
+        fs::write(directory.path().join("part.scad"), "sphere(2);").unwrap();
+        let mut app = App::new();
+        commands::cmd_edit_scad_force(&mut app, main.to_str().unwrap()).unwrap();
+
+        let (buffers, _) = generate_completions("buffer ", &app);
+        assert!(buffers.iter().any(|candidate| candidate.content == "next"));
+        assert!(buffers
+            .iter()
+            .any(|candidate| candidate.content == "part.scad"));
+    }
+
+    #[test]
+    fn test_project_source_nodes_support_keyboard_navigation_and_opening() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let directory = tempfile::tempdir().unwrap();
+        let main = directory.path().join("main.scad");
+        fs::write(&main, "use <part.scad>; cube(1);").unwrap();
+        fs::write(directory.path().join("part.scad"), "sphere(2);").unwrap();
+        let mut app = App::new();
+        commands::cmd_edit_scad_force(&mut app, main.to_str().unwrap()).unwrap();
+        app.init_tree_selection();
+        assert_eq!(app.tree_state.borrow().selected(), ["__project_sources"]);
+
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal
+            .draw(|frame| crate::ui::draw(frame, &mut app))
+            .unwrap();
+        handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE), &mut app);
+        terminal
+            .draw(|frame| crate::ui::draw(frame, &mut app))
+            .unwrap();
+        handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &mut app);
+        app.validate_tree_state();
+        assert_eq!(
+            app.tree_state
+                .borrow()
+                .selected()
+                .last()
+                .map(String::as_str),
+            Some("__project_source_0")
+        );
+
+        handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &mut app);
+        app.validate_tree_state();
+        assert_eq!(
+            app.tree_state
+                .borrow()
+                .selected()
+                .last()
+                .map(String::as_str),
+            Some("__project_source_1")
+        );
+        handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &mut app);
+        assert_eq!(app.ast.active_source.as_deref(), Some("part.scad"));
     }
 
     #[test]

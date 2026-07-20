@@ -25,6 +25,12 @@ pub enum AstError {
 
     #[error("Serialization error: {0}")]
     SerializationError(String),
+
+    #[error("Source file not found: {0}")]
+    SourceNotFound(String),
+
+    #[error("Source file is read-only: {0}")]
+    SourceReadOnly(String),
 }
 
 pub type Result<T> = std::result::Result<T, AstError>;
@@ -704,12 +710,16 @@ pub struct AstRoot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_directory: Option<String>,
 
-    /// Virtual path of the editable entry source inside an embedded multi-file project.
+    /// Virtual path of the source from which an embedded multi-file project was imported.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub entry_source: Option<String>,
 
-    /// Original source files required by this project. The entry content is retained for
-    /// provenance; rendering replaces it with the current generated AST source.
+    /// Virtual path of the source currently loaded into the structured editor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_source: Option<String>,
+
+    /// Original source files required by this project. Editable files are regenerated from their
+    /// AST while read-only library files retain their imported source text.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub embedded_sources: Vec<EmbeddedSourceFile>,
 
@@ -742,6 +752,7 @@ impl AstRoot {
         Self {
             source_directory: None,
             entry_source: None,
+            active_source: None,
             embedded_sources: Vec::new(),
             source_dependencies: Vec::new(),
             global_variables: Vec::new(),
@@ -761,6 +772,69 @@ impl AstRoot {
         }
         self.modules.push(module);
         Ok(())
+    }
+
+    /// Persist the current structured document back into its embedded source record.
+    pub fn sync_active_source(&mut self) {
+        let Some(active) = self.active_source.clone() else {
+            return;
+        };
+        let document = self.document_snapshot();
+        if let Some(source) = self
+            .embedded_sources
+            .iter_mut()
+            .find(|source| source.virtual_path == active)
+        {
+            source.replace_document(&document);
+        }
+    }
+
+    /// Switch the structured editor to another editable source in the same project.
+    pub fn activate_source(&mut self, virtual_path: &str) -> Result<()> {
+        self.sync_active_source();
+        let source = self
+            .embedded_sources
+            .iter()
+            .find(|source| source.virtual_path == virtual_path)
+            .cloned()
+            .ok_or_else(|| AstError::SourceNotFound(virtual_path.to_string()))?;
+        if !source.editable {
+            return Err(AstError::SourceReadOnly(virtual_path.to_string()));
+        }
+        self.replace_document(&source.document_ast());
+        self.active_source = Some(virtual_path.to_string());
+        Ok(())
+    }
+
+    /// Generate the current structured representation of a project source.
+    pub fn source_code(&self, virtual_path: &str) -> Option<String> {
+        if self.active_source.as_deref() == Some(virtual_path) {
+            return Some(self.to_scad());
+        }
+        self.embedded_sources
+            .iter()
+            .find(|source| source.virtual_path == virtual_path)
+            .map(EmbeddedSourceFile::generated_content)
+    }
+
+    fn document_snapshot(&self) -> AstRoot {
+        let mut document = AstRoot::new();
+        document.global_variables = self.global_variables.clone();
+        document.module_defines = self.module_defines.clone();
+        document.function_defines = self.function_defines.clone();
+        document.modules = self.modules.clone();
+        document.includes = self.includes.clone();
+        document.uses = self.uses.clone();
+        document
+    }
+
+    fn replace_document(&mut self, document: &AstRoot) {
+        self.global_variables.clone_from(&document.global_variables);
+        self.module_defines.clone_from(&document.module_defines);
+        self.function_defines.clone_from(&document.function_defines);
+        self.modules.clone_from(&document.modules);
+        self.includes.clone_from(&document.includes);
+        self.uses.clone_from(&document.uses);
     }
 
     /// Find a node by ID
@@ -1241,6 +1315,10 @@ pub struct EmbeddedSourceFile {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub original_path: Option<String>,
     pub role: EmbeddedSourceRole,
+    /// Project-owned files can be loaded into the structured editor; external libraries remain
+    /// read-only while still contributing definitions to completion.
+    #[serde(default)]
+    pub editable: bool,
     /// Exact source text captured at import time.
     pub content: String,
     /// Definition-only index used to rebuild completion without the original files.
@@ -1250,6 +1328,43 @@ pub struct EmbeddedSourceFile {
     pub module_defines: Vec<ModuleDefinition>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub function_defines: Vec<FunctionDefinition>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub modules: Vec<ModuleNode>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub includes: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub uses: Vec<String>,
+}
+
+impl EmbeddedSourceFile {
+    pub fn document_ast(&self) -> AstRoot {
+        let mut document = AstRoot::new();
+        document.global_variables.clone_from(&self.global_variables);
+        document.module_defines.clone_from(&self.module_defines);
+        document.function_defines.clone_from(&self.function_defines);
+        document.modules.clone_from(&self.modules);
+        document.includes.clone_from(&self.includes);
+        document.uses.clone_from(&self.uses);
+        document
+    }
+
+    pub fn replace_document(&mut self, document: &AstRoot) {
+        self.content = document.to_scad();
+        self.global_variables.clone_from(&document.global_variables);
+        self.module_defines.clone_from(&document.module_defines);
+        self.function_defines.clone_from(&document.function_defines);
+        self.modules.clone_from(&document.modules);
+        self.includes.clone_from(&document.includes);
+        self.uses.clone_from(&document.uses);
+    }
+
+    pub fn generated_content(&self) -> String {
+        if self.editable {
+            self.document_ast().to_scad()
+        } else {
+            self.content.clone()
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -1643,6 +1758,61 @@ fn split_arguments(input: &str) -> std::result::Result<Vec<String>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn editable_source(path: &str, source: &str) -> EmbeddedSourceFile {
+        let ast = parse_scad(source).unwrap();
+        EmbeddedSourceFile {
+            virtual_path: path.to_string(),
+            original_path: None,
+            role: EmbeddedSourceRole::Dependency,
+            editable: true,
+            content: source.to_string(),
+            global_variables: ast.global_variables,
+            module_defines: ast.module_defines,
+            function_defines: ast.function_defines,
+            modules: ast.modules,
+            includes: ast.includes,
+            uses: ast.uses,
+        }
+    }
+
+    #[test]
+    fn test_switching_project_sources_synchronizes_each_document() {
+        let mut project = parse_scad("cube(1);").unwrap();
+        project.entry_source = Some("main.scad".to_string());
+        project.active_source = Some("main.scad".to_string());
+        project
+            .embedded_sources
+            .push(editable_source("main.scad", "cube(1);"));
+        project
+            .embedded_sources
+            .push(editable_source("part.scad", "sphere(2);"));
+
+        project.modules[0].name = "cylinder".to_string();
+        project.activate_source("part.scad").unwrap();
+        assert_eq!(project.modules[0].name, "sphere");
+        project.modules[0].name = "cube".to_string();
+        project.activate_source("main.scad").unwrap();
+
+        assert_eq!(project.modules[0].name, "cylinder");
+        assert!(project
+            .source_code("part.scad")
+            .unwrap()
+            .contains("cube(2);"));
+    }
+
+    #[test]
+    fn test_read_only_project_source_cannot_be_activated() {
+        let mut project = AstRoot::new();
+        let mut source = editable_source("library.scad", "module helper() { cube(1); }");
+        source.editable = false;
+        project.embedded_sources.push(source);
+
+        assert!(matches!(
+            project.activate_source("library.scad"),
+            Err(AstError::SourceReadOnly(path)) if path == "library.scad"
+        ));
+    }
 
     /// Check if parentheses in an expression are balanced
     fn is_balanced_parentheses(expr: &str) -> bool {

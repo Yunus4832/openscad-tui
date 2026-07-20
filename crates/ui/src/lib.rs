@@ -4,7 +4,6 @@ pub mod app;
 pub mod command_registry;
 pub mod commands;
 pub mod input;
-mod kitty_protocol;
 pub mod preview;
 pub mod project_import;
 pub mod ui;

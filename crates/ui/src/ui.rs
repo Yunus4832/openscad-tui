@@ -140,15 +140,17 @@ fn draw_camera_toolbar(f: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn draw_tree(f: &mut Frame, app: &App, area: Rect) {
-    let current_file = &app.current_file.clone().unwrap_or("Untitled".to_string());
+    let current_file = app.current_file.as_deref().unwrap_or("Untitled");
+    let active_source = app.ast.active_source.as_deref();
     let unsaved_flag = if app.saved { "" } else { "*" };
+    let document = active_source
+        .map(|source| format!(" [{source}]"))
+        .unwrap_or_default();
     let title = if app.selected_nodes.is_empty() {
-        format!(" {}{} ", current_file, unsaved_flag)
+        format!(" {current_file}{document}{unsaved_flag} ")
     } else {
         format!(
-            " {}{} ({}) ",
-            current_file,
-            unsaved_flag,
+            " {current_file}{document}{unsaved_flag} ({}) ",
             app.selected_nodes.len()
         )
     };
@@ -193,11 +195,12 @@ fn build_ast_tree_items(
 ) -> Vec<TreeItem<'static, String>> {
     let mut items = Vec::new();
 
-    if !ast.embedded_sources.is_empty() {
+    if ast.embedded_sources.iter().any(|source| source.editable) {
         let source_children = ast
             .embedded_sources
             .iter()
             .enumerate()
+            .filter(|(_, source)| source.editable)
             .map(|(index, source)| {
                 let included = ast.source_dependencies.iter().any(|dependency| {
                     dependency.to == source.virtual_path
@@ -215,16 +218,19 @@ fn build_ast_tree_items(
                         (false, true) => "library/use",
                         (false, false) => "library",
                     },
+                    openscad_core::EmbeddedSourceRole::Dependency if source.editable => "part",
                     openscad_core::EmbeddedSourceRole::Dependency => match (included, used) {
-                        (true, true) => "include/use",
-                        (true, false) => "include",
-                        (false, true) => "use",
-                        (false, false) => "dependency",
+                        (true, true) => "library/include/use",
+                        (true, false) => "library/include",
+                        (false, true) => "library/use",
+                        (false, false) => "library/dependency",
                     },
                 };
+                let active = ast.active_source.as_deref() == Some(&source.virtual_path);
+                let marker = if active { "* " } else { "  " };
                 TreeItem::new(
                     format!("__project_source_{index}"),
-                    format!("[{role}] {}", source.virtual_path),
+                    format!("{marker}[{role}] {}", source.virtual_path),
                     vec![],
                 )
                 .expect("Failed to create TreeItem")
@@ -596,15 +602,17 @@ fn draw_model_preview(f: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn model_preview_status(app: &App) -> String {
-    let status = match &app.model_preview.status {
+    if let Some(error) = app.model_preview.presentation_error() {
+        return format!("display failed: {error}");
+    }
+    match &app.model_preview.status {
         ModelPreviewStatus::Empty => "not rendered".to_string(),
         ModelPreviewStatus::Stale => "stale — run :render".to_string(),
         ModelPreviewStatus::Generating => "OpenSCAD generating OFF…".to_string(),
         ModelPreviewStatus::Rasterizing => "rasterizing…".to_string(),
         ModelPreviewStatus::Ready { triangles } => format!("{triangles} triangles"),
         ModelPreviewStatus::Failed(error) => format!("failed: {error}"),
-    };
-    status
+    }
 }
 
 fn model_preview_title(app: &App) -> String {
@@ -839,8 +847,10 @@ fn draw_completion_popup(f: &mut Frame, app: &App, input_area: Rect) {
 mod tests {
     use super::{draw, model_preview_title, shows_input_buffer};
     use crate::app::{App, InputMode};
+    use crate::commands::{cmd_edit_scad_force, cmd_load_library};
     use crate::preview::ModelPreviewStatus;
     use ratatui::{backend::TestBackend, Terminal};
+    use std::fs;
     use std::time::Duration;
     use unicode_width::UnicodeWidthStr;
 
@@ -858,6 +868,32 @@ mod tests {
         app.update_navigation_status();
         // When there's no selection, message should be None
         assert!(app.message.is_none());
+    }
+
+    #[test]
+    fn test_project_sources_hide_read_only_libraries() {
+        let directory = tempfile::tempdir().unwrap();
+        let main = directory.path().join("main.scad");
+        let library = directory.path().join("hidden_external_library.scad");
+        fs::write(&main, "cube(1);").unwrap();
+        fs::write(&library, "module helper() { sphere(1); }").unwrap();
+        let mut app = App::new();
+        cmd_edit_scad_force(&mut app, main.to_str().unwrap()).unwrap();
+        cmd_load_library(&mut app, library.to_str().unwrap()).unwrap();
+        app.clear_message();
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        app.tree_state.borrow_mut().key_right();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let screen = (0..buffer.area.height)
+            .flat_map(|y| (0..buffer.area.width).map(move |x| buffer[(x, y)].symbol()))
+            .collect::<String>();
+        assert!(screen.contains("Project Sources"));
+        assert!(screen.contains("main.scad"));
+        assert!(!screen.contains("hidden_external_library.scad"));
     }
 
     #[test]

@@ -88,7 +88,9 @@ impl<'a> Parser<'a> {
                 let path = self.source[start..self.pos].trim().to_string();
                 self.bump();
                 self.skip_trivia()?;
-                self.expect_char(';')?;
+                // OpenSCAD accepts both `include <file>` and `include <file>;` (likewise for
+                // `use`). Most library code, including BOSL, uses the form without a semicolon.
+                self.consume_char(';');
                 return Ok(path);
             }
             self.bump();
@@ -121,7 +123,9 @@ impl<'a> Parser<'a> {
         let name = self.identifier()?;
         let parameters = self.parse_parameters()?;
         self.skip_trivia()?;
-        let body_source = self.take_balanced('{', '}')?;
+        let body_start = self.pos;
+        self.skip_executable_statement()?;
+        let body_source = &self.source[body_start..self.pos];
         let body = if body_source.contains("children(") || body_source.contains("children (") {
             vec![ModuleNode::new_leaf(
                 self.node_id(),
@@ -550,6 +554,32 @@ mod tests {
         assert_eq!(ast.module_defines[0].body[1].children[0].name, "cylinder");
         assert_eq!(ast.modules[0].name, "difference");
         assert_eq!(ast.modules[0].children.len(), 2);
+    }
+
+    #[test]
+    fn parses_library_directives_with_or_without_semicolons() {
+        let ast = parse_scad(
+            "include <BOSL/constants.scad>\nuse <BOSL/transforms.scad>\ninclude <local.scad>;\ncube(1);",
+        )
+        .unwrap();
+
+        assert_eq!(ast.includes, ["BOSL/constants.scad", "local.scad"]);
+        assert_eq!(ast.uses, ["BOSL/transforms.scad"]);
+        assert_eq!(ast.modules.len(), 1);
+    }
+
+    #[test]
+    fn definition_scan_accepts_single_statement_module_bodies() {
+        let ast = parse_scad_definitions(
+            "module right(x=0) translate([x,0,0]) children();\nmodule solid() cube(1);",
+        )
+        .unwrap();
+
+        assert_eq!(ast.module_defines.len(), 2);
+        assert_eq!(ast.module_defines[0].name, "right");
+        assert_eq!(ast.module_defines[0].body[0].name, "children");
+        assert_eq!(ast.module_defines[1].name, "solid");
+        assert!(ast.module_defines[1].body.is_empty());
     }
 
     #[test]

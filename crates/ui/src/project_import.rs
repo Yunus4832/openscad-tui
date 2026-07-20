@@ -9,6 +9,8 @@ use openscad_core::{
 
 struct SourceDraft {
     path: PathBuf,
+    virtual_path: String,
+    editable: bool,
     content: String,
     ast: AstRoot,
 }
@@ -21,38 +23,48 @@ struct DependencyDraft {
 }
 
 pub fn import_scad_project(entry: &Path) -> Result<AstRoot, String> {
+    import_scad_project_with_library_roots(entry, &openscad_library_roots())
+}
+
+fn import_scad_project_with_library_roots(
+    entry: &Path,
+    library_roots: &[PathBuf],
+) -> Result<AstRoot, String> {
     let entry = entry
         .canonicalize()
         .map_err(|error| format!("Failed to resolve '{}': {error}", entry.display()))?;
+    let entry_virtual = entry
+        .file_name()
+        .map(PathBuf::from)
+        .and_then(|path| portable_path(&path))
+        .ok_or_else(|| format!("Could not determine a filename for '{}'", entry.display()))?;
     let mut sources = HashMap::new();
     let mut dependencies = Vec::new();
     let mut visiting = HashSet::new();
-    collect_source(&entry, true, &mut sources, &mut dependencies, &mut visiting)?;
+    collect_source(
+        &entry,
+        entry_virtual.clone(),
+        true,
+        library_roots,
+        &mut sources,
+        &mut dependencies,
+        &mut visiting,
+    )?;
 
-    let common_root = common_parent(sources.keys()).ok_or_else(|| {
-        format!(
-            "Could not determine a common source directory for '{}'",
-            entry.display()
-        )
-    })?;
     let virtual_paths: HashMap<PathBuf, String> = sources
-        .keys()
-        .map(|path| {
-            let relative = path.strip_prefix(&common_root).unwrap_or(path);
-            (path.clone(), portable_path(relative))
-        })
+        .iter()
+        .map(|(path, draft)| (path.clone(), draft.virtual_path.clone()))
         .collect();
-    let entry_virtual = virtual_paths
-        .get(&entry)
-        .cloned()
-        .ok_or_else(|| "Entry source was not collected".to_string())?;
 
     let entry_draft = sources
         .remove(&entry)
         .ok_or_else(|| "Entry source was not collected".to_string())?;
     let mut project = entry_draft.ast.clone();
-    project.source_directory = Some(common_root.to_string_lossy().into_owned());
+    project.source_directory = entry
+        .parent()
+        .map(|path| path.to_string_lossy().into_owned());
     project.entry_source = Some(entry_virtual.clone());
+    project.active_source = Some(entry_virtual.clone());
 
     let mut embedded = Vec::with_capacity(sources.len() + 1);
     embedded.push(to_embedded_source(
@@ -63,10 +75,7 @@ pub fn import_scad_project(entry: &Path) -> Result<AstRoot, String> {
     let mut remaining: Vec<_> = sources.into_values().collect();
     remaining.sort_by(|left, right| left.path.cmp(&right.path));
     for draft in remaining {
-        let virtual_path = virtual_paths
-            .get(&draft.path)
-            .cloned()
-            .ok_or_else(|| "Dependency source has no virtual path".to_string())?;
+        let virtual_path = draft.virtual_path.clone();
         embedded.push(to_embedded_source(
             draft,
             virtual_path,
@@ -141,6 +150,7 @@ pub fn attach_scad_library(project: &mut AstRoot, library: &Path) -> Result<Stri
     for source in &mut imported.embedded_sources {
         let is_library_entry = source.virtual_path == imported_entry_original;
         source.virtual_path = paths[&source.virtual_path].clone();
+        source.editable = false;
         source.role = if is_library_entry {
             EmbeddedSourceRole::Library
         } else {
@@ -168,16 +178,22 @@ fn ensure_virtual_entry(project: &mut AstRoot) {
         virtual_path: entry,
         original_path: None,
         role: EmbeddedSourceRole::Entry,
+        editable: true,
         content: String::new(),
         global_variables: Vec::new(),
         module_defines: Vec::new(),
         function_defines: Vec::new(),
+        modules: Vec::new(),
+        includes: Vec::new(),
+        uses: Vec::new(),
     });
 }
 
 fn collect_source(
     path: &Path,
-    structured: bool,
+    virtual_path: String,
+    editable: bool,
+    library_roots: &[PathBuf],
     sources: &mut HashMap<PathBuf, SourceDraft>,
     dependencies: &mut Vec<DependencyDraft>,
     visiting: &mut HashSet<PathBuf>,
@@ -190,7 +206,7 @@ fn collect_source(
     }
     let content = fs::read_to_string(&path)
         .map_err(|error| format!("Failed to read SCAD file '{}': {error}", path.display()))?;
-    let ast = if structured {
+    let ast = if editable {
         parse_scad(&content)
     } else {
         parse_scad_definitions(&content)
@@ -210,25 +226,21 @@ fn collect_source(
         path.clone(),
         SourceDraft {
             path: path.clone(),
+            virtual_path: virtual_path.clone(),
+            editable,
             content,
             ast,
         },
     );
 
     for (reference, kind) in references {
-        let referenced = Path::new(&reference);
-        let candidate = if referenced.is_absolute() {
-            referenced.to_path_buf()
-        } else {
-            path.parent()
-                .unwrap_or_else(|| Path::new("."))
-                .join(referenced)
-        };
-        // References not found next to the caller may be supplied by OPENSCADPATH or an OpenSCAD
-        // installation library. Keep those external instead of rejecting an otherwise valid file.
-        if !candidate.is_file() {
+        let Some((candidate, target_virtual, target_editable)) =
+            resolve_reference(&path, &virtual_path, &reference, editable, library_roots)
+        else {
+            // OpenSCAD may know additional platform-specific paths. Preserve unresolved
+            // directives so its own resolver still gets a chance at render time.
             continue;
-        }
+        };
         let target = candidate
             .canonicalize()
             .map_err(|error| format!("Failed to resolve '{}': {error}", candidate.display()))?;
@@ -238,7 +250,15 @@ fn collect_source(
             reference,
             kind,
         });
-        collect_source(&target, false, sources, dependencies, visiting)?;
+        collect_source(
+            &target,
+            target_virtual,
+            target_editable,
+            library_roots,
+            sources,
+            dependencies,
+            visiting,
+        )?;
     }
     visiting.remove(&path);
     Ok(())
@@ -253,36 +273,106 @@ fn to_embedded_source(
         virtual_path,
         original_path: Some(draft.path.to_string_lossy().into_owned()),
         role,
+        editable: draft.editable,
         content: draft.content,
         global_variables: draft.ast.global_variables,
         module_defines: draft.ast.module_defines,
         function_defines: draft.ast.function_defines,
+        modules: draft.ast.modules,
+        includes: draft.ast.includes,
+        uses: draft.ast.uses,
     }
 }
 
-fn common_parent<'a>(paths: impl Iterator<Item = &'a PathBuf>) -> Option<PathBuf> {
-    let mut paths = paths;
-    let first = paths.next()?.parent()?.to_path_buf();
-    Some(paths.fold(first, |common, path| {
-        let parent = path.parent().unwrap_or(path);
-        let shared: PathBuf = common
-            .components()
-            .zip(parent.components())
-            .take_while(|(left, right)| left == right)
-            .map(|(component, _)| component.as_os_str())
-            .collect();
-        shared
-    }))
+fn resolve_reference(
+    caller: &Path,
+    caller_virtual: &str,
+    reference: &str,
+    caller_editable: bool,
+    library_roots: &[PathBuf],
+) -> Option<(PathBuf, String, bool)> {
+    let referenced = Path::new(reference);
+    if referenced.is_absolute() {
+        let filename = referenced.file_name()?;
+        return referenced.is_file().then(|| {
+            (
+                referenced.to_path_buf(),
+                format!("external/{}", filename.to_string_lossy()),
+                false,
+            )
+        });
+    }
+
+    let adjacent = caller
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(referenced);
+    if adjacent.is_file() {
+        return virtual_dependency_path(caller_virtual, referenced)
+            .map(|virtual_path| (adjacent, virtual_path, caller_editable));
+    }
+
+    library_roots.iter().find_map(|root| {
+        let candidate = root.join(referenced);
+        candidate.is_file().then(|| {
+            portable_path(referenced).map(|virtual_path| (candidate, virtual_path, false))
+        })?
+    })
 }
 
-fn portable_path(path: &Path) -> String {
-    path.components()
+fn virtual_dependency_path(caller_virtual: &str, reference: &Path) -> Option<String> {
+    let mut components = Path::new(caller_virtual)
+        .parent()
+        .into_iter()
+        .flat_map(Path::components)
         .filter_map(|component| match component {
-            Component::Normal(value) => Some(value.to_string_lossy()),
+            Component::Normal(value) => Some(value.to_os_string()),
             _ => None,
         })
-        .collect::<Vec<_>>()
-        .join("/")
+        .collect::<Vec<_>>();
+    for component in reference.components() {
+        match component {
+            Component::Normal(value) => components.push(value.to_os_string()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                components.pop()?;
+            }
+            Component::RootDir | Component::Prefix(_) => return None,
+        }
+    }
+    portable_path(&components.into_iter().collect::<PathBuf>())
+}
+
+fn portable_path(path: &Path) -> Option<String> {
+    let components = path
+        .components()
+        .map(|component| match component {
+            Component::Normal(value) => Some(value.to_string_lossy()),
+            Component::CurDir => None,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => None,
+        })
+        .collect::<Option<Vec<_>>>()?;
+    (!components.is_empty()).then(|| components.join("/"))
+}
+
+fn openscad_library_roots() -> Vec<PathBuf> {
+    let mut roots = std::env::var_os("OPENSCADPATH")
+        .map(|value| std::env::split_paths(&value).collect::<Vec<_>>())
+        .unwrap_or_default();
+    if let Some(data) = dirs::data_local_dir() {
+        let openscad = data.join("OpenSCAD");
+        roots.push(openscad.join("libraries"));
+    }
+    if let Some(documents) = dirs::document_dir() {
+        roots.push(documents.join("OpenSCAD").join("libraries"));
+    }
+    roots.extend([
+        PathBuf::from("/usr/local/share/openscad/libraries"),
+        PathBuf::from("/usr/share/openscad/libraries"),
+    ]);
+    let mut unique = HashSet::new();
+    roots.retain(|root| root.is_dir() && unique.insert(root.clone()));
+    roots
 }
 
 #[cfg(test)]
@@ -317,6 +407,11 @@ mod tests {
         let project = import_scad_project(&directory.path().join("main.scad")).unwrap();
         assert_eq!(project.embedded_sources.len(), 4);
         assert_eq!(project.source_dependencies.len(), 3);
+        assert_eq!(project.active_source.as_deref(), Some("main.scad"));
+        assert!(project
+            .embedded_sources
+            .iter()
+            .all(|source| source.editable));
         assert!(project
             .source_dependencies
             .iter()
@@ -329,5 +424,55 @@ mod tests {
             .module_defines
             .iter()
             .any(|definition| definition.name == "part"));
+    }
+
+    #[test]
+    fn imports_dependencies_from_openscad_library_roots() {
+        let project_directory = tempfile::tempdir().unwrap();
+        let library_directory = tempfile::tempdir().unwrap();
+        let bosl = library_directory.path().join("BOSL");
+        fs::create_dir(&bosl).unwrap();
+        fs::write(
+            project_directory.path().join("main.scad"),
+            "include <BOSL/constants.scad>\nuse <BOSL/transforms.scad>\nright(2) cube(1);",
+        )
+        .unwrap();
+        fs::write(bosl.join("constants.scad"), "RIGHT = [1, 0, 0];").unwrap();
+        fs::write(
+            bosl.join("transforms.scad"),
+            "include <constants.scad>\nmodule right(x=0) translate([x,0,0]) children();",
+        )
+        .unwrap();
+
+        let project = import_scad_project_with_library_roots(
+            &project_directory.path().join("main.scad"),
+            &[library_directory.path().to_path_buf()],
+        )
+        .unwrap();
+
+        assert_eq!(project.entry_source.as_deref(), Some("main.scad"));
+        assert!(project
+            .embedded_sources
+            .iter()
+            .any(|source| source.virtual_path == "BOSL/constants.scad"));
+        let transforms = project
+            .embedded_sources
+            .iter()
+            .find(|source| source.virtual_path == "BOSL/transforms.scad")
+            .unwrap();
+        assert!(!transforms.editable);
+        assert!(
+            project
+                .embedded_sources
+                .iter()
+                .find(|source| source.virtual_path == "main.scad")
+                .unwrap()
+                .editable
+        );
+        assert!(transforms
+            .module_defines
+            .iter()
+            .any(|definition| definition.name == "right"));
+        assert_eq!(project.source_dependencies.len(), 3);
     }
 }

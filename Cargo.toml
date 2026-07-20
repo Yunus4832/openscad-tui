@@ -1,9 +1,9 @@
 [workspace]
-members = ["crates/core", "crates/library", "crates/render", "crates/ui"]
+members = ["crates/core", "crates/library", "crates/render", "crates/terminal", "crates/ui"]
 resolver = "2"
 
 [workspace.package]
-version = "0.1.0"
+version = "0.0.1"
 edition = "2021"
 authors = ["OpenSCAD TUI Contributors"]
 license = "MIT"
@@ -21,8 +21,20 @@ dirs = "5.0"
 glam = "0.30"
 tempfile = "3.20"
 wait-timeout = "0.2"
-image = { version = "0.25", default-features = false }
 ratatui-image = { version = "5.0", default-features = false, features = ["crossterm"] }
 icy_sixel = "0.1.3"
 base64 = "0.21"
 flate2 = "1"
+jpeg-encoder = "0.7"
+
+[profile.dev.package.openscad-terminal]
+opt-level = 2
+
+[profile.dev.package.icy_sixel]
+opt-level = 2
+
+[profile.dev.package.jpeg-encoder]
+opt-level = 2
+
+[profile.release]
+strip = "symbols"

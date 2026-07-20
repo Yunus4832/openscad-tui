@@ -464,7 +464,16 @@ impl App {
     /// Initialize tree state with first item selected if available
     pub fn init_tree_selection(&mut self) {
         // Select first available section in the tree
-        if !self.ast.includes.is_empty() {
+        if self
+            .ast
+            .embedded_sources
+            .iter()
+            .any(|source| source.editable)
+        {
+            self.tree_state
+                .borrow_mut()
+                .select(vec!["__project_sources".to_string()]);
+        } else if !self.ast.includes.is_empty() {
             self.tree_state
                 .borrow_mut()
                 .select(vec!["__includes".to_string()]);
@@ -520,12 +529,27 @@ impl App {
     /// Check if a section ID is still valid
     fn is_valid_section_id(&self, id: &str) -> bool {
         match id {
+            "__project_sources" => self
+                .ast
+                .embedded_sources
+                .iter()
+                .any(|source| source.editable),
             "__includes" => !self.ast.includes.is_empty(),
             "__uses" => !self.ast.uses.is_empty(),
             "__globals" => !self.ast.global_variables.is_empty(),
             "__functions" => !self.ast.function_defines.is_empty(),
             "__moddefs" => !self.ast.module_defines.is_empty(),
             "__modules" => !self.ast.modules.is_empty(),
+            s if s.starts_with("__project_source_") => {
+                let idx: usize = s
+                    .trim_start_matches("__project_source_")
+                    .parse()
+                    .unwrap_or(usize::MAX);
+                self.ast
+                    .embedded_sources
+                    .get(idx)
+                    .is_some_and(|source| source.editable)
+            }
             s if s.starts_with("__include_") => {
                 let idx: usize = s
                     .trim_start_matches("__include_")
@@ -605,6 +629,19 @@ impl App {
     pub fn find_node_path(&self, target_id: &str) -> Option<Vec<String>> {
         // Check if target is a section header
         if target_id.starts_with("__") {
+            if let Some(index) = target_id.strip_prefix("__project_source_") {
+                let index = index.parse::<usize>().ok()?;
+                if self
+                    .ast
+                    .embedded_sources
+                    .get(index)
+                    .is_some_and(|source| source.editable)
+                {
+                    return Some(vec!["__project_sources".to_string(), target_id.to_string()]);
+                }
+                return None;
+            }
+
             // Check if it's a module definition ID
             if let Some(module_name) = target_id.strip_prefix("__moddef_") {
                 // Verify this module definition exists

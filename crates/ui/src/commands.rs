@@ -2,6 +2,7 @@
 
 use openscad_core::{Argument, ArgumentSelector, AstError, Expr, ModuleNode};
 use openscad_library::ModuleDef;
+use openscad_terminal::DisplayProtocol;
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -15,30 +16,33 @@ use crate::project_import::{attach_scad_library, import_scad_project};
 const MAX_RECURSION_DEPTH: usize = 1000;
 
 pub fn cmd_render(app: &mut App) -> CommandResult<()> {
-    let mut source = app.ast.to_scad();
-    if let Some(entry) = &app.ast.entry_source {
-        source = rewrite_absolute_source_references(&source, entry, &app.ast.source_dependencies);
+    app.ast_mut().sync_active_source();
+    let target = app.ast.active_source.clone();
+    let mut source = target
+        .as_deref()
+        .and_then(|path| app.ast.source_code(path))
+        .unwrap_or_else(|| app.ast.to_scad());
+    if let Some(target) = &target {
+        source = rewrite_absolute_source_references(&source, target, &app.ast.source_dependencies);
     }
-    let render_project =
-        app.ast
-            .entry_source
-            .as_ref()
-            .map(|entry| openscad_render::OpenScadProject {
-                entry_path: PathBuf::from(entry),
-                files: app
-                    .ast
-                    .embedded_sources
-                    .iter()
-                    .map(|source| openscad_render::OpenScadProjectFile {
-                        path: PathBuf::from(&source.virtual_path),
-                        content: rewrite_absolute_source_references(
-                            &source.content,
-                            &source.virtual_path,
-                            &app.ast.source_dependencies,
-                        ),
-                    })
-                    .collect(),
-            });
+    let render_project = target
+        .as_ref()
+        .map(|target| openscad_render::OpenScadProject {
+            entry_path: PathBuf::from(target),
+            files: app
+                .ast
+                .embedded_sources
+                .iter()
+                .map(|project_source| openscad_render::OpenScadProjectFile {
+                    path: PathBuf::from(&project_source.virtual_path),
+                    content: rewrite_absolute_source_references(
+                        &project_source.generated_content(),
+                        &project_source.virtual_path,
+                        &app.ast.source_dependencies,
+                    ),
+                })
+                .collect(),
+        });
     let source_context = app
         .ast
         .source_directory
@@ -49,6 +53,94 @@ pub fn cmd_render(app: &mut App) -> CommandResult<()> {
         .map_err(CommandError::Custom)?;
     app.enter_model_screen();
     Ok(())
+}
+
+pub fn cmd_buffer(app: &mut App, value: Option<&str>) -> CommandResult<()> {
+    let editable = app
+        .ast
+        .embedded_sources
+        .iter()
+        .filter(|source| source.editable)
+        .map(|source| source.virtual_path.clone())
+        .collect::<Vec<_>>();
+    if editable.is_empty() {
+        return Err(CommandError::Custom(
+            "The current project has no editable source buffers".to_string(),
+        ));
+    }
+    let Some(value) = value else {
+        let active = app.ast.active_source.as_deref();
+        let summary = editable
+            .iter()
+            .map(|path| {
+                let active_marker = if active == Some(path.as_str()) {
+                    "*"
+                } else {
+                    ""
+                };
+                format!("{active_marker}{path}")
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        app.set_info(&format!("Buffers (* active): {summary}"));
+        return Ok(());
+    };
+
+    let target = match value {
+        "next" | "prev" => {
+            let current = app
+                .ast
+                .active_source
+                .as_ref()
+                .and_then(|active| editable.iter().position(|path| path == active))
+                .unwrap_or(0);
+            let index = if value == "next" {
+                (current + 1) % editable.len()
+            } else {
+                (current + editable.len() - 1) % editable.len()
+            };
+            editable[index].clone()
+        }
+        name => resolve_project_source(&editable, name)?,
+    };
+    if app.ast.active_source.as_deref() == Some(&target) {
+        app.set_info(&format!("Already editing '{target}'"));
+        return Ok(());
+    }
+    app.ast_mut().activate_source(&target)?;
+    reload_project_definitions(app);
+    app.selected_nodes.clear();
+    app.undo_stack.clear();
+    app.redo_stack.clear();
+    app.tree_state.borrow_mut().select(Vec::new());
+    app.init_tree_selection();
+    app.model_preview.mark_stale();
+    app.set_info(&format!("Editing project source '{target}'"));
+    Ok(())
+}
+
+fn resolve_project_source(sources: &[String], name: &str) -> CommandResult<String> {
+    if let Some(path) = sources.iter().find(|path| path.as_str() == name) {
+        return Ok(path.clone());
+    }
+    let matches = sources
+        .iter()
+        .filter(|path| {
+            let path = Path::new(path);
+            path.file_name().and_then(|value| value.to_str()) == Some(name)
+                || path.file_stem().and_then(|value| value.to_str()) == Some(name)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    match matches.as_slice() {
+        [path] => Ok(path.clone()),
+        [] => Err(CommandError::Custom(format!(
+            "Editable project source '{name}' was not found"
+        ))),
+        _ => Err(CommandError::Custom(format!(
+            "Project source name '{name}' is ambiguous; use its full virtual path"
+        ))),
+    }
 }
 
 fn rewrite_absolute_source_references(
@@ -176,6 +268,31 @@ pub fn cmd_camera(app: &mut App, args: &[&str]) -> CommandResult<()> {
         _ => return Err(invalid()),
     };
     result.map_err(CommandError::Custom)
+}
+
+pub fn cmd_protocol(app: &mut App, value: &str) -> CommandResult<()> {
+    match value.to_ascii_lowercase().as_str() {
+        "auto" => app.model_preview.reset_protocol_type(),
+        "next" => {
+            let next = app.model_preview.protocol_type().next();
+            app.model_preview.set_protocol_type(next);
+        }
+        value => {
+            let protocol = value.parse::<DisplayProtocol>().map_err(|_| {
+                CommandError::InvalidCommand(format!(
+                    "Usage: protocol auto|next|{}",
+                    DisplayProtocol::NAMES.join("|")
+                ))
+            })?;
+            app.model_preview.set_protocol_type(protocol);
+        }
+    }
+    app.terminal_clear_requested = true;
+    app.set_info(&format!(
+        "Terminal preview protocol: {}",
+        app.model_preview.protocol_type()
+    ));
+    Ok(())
 }
 
 #[derive(Error, Debug)]
@@ -942,6 +1059,7 @@ pub fn cmd_write(app: &mut App, filename: &str) -> CommandResult<()> {
 
 /// Force save AST to JSON file
 pub fn cmd_write_force(app: &mut App, filename: &str) -> CommandResult<()> {
+    app.ast_mut().sync_active_source();
     // Expand tilde in filename
     let expanded_filepath = if filename.is_empty() {
         let current_file_str = app.current_file.clone().ok_or(CommandError::Custom(
@@ -1105,7 +1223,11 @@ fn reload_project_definitions(app: &mut App) {
 
 fn reachable_source_paths(ast: &openscad_core::AstRoot) -> HashSet<String> {
     let mut reachable = HashSet::new();
-    let Some(entry) = ast.entry_source.clone() else {
+    let Some(entry) = ast
+        .active_source
+        .clone()
+        .or_else(|| ast.entry_source.clone())
+    else {
         return reachable;
     };
     let mut pending = vec![entry];
@@ -1243,9 +1365,10 @@ fn cmd_activate_library(
     };
     let entry = app
         .ast
-        .entry_source
+        .active_source
         .clone()
-        .ok_or_else(|| CommandError::Custom("Project has no entry source".to_string()))?;
+        .or_else(|| app.ast.entry_source.clone())
+        .ok_or_else(|| CommandError::Custom("Project has no active source".to_string()))?;
     let reference = relative_virtual_path(&entry, &target);
     let dependency = openscad_core::SourceDependency {
         from: entry,
@@ -3264,21 +3387,27 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
     registry.register(CommandDef::new(
         "render",
         Vec::<&str>::new(),
-        |app, args| {
-            if args.is_empty() {
-                cmd_render(app)
-            } else {
-                Err(CommandError::InvalidCommand(
-                    "render command takes no arguments".to_string(),
-                ))
-            }
-        },
-        "Generate and display the current model with OpenSCAD",
+        |app, _args| cmd_render(app),
+        "Render the active SCAD source buffer",
         0,
         Some(0),
         "render",
         vec!["render"],
         CommandType::NoArg,
+        false,
+        true,
+    ));
+
+    registry.register(CommandDef::new(
+        "buffer",
+        vec!["b"],
+        |app, args| cmd_buffer(app, args.first().copied()),
+        "List or switch editable SCAD source buffers in the current project",
+        0,
+        Some(1),
+        "buffer [next|prev|source]",
+        vec!["buffer", "buffer next", "buffer vernier_cursor.scad"],
+        CommandType::ProjectSource,
         false,
         true,
     ));
@@ -3312,6 +3441,20 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
             "camera auto-rotate toggle",
         ],
         CommandType::Camera,
+        false,
+        true,
+    ));
+
+    registry.register(CommandDef::new(
+        "protocol",
+        Vec::<&str>::new(),
+        |app, args| cmd_protocol(app, args[0]),
+        "Switch the terminal preview protocol without regenerating the model",
+        1,
+        Some(1),
+        "protocol <auto|next|kitty|sixel|iterm2|halfblocks|braille|ascii>",
+        vec!["protocol next", "protocol braille", "protocol auto"],
+        CommandType::Protocol,
         false,
         true,
     ));
@@ -3453,11 +3596,7 @@ mod tests {
         let source_path = source_directory.join("shape.scad");
         let library_path = source_directory.join("parts.scad");
         fs::write(&source_path, "use <parts.scad>;\npart(size=5);\n").unwrap();
-        fs::write(
-            &library_path,
-            "module part(size=1) { unsupported dependency logic ??; }\n",
-        )
-        .unwrap();
+        fs::write(&library_path, "module part(size=1) { cube(size); }\n").unwrap();
         let project_path = directory.path().join("shape-project.json");
         let mut app = App::new();
 
@@ -3472,6 +3611,56 @@ mod tests {
         assert!(restored.library.get_module("part").is_some());
         assert!(restored.ast.to_scad().contains("part(size=5);"));
         assert!(restored.saved);
+    }
+
+    #[test]
+    fn test_buffer_switching_preserves_edits_in_multiple_scad_sources() {
+        let directory = tempfile::tempdir().unwrap();
+        let main_path = directory.path().join("main.scad");
+        fs::write(&main_path, "use <part.scad>; cube(1);").unwrap();
+        fs::write(directory.path().join("part.scad"), "sphere(2);").unwrap();
+        let project_path = directory.path().join("project.json");
+        let mut app = App::new();
+
+        cmd_edit_scad_force(&mut app, main_path.to_str().unwrap()).unwrap();
+        app.ast_mut().modules[0].name = "cylinder".to_string();
+        cmd_buffer(&mut app, Some("part.scad")).unwrap();
+        assert_eq!(app.ast.active_source.as_deref(), Some("part.scad"));
+        assert_eq!(app.ast.modules[0].name, "sphere");
+        let library_path = directory.path().join("helpers.scad");
+        fs::write(&library_path, "module helper() { cube(1); }").unwrap();
+        cmd_load_library(&mut app, library_path.to_str().unwrap()).unwrap();
+        cmd_use_library(&mut app, "helpers.scad").unwrap();
+        assert!(app.ast.source_dependencies.iter().any(|dependency| {
+            dependency.from == "part.scad"
+                && dependency.kind == openscad_core::SourceDependencyKind::Use
+        }));
+        app.ast_mut().modules[0].name = "cube".to_string();
+        cmd_write_force(&mut app, project_path.to_str().unwrap()).unwrap();
+
+        let mut restored = App::new();
+        cmd_load_force(&mut restored, project_path.to_str().unwrap()).unwrap();
+        assert_eq!(restored.ast.active_source.as_deref(), Some("part.scad"));
+        assert_eq!(restored.ast.entry_source.as_deref(), Some("main.scad"));
+        assert!(restored
+            .ast
+            .source_code("main.scad")
+            .unwrap()
+            .contains("cylinder(1);"));
+        assert!(restored
+            .ast
+            .source_code("part.scad")
+            .unwrap()
+            .contains("cube(2);"));
+    }
+
+    #[test]
+    fn test_render_is_a_zero_argument_active_buffer_command() {
+        let app = App::new();
+        let render = app.command_registry.find("render").unwrap();
+        assert_eq!(render.max_args, Some(0));
+        assert_eq!(render.usage, "render");
+        assert!(app.command_registry.find("render-target").is_none());
     }
 
     #[test]
@@ -3555,6 +3744,21 @@ mod tests {
         assert!(app.model_preview.auto_rotate);
         cmd_camera(&mut app, &["auto-rotate", "toggle"]).unwrap();
         assert!(!app.model_preview.auto_rotate);
+    }
+
+    #[test]
+    fn test_protocol_command_switches_backend_and_requests_clear() {
+        let mut app = App::new();
+
+        cmd_protocol(&mut app, "ascii").unwrap();
+        assert_eq!(app.model_preview.protocol_type(), DisplayProtocol::Ascii);
+        assert!(app.take_terminal_clear_request());
+
+        cmd_protocol(&mut app, "next").unwrap();
+        assert_eq!(app.model_preview.protocol_type(), DisplayProtocol::Kitty);
+        cmd_protocol(&mut app, "braille").unwrap();
+        assert_eq!(app.model_preview.protocol_type(), DisplayProtocol::Braille);
+        assert!(cmd_protocol(&mut app, "unknown").is_err());
     }
 
     #[test]
