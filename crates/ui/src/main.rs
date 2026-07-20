@@ -2,6 +2,7 @@
 //!
 //! A command-driven OpenSCAD editor with real-time preview
 
+use clap::Parser;
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event},
     execute,
@@ -14,18 +15,42 @@ use ratatui::{
 use ratatui_image::picker::{Picker, ProtocolType};
 use std::error::Error;
 use std::io;
+use std::path::PathBuf;
 
 use openscad_ui::{
     app::App,
+    commands::{cmd_edit_scad_force, cmd_load_force},
     input::{handle_key, handle_mouse},
     ui::draw,
 };
 
 const IMAGE_PROTOCOL_ENV: &str = "OPENSCAD_TUI_IMAGE_PROTOCOL";
 
+#[derive(Debug, Parser)]
+#[command(version, about = "A structured terminal editor for OpenSCAD")]
+struct Cli {
+    /// JSON project or .scad source file to open
+    file: Option<PathBuf>,
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
+    let cli = Cli::parse();
     let protocol_override = image_protocol_override_from_env()
         .map_err(|message| io::Error::new(io::ErrorKind::InvalidInput, message))?;
+
+    let mut app = App::new();
+    if let Some(file) = cli.file {
+        let filename = file.to_string_lossy();
+        if file
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("scad"))
+        {
+            cmd_edit_scad_force(&mut app, &filename)?;
+        } else {
+            cmd_load_force(&mut app, &filename)?;
+        }
+    }
 
     // Setup terminal
     enable_raw_mode()?;
@@ -39,7 +64,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     if let Some(protocol_type) = protocol_override {
         picker.set_protocol_type(protocol_type);
     }
-    let mut app = App::new();
     app.configure_image_picker(picker);
     let res = run_app(&mut terminal, app);
 

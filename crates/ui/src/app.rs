@@ -432,11 +432,6 @@ impl App {
             help_modal_height: 0,
         };
 
-        // Load standard library (from config dir if exists, otherwise use embedded)
-        if let Err(e) = app.library.load_stdlib_with_config() {
-            eprintln!("Failed to load standard library: {}", e);
-        }
-
         // Initialize command registry
         crate::commands::init_command_registry(&mut app.command_registry);
 
@@ -852,12 +847,24 @@ impl App {
     /// Get display name for section headers and their children
     fn get_section_display_name(&self, node_id: &str) -> String {
         match node_id {
+            "__project_sources" => "[Project Sources]".to_string(),
             "__includes" => "[Includes]".to_string(),
             "__uses" => "[Uses]".to_string(),
             "__globals" => "[Global Variables]".to_string(),
             "__functions" => "[Functions]".to_string(),
             "__moddefs" => "[Module Definitions]".to_string(),
             "__modules" => "[Modules]".to_string(),
+            s if s.starts_with("__project_source_") => {
+                let idx = s
+                    .trim_start_matches("__project_source_")
+                    .parse::<usize>()
+                    .unwrap_or(0);
+                self.ast
+                    .embedded_sources
+                    .get(idx)
+                    .map(|source| source.virtual_path.clone())
+                    .unwrap_or_else(|| s.to_string())
+            }
             s if s.starts_with("__include_") => {
                 let idx: usize = s.trim_start_matches("__include_").parse().unwrap_or(0);
                 self.ast

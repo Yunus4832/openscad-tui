@@ -4,26 +4,6 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::fs;
-use std::path::Path;
-use thiserror::Error;
-
-#[derive(Error, Debug)]
-pub enum LibraryError {
-    #[error("IO error: {0}")]
-    IoError(#[from] std::io::Error),
-
-    #[error("JSON parsing error: {0}")]
-    JsonError(#[from] serde_json::Error),
-
-    #[error("Library not found: {0}")]
-    LibraryNotFound(String),
-
-    #[error("Invalid library definition: {0}")]
-    InvalidDefinition(String),
-}
-
-pub type Result<T> = std::result::Result<T, LibraryError>;
 
 /// Parameter definition for a module
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -123,26 +103,10 @@ impl FunctionDef {
     }
 }
 
-/// Library definition
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LibraryDef {
-    /// Library name
-    pub name: String,
-
-    /// Library description
-    pub description: Option<String>,
-
-    /// OpenSCAD file to include (relative path)
-    pub file: String,
-
-    /// All modules in this library
-    pub modules: Vec<ModuleDef>,
-
-    /// All functions in this library
-    pub functions: Vec<FunctionDef>,
-
-    /// Version
-    pub version: Option<String>,
+#[derive(Debug, Deserialize)]
+struct BuiltinCatalog {
+    modules: Vec<ModuleDef>,
+    functions: Vec<FunctionDef>,
 }
 
 /// Library manager that handles loading and discovering modules
@@ -152,9 +116,6 @@ pub struct LibraryManager {
 
     /// Built-in functions
     builtin_functions: HashMap<String, FunctionDef>,
-
-    /// Loaded libraries
-    libraries: HashMap<String, LibraryDef>,
 
     /// User-defined custom modules
     custom_modules: HashMap<String, ModuleDef>,
@@ -169,15 +130,11 @@ impl LibraryManager {
         let mut manager = Self {
             builtin_modules: HashMap::new(),
             builtin_functions: HashMap::new(),
-            libraries: HashMap::new(),
             custom_modules: HashMap::new(),
             custom_functions: HashMap::new(),
         };
 
-        // Load standard library with fallback to embedded version
-        if let Err(e) = manager.load_stdlib_with_config() {
-            eprintln!("Warning: Failed to load standard library: {}", e);
-        }
+        manager.load_embedded_builtins();
 
         manager
     }
@@ -188,7 +145,6 @@ impl LibraryManager {
             .get(name)
             .cloned()
             .or_else(|| self.builtin_modules.get(name).cloned())
-            .or_else(|| self.get_module_from_libraries(name))
     }
 
     /// Get all available module names
@@ -200,13 +156,6 @@ impl LibraryManager {
 
         // Add custom modules
         names.extend(self.custom_modules.keys().cloned());
-
-        // Add modules from loaded libraries
-        for library in self.libraries.values() {
-            for module in &library.modules {
-                names.insert(module.name.clone());
-            }
-        }
 
         names.into_iter().collect()
     }
@@ -222,7 +171,6 @@ impl LibraryManager {
             .get(name)
             .cloned()
             .or_else(|| self.builtin_functions.get(name).cloned())
-            .or_else(|| self.get_function_from_libraries(name))
     }
 
     /// Get all available function names
@@ -231,12 +179,6 @@ impl LibraryManager {
 
         names.extend(self.builtin_functions.keys().cloned());
         names.extend(self.custom_functions.keys().cloned());
-
-        for library in self.libraries.values() {
-            for func in &library.functions {
-                names.insert(func.name.clone());
-            }
-        }
 
         names.into_iter().collect()
     }
@@ -254,14 +196,6 @@ impl LibraryManager {
         for func in self.builtin_functions.values() {
             if !functions.iter().any(|f| f.name == func.name) {
                 functions.push(func.clone());
-            }
-        }
-
-        for lib in self.libraries.values() {
-            for func in &lib.functions {
-                if !functions.iter().any(|f| f.name == func.name) {
-                    functions.push(func.clone());
-                }
             }
         }
 
@@ -298,16 +232,6 @@ impl LibraryManager {
             self.custom_functions
                 .insert(func_def.name.clone(), function);
         }
-    }
-
-    /// Get function from loaded libraries
-    fn get_function_from_libraries(&self, name: &str) -> Option<FunctionDef> {
-        for lib in self.libraries.values() {
-            if let Some(func) = lib.functions.iter().find(|f| f.name == name) {
-                return Some(func.clone());
-            }
-        }
-        None
     }
 
     /// Check if module body contains a children module
@@ -351,44 +275,6 @@ impl LibraryManager {
         }
     }
 
-    /// Get module source information
-    /// Returns (library_name, library_file) for third-party modules
-    /// Returns (None, None) for built-in modules
-    pub fn get_module_source(&self, name: &str) -> (Option<String>, Option<String>) {
-        // Check if it's a custom module (treated as built-in)
-        if self.custom_modules.contains_key(name) {
-            return (None, None);
-        }
-
-        // Check if it's a built-in module
-        if self.builtin_modules.contains_key(name) {
-            return (None, None);
-        }
-
-        // Check in loaded libraries
-        for lib in self.libraries.values() {
-            if lib.modules.iter().any(|m| m.name == name) {
-                // StandardLibrary is special - it's built-in, don't generate include for it
-                if lib.name == "StandardLibrary" {
-                    return (None, None);
-                }
-                return (Some(lib.name.clone()), Some(lib.file.clone()));
-            }
-        }
-
-        (None, None)
-    }
-
-    /// Get module from loaded libraries
-    fn get_module_from_libraries(&self, name: &str) -> Option<ModuleDef> {
-        for lib in self.libraries.values() {
-            if let Some(module) = lib.modules.iter().find(|m| m.name == name) {
-                return Some(module.clone());
-            }
-        }
-        None
-    }
-
     /// Get all available modules
     pub fn get_all_modules(&self) -> Vec<ModuleDef> {
         let mut modules: Vec<_> = self.custom_modules.values().cloned().collect();
@@ -400,84 +286,24 @@ impl LibraryManager {
             }
         }
 
-        // Add library modules, skipping any already added
-        for lib in self.libraries.values() {
-            for module in &lib.modules {
-                if !modules.iter().any(|m| m.name == module.name) {
-                    modules.push(module.clone());
-                }
-            }
-        }
-
         modules.sort_by(|a, b| a.name.cmp(&b.name));
         modules
     }
 
-    /// Load a library from a JSON string
-    pub fn load_library_from_string(&mut self, json_str: &str) -> Result<()> {
-        let lib_def: LibraryDef = serde_json::from_str(json_str)?;
-
-        if lib_def.name == "StandardLibrary" {
-            for module in &lib_def.modules {
-                self.builtin_modules
-                    .insert(module.name.clone(), module.clone());
-            }
-            for func in &lib_def.functions {
-                self.builtin_functions
-                    .insert(func.name.clone(), func.clone());
-            }
-        } else {
-            self.libraries.insert(lib_def.name.clone(), lib_def);
-        }
-
-        Ok(())
-    }
-
-    /// Load a library from a JSON file
-    pub fn load_library(&mut self, path: &Path) -> Result<()> {
-        let contents = fs::read_to_string(path)?;
-        let lib_def: LibraryDef = serde_json::from_str(&contents)?;
-
-        self.libraries.insert(lib_def.name.clone(), lib_def);
-        Ok(())
-    }
-
-    /// Get standard library config path (~/.config/openscad-tui/stdlib.json on Linux/Mac, etc.)
-    pub fn get_stdlib_config_path() -> Option<std::path::PathBuf> {
-        dirs::config_dir().map(|config_dir| config_dir.join("openscad-tui").join("stdlib.json"))
-    }
-
-    /// Try to load stdlib from user config directory, fallback to embedded version
-    pub fn load_stdlib_with_config(&mut self) -> Result<()> {
-        // Try to load from user config directory
-        if let Some(config_path) = Self::get_stdlib_config_path() {
-            if config_path.exists() {
-                match self.load_library(&config_path) {
-                    Ok(()) => return Ok(()),
-                    Err(e) => {
-                        // If user config exists but fails to load, log error but continue
-                        eprintln!(
-                            "Warning: Failed to load stdlib from {:?}: {}",
-                            config_path, e
-                        );
-                    }
-                }
-            }
-        }
-
-        // Fallback to embedded stdlib.json
+    fn load_embedded_builtins(&mut self) {
         const EMBEDDED_STDLIB: &str = include_str!("../../../stdlib.json");
-        self.load_library_from_string(EMBEDDED_STDLIB)
-    }
-
-    /// Get a library by name
-    pub fn get_library(&self, name: &str) -> Option<&LibraryDef> {
-        self.libraries.get(name)
-    }
-
-    /// Get all loaded libraries
-    pub fn get_all_libraries(&self) -> Vec<&LibraryDef> {
-        self.libraries.values().collect()
+        let catalog: BuiltinCatalog = serde_json::from_str(EMBEDDED_STDLIB)
+            .expect("embedded stdlib.json must contain a valid builtin catalog");
+        self.builtin_modules = catalog
+            .modules
+            .into_iter()
+            .map(|module| (module.name.clone(), module))
+            .collect();
+        self.builtin_functions = catalog
+            .functions
+            .into_iter()
+            .map(|function| (function.name.clone(), function))
+            .collect();
     }
 }
 

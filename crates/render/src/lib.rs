@@ -15,6 +15,9 @@ pub use framebuffer::{Framebuffer, PixelSize, RgbaFrame};
 pub use glam::{Mat4, Vec2, Vec3, Vec4};
 pub use mesh::{Aabb, Mesh};
 pub use off::{parse_off, read_off};
-pub use openscad::{GenerationDiagnostics, MeshGeneration, MeshGenerator, OpenScadGenerator};
+pub use openscad::{
+    GenerationDiagnostics, MeshGeneration, MeshGenerator, OpenScadGenerator, OpenScadProject,
+    OpenScadProjectFile,
+};
 pub use rasterizer::{CpuRenderer, RenderSettings};
 pub use service::{FrameRenderer, RenderEvent, RenderFailureStage, RenderService, RenderedFrame};

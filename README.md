@@ -1,10 +1,10 @@
 # OpenSCAD TUI
 
 OpenSCAD TUI 是一个使用 Rust、Ratatui 和 Crossterm 编写的终端结构化编辑器。它通过
-Vim 风格按键和命令修改 OpenSCAD AST，在终端中展示模型树与生成的 `.scad` 源码。
+Vim 风格按键和命令修改 OpenSCAD AST，可在终端中查看模型树、生成的 `.scad` 源码，
+也可调用本机 OpenSCAD 生成网格并显示交互式模型预览。
 
-> 当前项目处于可运行的原型阶段。右侧预览是 OpenSCAD 源码预览，不是 2D/3D 几何渲染；
-> 程序目前不会调用 OpenSCAD 编译器。
+> 当前项目处于可运行的原型阶段，尚未提供稳定发布或安装包。
 
 ## 当前能力
 
@@ -14,23 +14,32 @@ Vim 风格按键和命令修改 OpenSCAD AST，在终端中展示模型树与生
 - 定义全局变量、自定义函数和自定义模块
 - 生成并导出 OpenSCAD 源码
 - 将可编辑项目保存为 JSON，并从 JSON 恢复
-- 从 JSON 加载模块和函数元数据作为补全库
+- 将 `.scad` 解析为 globals、functions、module definitions 和 module nodes，并嵌入 JSON 项目
+- 直接加载 `.scad` 库并提取模块、函数定义用于补全
 - 撤销、重做和命令历史
 - 复制、粘贴、移除和替换模块节点
 - 补全命令、模块、参数、值、函数和文件路径
 - 在函数调用与列表嵌套表达式中继续补全
+- 调用 OpenSCAD 生成 OFF 网格，并通过 CPU 光栅化显示交互式模型预览
+- 切换透视/正交投影、标准视角、相机环绕/平移/缩放和自动旋转
 
 核心表达式支持布尔值、整数、浮点数、字符串、`undef`、标识符、列表、范围、
 一元/二元运算、三元表达式、索引和函数调用。
 
 ## 构建与运行
 
-需要 Rust 2021 edition 兼容工具链。
+需要 Rust 2021 edition 兼容工具链。源码编辑、项目读写和 `.scad` 导出不依赖
+OpenSCAD；使用 `render` 或首次进入模型预览时，还需要 PATH 中存在 `openscad`
+可执行文件。OpenSCAD 调用的超时时间为 120 秒。
 
 ```bash
 cargo build --workspace
 cargo run --bin openscad-tui
+cargo run --bin openscad-tui -- existing.scad
 ```
+
+也可以直接打开 JSON 项目：`openscad-tui project.json`。直接打开 `.scad` 与执行
+`edit existing.scad` 的导入行为相同。
 
 发布构建：
 
@@ -57,8 +66,10 @@ cargo build --release
 | `t` / `r` / `s` | 打开平移、旋转或缩放命令 |
 | `d` | 删除所有选中节点的完整子树；无选中时删除当前节点、global、function 或 module 定义 |
 | `u` / `Ctrl+R` | 撤销或重做 |
-| `w` / `e` | 保存或加载 JSON 项目 |
-| `L` | 加载 JSON 库 |
+| `w` | 保存 JSON 项目 |
+| `o` | 打开 `open` 命令，加载 JSON 项目 |
+| `e` | 打开 `edit` 命令，解析 `.scad` 文件进行结构化编辑 |
+| `L` | 加载并嵌入 `.scad` 源码库 |
 | `:` | 进入命令模式 |
 | `?` | 显示帮助 |
 | `q` / `Ctrl+C` | 退出 |
@@ -185,61 +196,35 @@ unset center
 ```text
 write project.json
 write! project.json
-edit project.json
-edit! project.json
+open project.json
+open! project.json
+edit existing.scad
+edit! existing.scad
 export model.scad
-library my_library.json
+library gears.scad
+use gears.scad
+include gears.scad
 wq
 ```
 
-- `write` / `edit` 保存和读取可继续编辑的 JSON AST。
+- `write` 保存可继续编辑的 JSON 项目，`open` 读取 JSON 项目。
+- `edit` 解析 `.scad` 文件并创建新的结构化项目。解析出的自定义模块、函数、全局变量
+  和模块节点会进入 AST，因此可以参与树编辑、命令补全和模块补全。
+- `edit` 会递归收集能从调用文件目录解析到的 `include` / `use` 文件，将原文、定义索引
+  和依赖类型一起嵌入 JSON。树中的 `[Project Sources]` 会区分 entry、include 和 use。
+- 依赖文件只扫描定义和下一层依赖，不解释其中的建模逻辑。渲染时程序会在临时目录
+  恢复完整文件树，再把当前入口 AST 生成的源码作为主文件交给 OpenSCAD。
+- `edit` 后需使用 `write project.json` 保存项目；不会覆盖原始 `.scad` 文件。
 - 带 `!` 的版本允许覆盖未保存状态相关的保护。
 - `export` 只生成 `.scad` 文件，不会运行 OpenSCAD。
-- `library` 加载的是补全及模块元数据；对应的 OpenSCAD 库文件需要在实际使用环境中可用。
-
-## JSON 库格式
-
-库文件需要包含 `modules` 和 `functions` 数组。最小示例：
-
-```json
-{
-  "name": "ExampleLibrary",
-  "description": "Example OpenSCAD metadata",
-  "file": "example.scad",
-  "version": "1.0",
-  "modules": [
-    {
-      "name": "rounded_cube",
-      "description": "Cube with rounded edges",
-      "accepts_children": false,
-      "parameters": [
-        {
-          "name": "size",
-          "param_type": "list",
-          "default": "[10, 10, 10]",
-          "description": "Cube dimensions"
-        }
-      ]
-    }
-  ],
-  "functions": [
-    {
-      "name": "double",
-      "description": "Double a value",
-      "parameters": [
-        {
-          "name": "x",
-          "param_type": "number",
-          "description": "Input value"
-        }
-      ],
-      "return_type": "number"
-    }
-  ]
-}
-```
-
-参数的 `default` 和 `description` 是可选字段。可参考仓库中的 `stdlib.json` 查看更多定义。
+- `library gears.scad` 加载 OpenSCAD 源码库并递归收集本地 SCAD 依赖，但不会修改
+  当前主文件的语义。源码会直接嵌入 JSON 项目，不需要额外的库描述文件。
+- `use gears.scad` 激活一个已经加载的库，在当前主文件中生成对应的 `use` 关系。
+  它只导入模块和函数定义，不执行库文件的顶层建模语句。
+- `include gears.scad` 以 `include` 语义激活已加载的库。除公开定义外，库中的顶层
+  变量和建模语句也会由 OpenSCAD 执行。
+- 只有通过 `use` 或 `include` 激活后，该库及其可达依赖中的定义才会进入补全并参与
+  渲染。已加载但未激活的库仍会随项目保存，之后可随时使用。
 
 ## 完整命令概览
 
@@ -250,7 +235,7 @@ wq
 - 变换：`translate`、`rotate`、`scale`
 - 布尔操作：`union`、`difference`、`intersection`
 - 定义：`global`、`function`、`module`
-- 文件：`write`、`write!`、`edit`、`edit!`、`export`、`library`
+- 文件：`write`、`write!`、`open`、`open!`、`edit`、`edit!`、`export`、`library`、`use`、`include`
 - 预览：`render`、`preview source|model|toggle`、`camera ...`
 - 系统：`help`、`quit`、`quit!`、`wq`
 
@@ -327,7 +312,7 @@ openscad-tui/
 │   ├── library/    # 内置/外部模块与函数元数据
 │   ├── render/     # OFF、相机、CPU 光栅化和异步渲染服务
 │   └── ui/         # TUI、输入、命令和应用状态
-├── stdlib.json     # 内置模块与函数元数据
+├── stdlib.json     # 程序内部使用的 OpenSCAD 内建签名表
 └── Cargo.toml      # Cargo workspace
 ```
 
@@ -340,15 +325,22 @@ cargo test --workspace
 cargo check --workspace
 ```
 
-当前工作区包含 114 个独立单元测试：core 30 个、library 9 个、ui 75 个。
+测试覆盖 core、library、render 和 ui 四个 crate；实际数量以
+`cargo test --workspace` 输出为准。
 
 ## 当前限制
 
-- 没有 OpenSCAD 编译、几何渲染或编译错误反馈
-- 不能导入和解析已有 `.scad` 源文件
+- 模型预览依赖外部 `openscad` 可执行文件；项目不内嵌 OpenSCAD
+- 模型预览需要手动触发；AST 更新只会将已有预览标记为过期
+- `.scad` 导入器覆盖常用 declarations、module/function definitions、模块调用、容器、
+  单子节点调用和局部赋值；尚未支持的复杂表达式会作为 AST 中的 raw expression 保留
+- 能从调用文件相对路径解析到的 `.scad` 依赖会嵌入项目；只能通过 `OPENSCADPATH`、
+  OpenSCAD 内置库或安装库找到的依赖仍保持外部引用
+- STL、OFF、DXF、SVG、PNG 等由 `import` / `surface` 引用的非 SCAD 资源尚未嵌入项目
+- 入口文件可进行结构化编辑；嵌入的依赖文件当前用于定义补全和渲染，尚不能在 UI 中
+  切换为活动编辑文件
 - 不是自由文本源码编辑器，主要通过 AST 树和命令编辑
 - 函数参数默认值、语义类型检查和高级补全仍有限
-- 鼠标事件目前不用于树节点操作
 - README 描述的是当前代码状态，项目尚未提供稳定发布或安装包
 
 ## License

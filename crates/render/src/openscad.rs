@@ -31,6 +31,19 @@ pub struct OpenScadGenerator {
     executable: PathBuf,
     working_directory: Option<PathBuf>,
     timeout: Duration,
+    project: Option<OpenScadProject>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenScadProjectFile {
+    pub path: PathBuf,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenScadProject {
+    pub entry_path: PathBuf,
+    pub files: Vec<OpenScadProjectFile>,
 }
 
 impl OpenScadGenerator {
@@ -39,6 +52,7 @@ impl OpenScadGenerator {
             executable: executable.into(),
             working_directory: None,
             timeout: Duration::from_secs(120),
+            project: None,
         }
     }
 
@@ -49,6 +63,11 @@ impl OpenScadGenerator {
 
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
+        self
+    }
+
+    pub fn with_project(mut self, project: OpenScadProject) -> Self {
+        self.project = Some(project);
         self
     }
 
@@ -67,26 +86,50 @@ impl OpenScadGenerator {
 
 impl MeshGenerator for OpenScadGenerator {
     fn generate(&self, scad_source: &str) -> Result<MeshGeneration> {
-        let fallback_directory;
-        let directory = match &self.working_directory {
-            Some(directory) => directory.as_path(),
-            None => {
-                fallback_directory = tempfile::tempdir().map_err(io_error)?;
-                fallback_directory.path()
+        let mut temporary_root = None;
+        let mut temporary_source = None;
+        let (source_path, directory, output_directory) = if let Some(project) = &self.project {
+            let root = tempfile::tempdir().map_err(io_error)?;
+            materialize_project(root.path(), project)?;
+            let source_path = safe_project_path(root.path(), &project.entry_path)?;
+            if let Some(parent) = source_path.parent() {
+                fs::create_dir_all(parent).map_err(io_error)?;
             }
+            fs::write(&source_path, scad_source).map_err(io_error)?;
+            let directory = source_path
+                .parent()
+                .unwrap_or_else(|| root.path())
+                .to_path_buf();
+            let output_directory = root.path().to_path_buf();
+            temporary_root = Some(root);
+            (source_path, directory, output_directory)
+        } else {
+            let root = match &self.working_directory {
+                Some(directory) => directory.clone(),
+                None => {
+                    let root = tempfile::tempdir().map_err(io_error)?;
+                    let path = root.path().to_path_buf();
+                    temporary_root = Some(root);
+                    path
+                }
+            };
+            let mut source = Builder::new()
+                .prefix("openscad-tui-")
+                .suffix(".scad")
+                .tempfile_in(&root)
+                .map_err(io_error)?;
+            source.write_all(scad_source.as_bytes()).map_err(io_error)?;
+            source.flush().map_err(io_error)?;
+            let path = source.path().to_path_buf();
+            temporary_source = Some(source);
+            (path, root.clone(), root)
         };
-
-        let mut source = Builder::new()
-            .prefix("openscad-tui-")
-            .suffix(".scad")
-            .tempfile_in(directory)
-            .map_err(io_error)?;
-        source.write_all(scad_source.as_bytes()).map_err(io_error)?;
-        source.flush().map_err(io_error)?;
+        let _keep_temporary_root_alive = &temporary_root;
+        let _keep_temporary_source_alive = &temporary_source;
         let output = Builder::new()
             .prefix("openscad-tui-")
             .suffix(".off")
-            .tempfile_in(directory)
+            .tempfile_in(&output_directory)
             .map_err(io_error)?;
         let stdout_path = output.path().with_extension("stdout.log");
         let stderr_path = output.path().with_extension("stderr.log");
@@ -95,10 +138,10 @@ impl MeshGenerator for OpenScadGenerator {
 
         let started = Instant::now();
         let mut child = Command::new(&self.executable)
-            .current_dir(directory)
+            .current_dir(&directory)
             .arg("-o")
             .arg(output.path())
-            .arg(source.path())
+            .arg(&source_path)
             .stdout(Stdio::from(stdout_file))
             .stderr(Stdio::from(stderr_file))
             .spawn()
@@ -145,6 +188,36 @@ impl MeshGenerator for OpenScadGenerator {
             },
         })
     }
+}
+
+fn materialize_project(root: &Path, project: &OpenScadProject) -> Result<()> {
+    safe_project_path(root, &project.entry_path)?;
+    for file in &project.files {
+        let path = safe_project_path(root, &file.path)?;
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(io_error)?;
+        }
+        fs::write(path, &file.content).map_err(io_error)?;
+    }
+    Ok(())
+}
+
+fn safe_project_path(root: &Path, relative: &Path) -> Result<PathBuf> {
+    if relative.as_os_str().is_empty()
+        || relative.is_absolute()
+        || relative.components().any(|component| {
+            !matches!(
+                component,
+                std::path::Component::Normal(_) | std::path::Component::CurDir
+            )
+        })
+    {
+        return Err(RenderError::Io(format!(
+            "unsafe embedded project path: {}",
+            relative.display()
+        )));
+    }
+    Ok(root.join(relative))
 }
 
 fn io_error(error: std::io::Error) -> RenderError {
@@ -202,6 +275,40 @@ mod tests {
             .read_dir()
             .unwrap()
             .all(|entry| entry.unwrap().file_name() == "fake-openscad"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn materializes_embedded_project_files_before_invoking_openscad() {
+        let (_directory, executable) = executable_script(
+            "#!/bin/sh\nentry_dir=$(dirname \"$3\")\ntest -f \"$entry_dir/lib/parts.scad\" || exit 8\ngrep -q 'edited_main' \"$3\" || exit 9\ngrep -q 'module part' \"$entry_dir/lib/parts.scad\" || exit 10\nprintf 'OFF\\n3 1 0\\n0 0 0\\n1 0 0\\n0 1 0\\n3 0 1 2\\n' > \"$2\"\n",
+        );
+        let project = OpenScadProject {
+            entry_path: PathBuf::from("project/main.scad"),
+            files: vec![OpenScadProjectFile {
+                path: PathBuf::from("project/lib/parts.scad"),
+                content: "module part() { cube(1); }".to_string(),
+            }],
+        };
+
+        let generation = OpenScadGenerator::new(executable)
+            .with_project(project)
+            .generate("// edited_main\ninclude <lib/parts.scad>;\npart();")
+            .unwrap();
+        assert_eq!(generation.mesh.triangle_count(), 1);
+    }
+
+    #[test]
+    fn rejects_unsafe_embedded_project_paths() {
+        let directory = tempfile::tempdir().unwrap();
+        let project = OpenScadProject {
+            entry_path: PathBuf::from("main.scad"),
+            files: vec![OpenScadProjectFile {
+                path: PathBuf::from("../outside.scad"),
+                content: String::new(),
+            }],
+        };
+        assert!(materialize_project(directory.path(), &project).is_err());
     }
 
     #[cfg(unix)]

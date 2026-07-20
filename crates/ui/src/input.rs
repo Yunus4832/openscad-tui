@@ -290,13 +290,19 @@ fn handle_normal_input(key: KeyEvent, app: &mut App) {
             app.input_buffer.set_content("write ");
         }
 
-        // e - edit (load from JSON)
+        // e - parse and edit an OpenSCAD source file
         KeyCode::Char('e') => {
             app.input_mode = InputMode::Command;
             app.input_buffer.set_content("edit ");
         }
 
-        // L - library (load library JSON)
+        // o - open a JSON project
+        KeyCode::Char('o') => {
+            app.input_mode = InputMode::Command;
+            app.input_buffer.set_content("open ");
+        }
+
+        // L - attach a SCAD source library
         KeyCode::Char('L') => {
             app.input_mode = InputMode::Command;
             app.input_buffer.set_content("library ");
@@ -1010,6 +1016,15 @@ fn analyze_input_context(input: &str, app: &App) -> CompletionContext {
                     CompletionContext::NodeParamUnset
                 }
             }
+            CommandType::LibraryReference => {
+                if (parts.len() == 1 && input.ends_with(' ')) || parts.len() == 2 {
+                    CompletionContext::Literal {
+                        candidates: loaded_library_names(app),
+                    }
+                } else {
+                    CompletionContext::Command
+                }
+            }
             CommandType::Preview => {
                 literal_command_context(input, &parts, &["source", "model", "toggle"], &[])
             }
@@ -1039,6 +1054,36 @@ fn analyze_input_context(input: &str, app: &App) -> CompletionContext {
     } else {
         CompletionContext::Command
     }
+}
+
+fn loaded_library_names(app: &App) -> Vec<String> {
+    let libraries = app
+        .ast
+        .embedded_sources
+        .iter()
+        .filter(|source| source.role == openscad_core::EmbeddedSourceRole::Library)
+        .collect::<Vec<_>>();
+    libraries
+        .iter()
+        .map(|source| {
+            let filename = Path::new(&source.virtual_path)
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or(&source.virtual_path);
+            let duplicate_filename = libraries.iter().any(|other| {
+                other.virtual_path != source.virtual_path
+                    && Path::new(&other.virtual_path)
+                        .file_name()
+                        .and_then(|value| value.to_str())
+                        == Some(filename)
+            });
+            if duplicate_filename {
+                source.virtual_path.clone()
+            } else {
+                filename.to_string()
+            }
+        })
+        .collect()
 }
 
 fn literal_command_context(
@@ -2172,6 +2217,58 @@ mod tests {
     }
 
     #[test]
+    fn test_use_and_include_completion_list_only_loaded_library_roots() {
+        let mut app = App::new();
+        app.ast_mut()
+            .embedded_sources
+            .push(openscad_core::EmbeddedSourceFile {
+                virtual_path: "libraries/gears/gears.scad".to_string(),
+                original_path: None,
+                role: openscad_core::EmbeddedSourceRole::Library,
+                content: String::new(),
+                global_variables: Vec::new(),
+                module_defines: Vec::new(),
+                function_defines: Vec::new(),
+            });
+        app.ast_mut()
+            .embedded_sources
+            .push(openscad_core::EmbeddedSourceFile {
+                virtual_path: "libraries/gears/helpers.scad".to_string(),
+                original_path: None,
+                role: openscad_core::EmbeddedSourceRole::Dependency,
+                content: String::new(),
+                global_variables: Vec::new(),
+                module_defines: Vec::new(),
+                function_defines: Vec::new(),
+            });
+
+        let (candidates, analysis) = generate_completions("use ge", &app);
+        assert_eq!(
+            analysis.context,
+            CompletionContext::Literal {
+                candidates: vec!["gears.scad".to_string()],
+            }
+        );
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|candidate| candidate.content.as_str())
+                .collect::<Vec<_>>(),
+            ["gears.scad"]
+        );
+
+        let (include_candidates, include_analysis) = generate_completions("include ge", &app);
+        assert_eq!(include_analysis.context, analysis.context);
+        assert_eq!(
+            include_candidates
+                .iter()
+                .map(|candidate| candidate.content.as_str())
+                .collect::<Vec<_>>(),
+            ["gears.scad"]
+        );
+    }
+
+    #[test]
     fn test_set_completion_uses_node_and_module_scope_parameters() {
         let mut app = App::new();
         let cube_id = commands::cmd_insert(&mut app, "cube", None, Some("size=10")).unwrap();
@@ -2448,6 +2545,24 @@ mod tests {
         );
         assert_eq!(app.input_mode, InputMode::Command);
         assert_eq!(app.input_buffer.content(), "unset ");
+    }
+
+    #[test]
+    fn test_file_shortcuts_use_open_and_edit_semantics() {
+        let mut app = App::new();
+        handle_key(
+            KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE),
+            &mut app,
+        );
+        assert_eq!(app.input_buffer.content(), "open ");
+
+        app.input_mode = InputMode::Normal;
+        app.input_buffer.clear();
+        handle_key(
+            KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE),
+            &mut app,
+        );
+        assert_eq!(app.input_buffer.content(), "edit ");
     }
 
     #[test]

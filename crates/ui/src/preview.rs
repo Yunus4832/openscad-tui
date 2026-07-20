@@ -12,8 +12,8 @@ use icy_sixel::{
 };
 use image::{DynamicImage, RgbaImage};
 use openscad_render::{
-    Aabb, Camera, CpuRenderer, OpenScadGenerator, PixelSize, Projection, RenderEvent,
-    RenderService, StandardView,
+    Aabb, Camera, CpuRenderer, OpenScadGenerator, OpenScadProject, PixelSize, Projection,
+    RenderEvent, RenderService, StandardView,
 };
 use ratatui::{buffer::Buffer, layout::Rect, widgets::Widget};
 use ratatui_image::{
@@ -392,7 +392,12 @@ impl ModelPreview {
         }
     }
 
-    pub fn render(&mut self, source: String, project_file: Option<&str>) -> Result<(), String> {
+    pub fn render(
+        &mut self,
+        source: String,
+        project_file: Option<&str>,
+        project: Option<OpenScadProject>,
+    ) -> Result<(), String> {
         self.mesh_revision = self.mesh_revision.wrapping_add(1);
         self.camera_revision = self.camera_revision.wrapping_add(1);
         self.encode_sequence = self.encode_sequence.wrapping_add(1);
@@ -410,6 +415,9 @@ impl ModelPreview {
             .or_else(|| std::env::current_dir().ok());
         let mut generator =
             OpenScadGenerator::new("openscad").with_timeout(Duration::from_secs(120));
+        if let Some(project) = project {
+            generator = generator.with_project(project);
+        }
         if let Some(directory) = working_directory {
             generator = generator.with_working_directory(expand_tilde(directory));
         }
@@ -919,8 +927,10 @@ mod tests {
 
     #[test]
     fn stopping_auto_rotation_does_not_queue_a_special_final_frame() {
-        let mut preview = ModelPreview::default();
-        preview.last_image = Some(DynamicImage::ImageRgba8(RgbaImage::new(16, 12)));
+        let mut preview = ModelPreview {
+            last_image: Some(DynamicImage::ImageRgba8(RgbaImage::new(16, 12))),
+            ..ModelPreview::default()
+        };
         let initial_sequence = preview.encode_sequence;
 
         preview.set_auto_rotate(true);
@@ -931,15 +941,17 @@ mod tests {
 
     #[test]
     fn orbit_and_pan_request_intermediate_frames() {
-        let mut preview = ModelPreview::default();
-        preview.bounds = Some(Aabb {
-            min: openscad_render::Vec3::splat(-1.0),
-            max: openscad_render::Vec3::splat(1.0),
-        });
-        preview.service = Some(RenderService::new(
-            Box::new(OpenScadGenerator::new("unused-in-this-test")),
-            Box::new(CpuRenderer::default()),
-        ));
+        let mut preview = ModelPreview {
+            bounds: Some(Aabb {
+                min: openscad_render::Vec3::splat(-1.0),
+                max: openscad_render::Vec3::splat(1.0),
+            }),
+            service: Some(RenderService::new(
+                Box::new(OpenScadGenerator::new("unused-in-this-test")),
+                Box::new(CpuRenderer::default()),
+            )),
+            ..ModelPreview::default()
+        };
         let initial_revision = preview.camera_revision;
 
         preview.orbit(3.0, -2.0).unwrap();

@@ -193,6 +193,53 @@ fn build_ast_tree_items(
 ) -> Vec<TreeItem<'static, String>> {
     let mut items = Vec::new();
 
+    if !ast.embedded_sources.is_empty() {
+        let source_children = ast
+            .embedded_sources
+            .iter()
+            .enumerate()
+            .map(|(index, source)| {
+                let included = ast.source_dependencies.iter().any(|dependency| {
+                    dependency.to == source.virtual_path
+                        && dependency.kind == openscad_core::SourceDependencyKind::Include
+                });
+                let used = ast.source_dependencies.iter().any(|dependency| {
+                    dependency.to == source.virtual_path
+                        && dependency.kind == openscad_core::SourceDependencyKind::Use
+                });
+                let role = match source.role {
+                    openscad_core::EmbeddedSourceRole::Entry => "entry",
+                    openscad_core::EmbeddedSourceRole::Library => match (included, used) {
+                        (true, true) => "library/include/use",
+                        (true, false) => "library/include",
+                        (false, true) => "library/use",
+                        (false, false) => "library",
+                    },
+                    openscad_core::EmbeddedSourceRole::Dependency => match (included, used) {
+                        (true, true) => "include/use",
+                        (true, false) => "include",
+                        (false, true) => "use",
+                        (false, false) => "dependency",
+                    },
+                };
+                TreeItem::new(
+                    format!("__project_source_{index}"),
+                    format!("[{role}] {}", source.virtual_path),
+                    vec![],
+                )
+                .expect("Failed to create TreeItem")
+            })
+            .collect();
+        items.push(
+            TreeItem::new(
+                "__project_sources".to_string(),
+                "[Project Sources]".to_string(),
+                source_children,
+            )
+            .expect("Failed to create TreeItem"),
+        );
+    }
+
     // Includes section
     if !ast.includes.is_empty() {
         let include_children: Vec<TreeItem<String>> = ast

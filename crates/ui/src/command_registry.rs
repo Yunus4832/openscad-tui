@@ -26,6 +26,7 @@ pub enum CommandType {
     NodeParamUnset,
     Preview,
     Camera,
+    LibraryReference,
 }
 
 /// Command type - used for dynamic completion context analysis

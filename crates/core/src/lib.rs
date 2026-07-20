@@ -5,6 +5,9 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+mod scad_parser;
+pub use scad_parser::{parse_scad, parse_scad_definitions, ScadParseError};
+
 /// Errors that can occur during AST operations
 #[derive(Error, Debug)]
 pub enum AstError {
@@ -29,6 +32,9 @@ pub type Result<T> = std::result::Result<T, AstError>;
 /// Represents an OpenSCAD expression
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum Expr {
+    /// An expression preserved by the SCAD importer when the structured expression parser does
+    /// not yet support its syntax (for example list comprehensions or let expressions).
+    Raw(String),
     /// Boolean literal
     Boolean(bool),
     /// Integer literal
@@ -172,6 +178,7 @@ impl Expr {
     /// Generate OpenSCAD code for this expression
     pub fn to_scad(&self) -> String {
         match self {
+            Expr::Raw(source) => source.clone(),
             Expr::Boolean(b) => b.to_string(),
             Expr::Integer(i) => i.to_string(),
             Expr::Float(f) => f.to_string(),
@@ -426,8 +433,17 @@ pub struct ModuleNode {
     /// Metadata for display
     pub display_name: Option<String>,
 
-    /// Source library (None = built-in, Some = third-party library name)
-    pub source_library: Option<String>,
+    /// A non-module statement preserved inside a module body.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_statement: Option<String>,
+
+    /// OpenSCAD debug/background/root/disable modifier attached to this invocation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modifier: Option<char>,
+
+    /// Control statements such as `else` do not use an argument list.
+    #[serde(default)]
+    pub omit_parentheses: bool,
 }
 
 impl ModuleNode {
@@ -439,7 +455,9 @@ impl ModuleNode {
             args,
             children: Vec::new(),
             display_name: None,
-            source_library: None,
+            raw_statement: None,
+            modifier: None,
+            omit_parentheses: false,
         }
     }
 
@@ -451,7 +469,9 @@ impl ModuleNode {
             args,
             children: Vec::new(),
             display_name: None,
-            source_library: None,
+            raw_statement: None,
+            modifier: None,
+            omit_parentheses: false,
         }
     }
 
@@ -556,7 +576,12 @@ impl ModuleNode {
     /// Generate OpenSCAD code
     pub fn to_scad(&self, indent: usize) -> String {
         let indent_str = " ".repeat(indent);
-        let args_str = if self.args.is_empty() {
+        if let Some(statement) = &self.raw_statement {
+            return format!("{}{}", indent_str, statement);
+        }
+        let args_str = if self.omit_parentheses {
+            String::new()
+        } else if self.args.is_empty() {
             "()".to_string()
         } else {
             let args = self
@@ -571,10 +596,13 @@ impl ModuleNode {
             format!("({})", args)
         };
 
+        let modifier = self
+            .modifier
+            .map_or_else(String::new, |value| value.to_string());
         if self.children.is_empty() {
-            format!("{}{}{};", indent_str, self.name, args_str)
+            format!("{}{}{}{};", indent_str, modifier, self.name, args_str)
         } else {
-            let mut result = format!("{}{}{} {{\n", indent_str, self.name, args_str);
+            let mut result = format!("{}{}{}{} {{\n", indent_str, modifier, self.name, args_str);
             for child in &self.children {
                 result.push_str(&child.to_scad(indent + 4));
                 result.push('\n');
@@ -672,6 +700,23 @@ impl ModuleDefinition {
 /// The root AST structure
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AstRoot {
+    /// Directory of an imported SCAD file, retained for resolving relative include/use paths.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_directory: Option<String>,
+
+    /// Virtual path of the editable entry source inside an embedded multi-file project.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry_source: Option<String>,
+
+    /// Original source files required by this project. The entry content is retained for
+    /// provenance; rendering replaces it with the current generated AST source.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub embedded_sources: Vec<EmbeddedSourceFile>,
+
+    /// Directed include/use relationships between embedded source files.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_dependencies: Vec<SourceDependency>,
+
     /// Global variable declarations
     pub global_variables: Vec<GlobalVariable>,
 
@@ -689,22 +734,22 @@ pub struct AstRoot {
 
     /// Used libraries
     pub uses: Vec<String>,
-
-    /// Loaded library files (JSON files that were used to load modules)
-    pub loaded_libraries: Vec<String>,
 }
 
 impl AstRoot {
     /// Create a new empty AST
     pub fn new() -> Self {
         Self {
+            source_directory: None,
+            entry_source: None,
+            embedded_sources: Vec::new(),
+            source_dependencies: Vec::new(),
             global_variables: Vec::new(),
             module_defines: Vec::new(),
             function_defines: Vec::new(),
             modules: Vec::new(),
             includes: Vec::new(),
             uses: Vec::new(),
-            loaded_libraries: Vec::new(),
         }
     }
 
@@ -1178,6 +1223,48 @@ impl AstRoot {
 
         result
     }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum EmbeddedSourceRole {
+    Entry,
+    Library,
+    Dependency,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmbeddedSourceFile {
+    /// Portable, relative path used when materializing the project for OpenSCAD.
+    pub virtual_path: String,
+    /// Original canonical path retained for diagnostics only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_path: Option<String>,
+    pub role: EmbeddedSourceRole,
+    /// Exact source text captured at import time.
+    pub content: String,
+    /// Definition-only index used to rebuild completion without the original files.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub global_variables: Vec<GlobalVariable>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub module_defines: Vec<ModuleDefinition>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub function_defines: Vec<FunctionDefinition>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceDependencyKind {
+    Include,
+    Use,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SourceDependency {
+    pub from: String,
+    pub to: String,
+    pub reference: String,
+    pub kind: SourceDependencyKind,
 }
 
 impl Default for AstRoot {

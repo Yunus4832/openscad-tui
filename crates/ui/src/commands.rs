@@ -1,7 +1,8 @@
 //! Commands module for OpenSCAD TUI
 
 use openscad_core::{Argument, ArgumentSelector, AstError, Expr, ModuleNode};
-use openscad_library::{LibraryError, ModuleDef};
+use openscad_library::ModuleDef;
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -9,17 +10,93 @@ use thiserror::Error;
 
 use crate::app::{App, InputMode, PendingModuleAction, Screen};
 use crate::command_registry::CommandType;
+use crate::project_import::{attach_scad_library, import_scad_project};
 
 const MAX_RECURSION_DEPTH: usize = 1000;
 
 pub fn cmd_render(app: &mut App) -> CommandResult<()> {
-    let source = app.ast.to_scad();
-    let current_file = app.current_file.clone();
+    let mut source = app.ast.to_scad();
+    if let Some(entry) = &app.ast.entry_source {
+        source = rewrite_absolute_source_references(&source, entry, &app.ast.source_dependencies);
+    }
+    let render_project =
+        app.ast
+            .entry_source
+            .as_ref()
+            .map(|entry| openscad_render::OpenScadProject {
+                entry_path: PathBuf::from(entry),
+                files: app
+                    .ast
+                    .embedded_sources
+                    .iter()
+                    .map(|source| openscad_render::OpenScadProjectFile {
+                        path: PathBuf::from(&source.virtual_path),
+                        content: rewrite_absolute_source_references(
+                            &source.content,
+                            &source.virtual_path,
+                            &app.ast.source_dependencies,
+                        ),
+                    })
+                    .collect(),
+            });
+    let source_context = app
+        .ast
+        .source_directory
+        .clone()
+        .or_else(|| app.current_file.clone());
     app.model_preview
-        .render(source, current_file.as_deref())
+        .render(source, source_context.as_deref(), render_project)
         .map_err(CommandError::Custom)?;
     app.enter_model_screen();
     Ok(())
+}
+
+fn rewrite_absolute_source_references(
+    source: &str,
+    from: &str,
+    dependencies: &[openscad_core::SourceDependency],
+) -> String {
+    let mut rewritten = source.to_string();
+    for dependency in dependencies.iter().filter(|dependency| {
+        dependency.from == from && Path::new(&dependency.reference).is_absolute()
+    }) {
+        let directive = match dependency.kind {
+            openscad_core::SourceDependencyKind::Include => "include",
+            openscad_core::SourceDependencyKind::Use => "use",
+        };
+        let original = format!("{directive} <{}>", dependency.reference);
+        let relative = relative_virtual_path(from, &dependency.to);
+        rewritten = rewritten.replace(&original, &format!("{directive} <{relative}>"));
+    }
+    rewritten
+}
+
+fn relative_virtual_path(from_file: &str, to_file: &str) -> String {
+    let from: Vec<_> = Path::new(from_file)
+        .parent()
+        .unwrap_or_else(|| Path::new(""))
+        .components()
+        .filter_map(|component| match component {
+            std::path::Component::Normal(value) => Some(value.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .collect();
+    let to: Vec<_> = Path::new(to_file)
+        .components()
+        .filter_map(|component| match component {
+            std::path::Component::Normal(value) => Some(value.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .collect();
+    let common = from
+        .iter()
+        .zip(&to)
+        .take_while(|(left, right)| left == right)
+        .count();
+    std::iter::repeat_n("..".to_string(), from.len() - common)
+        .chain(to.into_iter().skip(common))
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 pub fn cmd_preview(app: &mut App, mode: &str) -> CommandResult<()> {
@@ -109,9 +186,6 @@ pub enum CommandError {
     #[error("AST error: {0}")]
     AstError(#[from] AstError),
 
-    #[error("Library error: {0}")]
-    LibraryError(#[from] LibraryError),
-
     #[error("Parameter parsing error: {0}")]
     ParameterError(String),
 
@@ -131,7 +205,6 @@ pub type CommandResult<T> = std::result::Result<T, CommandError>;
 struct PreparedModule {
     node: ModuleNode,
     accepts_children: bool,
-    source_file: Option<String>,
 }
 
 fn prepare_module(
@@ -155,26 +228,15 @@ fn prepare_module(
             .unwrap()
             .as_nanos()
     );
-    let mut node = if definition.accepts_children {
+    let node = if definition.accepts_children {
         ModuleNode::new_container(id, module_name.to_string(), args)
     } else {
         ModuleNode::new_leaf(id, module_name.to_string(), args)
     };
-    let (source_library, source_file) = app.library.get_module_source(module_name);
-    node.source_library = source_library;
     Ok(PreparedModule {
         node,
         accepts_children: definition.accepts_children,
-        source_file,
     })
-}
-
-fn add_module_include(app: &mut App, source_file: Option<&String>) {
-    if let Some(source_file) = source_file {
-        if !app.ast.includes.contains(source_file) {
-            app.ast_mut().includes.push(source_file.clone());
-        }
-    }
 }
 
 /// Insert command
@@ -223,7 +285,6 @@ fn insert_prepared_module(
         if selected_nodes.is_empty() {
             return Err(CommandError::NoChildrenSelected);
         }
-        add_module_include(app, prepared.source_file.as_ref());
         insert_container_with_selected_nodes(app, prepared.node, &selected_nodes)
     } else {
         let module = prepared.node;
@@ -244,8 +305,6 @@ fn insert_prepared_module(
                 "children module can only be used inside module definitions".to_string(),
             ));
         }
-
-        add_module_include(app, prepared.source_file.as_ref());
 
         // Special case: inserting a module with the same name as the module definition when selected is the definition header
         // This should create an instance in the modules section, not add to definition body
@@ -332,8 +391,7 @@ fn insert_prepared_module(
 
         // If we inserted a children module into a module definition, update the custom module's accepts_children flag
         if module_name == "children" && in_module_def {
-            app.library
-                .reload_custom_modules_from_ast(&app.ast.module_defines);
+            reload_project_definitions(app);
         }
 
         Ok(node_id)
@@ -380,10 +438,7 @@ pub fn cmd_delete(app: &mut App, node_id: &str) -> CommandResult<()> {
             let _ = app.ast_mut().delete_node(target_id);
         }
     }
-    app.library
-        .reload_custom_functions_from_ast(&app.ast.function_defines);
-    app.library
-        .reload_custom_modules_from_ast(&app.ast.module_defines);
+    reload_project_definitions(app);
     app.selected_nodes.clear();
 
     app.restore_tree_selection();
@@ -931,11 +986,12 @@ pub fn cmd_write_force(app: &mut App, filename: &str) -> CommandResult<()> {
     Ok(())
 }
 
-/// Load AST from JSON file
+/// Load a JSON project.
 pub fn cmd_load(app: &mut App, filename: &str) -> CommandResult<()> {
     if !app.saved {
         return Err(CommandError::Custom(
-            "File is not saved, use 'e!' or 'edit!' to force load file".to_string(),
+            "File is not saved, use 'open!' to discard changes and open another project"
+                .to_string(),
         ));
     }
     cmd_load_force(app, filename)
@@ -954,6 +1010,12 @@ pub fn cmd_load_force(app: &mut App, filename: &str) -> CommandResult<()> {
         )));
     }
 
+    if has_extension(&expanded_filename, "scad") {
+        return Err(CommandError::Custom(
+            "Use 'edit <file.scad>' to parse and edit OpenSCAD source files".to_string(),
+        ));
+    }
+
     // Read file
     let content = fs::read_to_string(&expanded_filename).map_err(|e| {
         CommandError::Custom(format!(
@@ -963,40 +1025,102 @@ pub fn cmd_load_force(app: &mut App, filename: &str) -> CommandResult<()> {
         ))
     })?;
 
-    // Deserialize from JSON
     let ast = serde_json::from_str(&content)
-        .map_err(|e| CommandError::Custom(format!("Failed to parse JSON: {}", e)))?;
+        .map_err(|e| CommandError::Custom(format!("Failed to parse JSON project: {}", e)))?;
 
     // Replace AST
     app.ast = Arc::new(ast);
     app.model_preview.mark_stale();
 
     // First, reload custom modules in library manager
-    app.library
-        .reload_custom_modules_from_ast(&app.ast.module_defines);
-    app.library
-        .reload_custom_functions_from_ast(&app.ast.function_defines);
-
-    // Reload libraries that were used in the project
-    for library_file in &app.ast.loaded_libraries {
-        let expanded_path = expand_tilde(library_file);
-        if expanded_path.exists() {
-            if let Err(e) = app.library.load_library(&expanded_path) {
-                // Log warning but continue loading other libraries
-                eprintln!("Warning: Could not load library '{}': {}", library_file, e);
-            }
-        } else {
-            // Library file doesn't exist anymore
-            eprintln!("Warning: Library file '{}' no longer exists", library_file);
-        }
-    }
+    reload_project_definitions(app);
 
     // Reset navigation state
     app.selected_nodes.clear();
+    app.undo_stack.clear();
+    app.redo_stack.clear();
     app.tree_state.borrow_mut().select(Vec::new());
     app.current_file = Some(filename.to_string());
+    app.mark_saved();
 
     Ok(())
+}
+
+/// Parse an OpenSCAD source file into a new structured project.
+pub fn cmd_edit_scad(app: &mut App, filename: &str) -> CommandResult<()> {
+    if !app.saved {
+        return Err(CommandError::Custom(
+            "File is not saved; save or discard the current project before importing".to_string(),
+        ));
+    }
+    cmd_edit_scad_force(app, filename)
+}
+
+pub fn cmd_edit_scad_force(app: &mut App, filename: &str) -> CommandResult<()> {
+    let path = expand_tilde(filename);
+    if !has_extension(&path, "scad") {
+        return Err(CommandError::Custom(
+            "edit requires a .scad source file".to_string(),
+        ));
+    }
+    app.ast = Arc::new(import_scad_project(&path).map_err(CommandError::Custom)?);
+    reload_project_definitions(app);
+    app.selected_nodes.clear();
+    app.undo_stack.clear();
+    app.redo_stack.clear();
+    app.tree_state.borrow_mut().select(Vec::new());
+    app.current_file = None;
+    app.saved = false;
+    app.model_preview.mark_stale();
+    app.set_info(&format!(
+        "Imported '{}' as a structured project; use write <project.json> to save it",
+        path.display()
+    ));
+    Ok(())
+}
+
+fn has_extension(path: &Path, expected: &str) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case(expected))
+}
+
+fn reload_project_definitions(app: &mut App) {
+    let reachable_sources = reachable_source_paths(&app.ast);
+    let mut modules = Vec::new();
+    let mut functions = Vec::new();
+    for source in app.ast.embedded_sources.iter().filter(|source| {
+        source.role != openscad_core::EmbeddedSourceRole::Entry
+            && reachable_sources.contains(&source.virtual_path)
+    }) {
+        modules.extend(source.module_defines.clone());
+        functions.extend(source.function_defines.clone());
+    }
+    // Entry definitions are appended last so the LibraryManager's name map gives them priority.
+    modules.extend(app.ast.module_defines.clone());
+    functions.extend(app.ast.function_defines.clone());
+    app.library.reload_custom_modules_from_ast(&modules);
+    app.library.reload_custom_functions_from_ast(&functions);
+}
+
+fn reachable_source_paths(ast: &openscad_core::AstRoot) -> HashSet<String> {
+    let mut reachable = HashSet::new();
+    let Some(entry) = ast.entry_source.clone() else {
+        return reachable;
+    };
+    let mut pending = vec![entry];
+    while let Some(source) = pending.pop() {
+        if !reachable.insert(source.clone()) {
+            continue;
+        }
+        pending.extend(
+            ast.source_dependencies
+                .iter()
+                .filter(|dependency| dependency.from == source)
+                .map(|dependency| dependency.to.clone()),
+        );
+    }
+    reachable
 }
 
 /// Export AST to OpenSCAD code file
@@ -1030,47 +1154,144 @@ pub fn cmd_export(app: &App, filename: &str) -> CommandResult<()> {
     Ok(())
 }
 
-/// Load a library from a JSON file
-/// This command loads third-party module libraries into the LibraryManager
-/// Libraries should be in JSON format with the same schema as stdlib.json
+/// Load and embed a SCAD source library without activating it.
 pub fn cmd_load_library(app: &mut App, filename: &str) -> CommandResult<()> {
-    // Expand tilde in filename
-    let expanded_path = expand_tilde(filename);
+    let path = expand_tilde(filename);
+    if !has_extension(&path, "scad") {
+        return Err(CommandError::Custom(
+            "library requires a .scad source file".to_string(),
+        ));
+    }
+    let canonical = path
+        .canonicalize()
+        .map_err(|error| {
+            CommandError::Custom(format!("Failed to resolve '{}': {error}", path.display()))
+        })?
+        .to_string_lossy()
+        .into_owned();
+    let existing_target = app
+        .ast
+        .embedded_sources
+        .iter()
+        .find(|source| {
+            source.role != openscad_core::EmbeddedSourceRole::Entry
+                && source.original_path.as_deref() == Some(&canonical)
+        })
+        .map(|source| source.virtual_path.clone());
+    app.push_undo();
+    let target = match existing_target {
+        Some(target) => {
+            if let Some(source) = app
+                .ast_mut()
+                .embedded_sources
+                .iter_mut()
+                .find(|source| source.virtual_path == target)
+            {
+                source.role = openscad_core::EmbeddedSourceRole::Library;
+            }
+            target
+        }
+        None => attach_scad_library(app.ast_mut(), &path).map_err(CommandError::Custom)?,
+    };
+    reload_project_definitions(app);
+    app.model_preview.mark_stale();
+    app.set_info(&format!(
+        "Loaded SCAD library '{target}'; use 'use {}' to activate it",
+        Path::new(&target)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(&target)
+    ));
+    Ok(())
+}
 
-    // Check if file exists
-    if !expanded_path.exists() {
+/// Activate a previously loaded SCAD library in the current entry source.
+pub fn cmd_use_library(app: &mut App, name: &str) -> CommandResult<()> {
+    cmd_activate_library(app, name, openscad_core::SourceDependencyKind::Use)
+}
+
+/// Include a previously loaded SCAD library in the current entry source.
+pub fn cmd_include_library(app: &mut App, name: &str) -> CommandResult<()> {
+    cmd_activate_library(app, name, openscad_core::SourceDependencyKind::Include)
+}
+
+fn cmd_activate_library(
+    app: &mut App,
+    name: &str,
+    kind: openscad_core::SourceDependencyKind,
+) -> CommandResult<()> {
+    let matches = app
+        .ast
+        .embedded_sources
+        .iter()
+        .filter(|source| source.role == openscad_core::EmbeddedSourceRole::Library)
+        .filter(|source| library_source_matches(source, name))
+        .map(|source| source.virtual_path.clone())
+        .collect::<Vec<_>>();
+    let target = match matches.as_slice() {
+        [] => {
+            return Err(CommandError::Custom(format!(
+                "SCAD library '{name}' is not loaded; use 'library <file.scad>' first"
+            )))
+        }
+        [target] => target.clone(),
+        _ => {
+            return Err(CommandError::Custom(format!(
+                "SCAD library name '{name}' is ambiguous; use its embedded path"
+            )))
+        }
+    };
+    let entry = app
+        .ast
+        .entry_source
+        .clone()
+        .ok_or_else(|| CommandError::Custom("Project has no entry source".to_string()))?;
+    let reference = relative_virtual_path(&entry, &target);
+    let dependency = openscad_core::SourceDependency {
+        from: entry,
+        to: target.clone(),
+        reference: reference.clone(),
+        kind,
+    };
+    let directive = match kind {
+        openscad_core::SourceDependencyKind::Include => "include",
+        openscad_core::SourceDependencyKind::Use => "use",
+    };
+    if app.ast.source_dependencies.contains(&dependency) {
         return Err(CommandError::Custom(format!(
-            "Library file '{}' not found",
-            expanded_path.display()
+            "SCAD library '{name}' is already activated with {directive}"
         )));
     }
 
-    // Load library
-    app.library.load_library(&expanded_path)?;
-
-    // Read the library file to get the 'file' property
-    let library_content = std::fs::read_to_string(&expanded_path).map_err(|e| {
-        CommandError::Custom(format!(
-            "Could not read library file '{}': {}",
-            expanded_path.display(),
-            e
-        ))
-    })?;
-
-    if let Ok(library_def) = serde_json::from_str::<openscad_library::LibraryDef>(&library_content)
-    {
-        // Add the .scad file to includes so it's available when modules from this library are used
-        if !app.ast.includes.contains(&library_def.file) {
-            app.ast_mut().includes.push(library_def.file);
+    app.push_undo();
+    match kind {
+        openscad_core::SourceDependencyKind::Include => {
+            if !app.ast.includes.contains(&reference) {
+                app.ast_mut().includes.push(reference);
+            }
+        }
+        openscad_core::SourceDependencyKind::Use => {
+            if !app.ast.uses.contains(&reference) {
+                app.ast_mut().uses.push(reference);
+            }
         }
     }
-
-    // Record the library JSON file in the AST so it can be reloaded when the project is opened
-    if !app.ast.loaded_libraries.contains(&filename.to_string()) {
-        app.ast_mut().loaded_libraries.push(filename.to_string());
-    }
-
+    app.ast_mut().source_dependencies.push(dependency);
+    reload_project_definitions(app);
+    app.model_preview.mark_stale();
+    app.set_info(&format!(
+        "Activated SCAD library '{target}' with {directive}"
+    ));
     Ok(())
+}
+
+fn library_source_matches(source: &openscad_core::EmbeddedSourceFile, name: &str) -> bool {
+    if source.virtual_path == name {
+        return true;
+    }
+    let path = Path::new(&source.virtual_path);
+    path.file_name().and_then(|value| value.to_str()) == Some(name)
+        || path.file_stem().and_then(|value| value.to_str()) == Some(name)
 }
 
 /// Define a global variable
@@ -1237,8 +1458,7 @@ pub fn cmd_funcdef(app: &mut App, func_def: &str) -> CommandResult<()> {
     }
 
     // Reload custom functions in library manager
-    app.library
-        .reload_custom_functions_from_ast(&app.ast.function_defines);
+    reload_project_definitions(app);
 
     Ok(())
 }
@@ -1292,7 +1512,7 @@ fn general_help_doc(app: &App) -> Vec<String> {
         "  t/r/s              start translate/rotate/scale command".to_string(),
         "  d                  delete current or selected nodes".to_string(),
         "  u / Ctrl+R         undo / redo".to_string(),
-        "  w/e/L              save / load project / load library".to_string(),
+        "  w/o/e/L            save / open project / edit SCAD / load library".to_string(),
         "  :                  enter command mode".to_string(),
         "  ?                  open this help".to_string(),
         "  q / Ctrl+C         quit".to_string(),
@@ -1405,8 +1625,7 @@ pub fn cmd_moddef(app: &mut App, module_name: &str, params: Option<&str>) -> Com
     app.ast_mut()
         .upsert_module_define(module_def)
         .map_err(CommandError::AstError)?;
-    app.library
-        .reload_custom_modules_from_ast(&app.ast.module_defines);
+    reload_project_definitions(app);
 
     // Update UI selection to show the new module definition
     if let Some(path) = app.find_node_path(&format!("__moddef_{}", module_name)) {
@@ -1783,7 +2002,6 @@ fn replace_with_prepared_module(
     }
 
     let replacement_id = prepared.node.id.clone();
-    add_module_include(app, prepared.source_file.as_ref());
 
     app.ast_mut().replace_node(node_id, prepared.node)?;
 
@@ -2298,27 +2516,63 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
     ));
 
     registry.register(CommandDef::new(
+        "open",
+        vec!["o"],
+        |app, args| {
+            if args.len() != 1 {
+                return Err(CommandError::InvalidCommand(
+                    "Usage: open <project.json>".to_string(),
+                ));
+            }
+            cmd_load(app, args[0])
+        },
+        "Open an existing JSON project",
+        1,
+        Some(1),
+        "open <project.json>",
+        vec!["open project.json"],
+        CommandType::File,
+        false,
+        true,
+    ));
+
+    registry.register(CommandDef::new(
+        "open!",
+        vec!["o!"],
+        |app, args| {
+            if args.len() != 1 {
+                return Err(CommandError::InvalidCommand(
+                    "Usage: open! <project.json>".to_string(),
+                ));
+            }
+            cmd_load_force(app, args[0])
+        },
+        "Open a JSON project and discard unsaved changes",
+        1,
+        Some(1),
+        "open! <project.json>",
+        vec!["open! project.json"],
+        CommandType::File,
+        false,
+        true,
+    ));
+
+    registry.register(CommandDef::new(
         "edit",
         vec!["e"],
         |app, args| {
-            if args.len() > 1 {
+            if args.len() != 1 {
                 return Err(CommandError::InvalidCommand(
-                    "edit command takes at most 1 argument".to_string(),
+                    "Usage: edit <file.scad>".to_string(),
                 ));
             }
-            let file_name = if let Some(file) = args.first() {
-                (*file).to_string()
-            } else {
-                // Use current selection (handled in cmd_delete)
-                String::new()
-            };
-            cmd_load(app, &file_name)
+            cmd_edit_scad(app, args[0])
         },
-        "Load AST from JSON file",
-        0,
+        "Parse an OpenSCAD source file into a structured project",
+        1,
         Some(1),
-        "edit [filename]",
-        vec!["edit test.json", "e project.json"],
+        "edit <file.scad>",
+        vec!["edit existing.scad"],
         CommandType::File,
         false,
         true,
@@ -2328,24 +2582,18 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
         "edit!",
         vec!["e!"],
         |app, args| {
-            if args.len() > 1 {
+            if args.len() != 1 {
                 return Err(CommandError::InvalidCommand(
-                    "edit! command takes at most 1 argument".to_string(),
+                    "Usage: edit! <file.scad>".to_string(),
                 ));
             }
-            let file_name = if let Some(file) = args.first() {
-                (*file).to_string()
-            } else {
-                // Use current selection (handled in cmd_delete)
-                String::new()
-            };
-            cmd_load_force(app, &file_name)
+            cmd_edit_scad_force(app, args[0])
         },
-        "Force load AST from JSON file",
-        0,
+        "Parse an OpenSCAD file and discard unsaved changes",
+        1,
         Some(1),
-        "edit! [filename]",
-        vec!["edit! test.json", "e! project.json"],
+        "edit! <file.scad>",
+        vec!["edit! existing.scad"],
         CommandType::File,
         false,
         true,
@@ -2383,12 +2631,54 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
             }
             cmd_load_library(app, args[0])
         },
-        "Load a library from JSON file",
+        "Load and embed a SCAD source library without activating it",
         1,
         Some(1),
-        "library <filename>",
-        vec!["library mylib.json"],
+        "library <file.scad>",
+        vec!["library gears.scad"],
         CommandType::File,
+        true,
+        true,
+    ));
+
+    registry.register(CommandDef::new(
+        "use",
+        vec![] as Vec<String>,
+        |app, args| {
+            if args.len() != 1 {
+                return Err(CommandError::InvalidCommand(
+                    "use command requires a loaded library name".to_string(),
+                ));
+            }
+            cmd_use_library(app, args[0])
+        },
+        "Activate a loaded SCAD library in the current entry source",
+        1,
+        Some(1),
+        "use <library>",
+        vec!["use gears.scad"],
+        CommandType::LibraryReference,
+        true,
+        true,
+    ));
+
+    registry.register(CommandDef::new(
+        "include",
+        vec![] as Vec<String>,
+        |app, args| {
+            if args.len() != 1 {
+                return Err(CommandError::InvalidCommand(
+                    "include command requires a loaded library name".to_string(),
+                ));
+            }
+            cmd_include_library(app, args[0])
+        },
+        "Include a loaded SCAD library in the current entry source",
+        1,
+        Some(1),
+        "include <library>",
+        vec!["include gears.scad"],
+        CommandType::LibraryReference,
         true,
         true,
     ));
@@ -3032,6 +3322,157 @@ mod tests {
     use super::*;
     #[allow(unused_imports)]
     use App;
+
+    #[test]
+    fn test_render_rewrites_embedded_absolute_dependencies_to_virtual_paths() {
+        let dependencies = vec![openscad_core::SourceDependency {
+            from: "workspace/model/main.scad".to_string(),
+            to: "shared/lib/parts.scad".to_string(),
+            reference: "/original/shared/lib/parts.scad".to_string(),
+            kind: openscad_core::SourceDependencyKind::Use,
+        }];
+        let rewritten = rewrite_absolute_source_references(
+            "use </original/shared/lib/parts.scad>;",
+            "workspace/model/main.scad",
+            &dependencies,
+        );
+        assert_eq!(rewritten, "use <../../shared/lib/parts.scad>;");
+    }
+
+    #[test]
+    fn test_library_loads_without_activation_then_use_survives_project_reload() {
+        let directory = tempfile::tempdir().unwrap();
+        let library_directory = directory.path().join("source-library");
+        fs::create_dir(&library_directory).unwrap();
+        let library_path = library_directory.join("gears.scad");
+        fs::write(
+            &library_path,
+            "include <helpers.scad>; module gear(teeth=20) { helper(); }",
+        )
+        .unwrap();
+        fs::write(
+            library_directory.join("helpers.scad"),
+            "module helper() { cube(1); } function pitch(d, teeth) = d / teeth;",
+        )
+        .unwrap();
+        let project_path = directory.path().join("project.json");
+        let mut app = App::new();
+
+        cmd_load_library(&mut app, library_path.to_str().unwrap()).unwrap();
+        assert!(app.library.get_module("gear").is_none());
+        assert!(app.library.get_module("helper").is_none());
+        assert!(app.library.get_function("pitch").is_none());
+        assert_eq!(app.ast.embedded_sources.len(), 3);
+        assert_eq!(app.ast.source_dependencies.len(), 1);
+        assert_eq!(app.ast.uses.len(), 0);
+        assert!(app.ast.embedded_sources.iter().any(|source| {
+            source.role == openscad_core::EmbeddedSourceRole::Library
+                && source.virtual_path.ends_with("/gears.scad")
+        }));
+
+        cmd_use_library(&mut app, "gears.scad").unwrap();
+        assert!(app.library.get_module("gear").is_some());
+        assert!(app.library.get_module("helper").is_some());
+        assert!(app.library.get_function("pitch").is_some());
+        assert_eq!(app.ast.source_dependencies.len(), 2);
+        assert_eq!(app.ast.uses.len(), 1);
+
+        cmd_write_force(&mut app, project_path.to_str().unwrap()).unwrap();
+        fs::remove_dir_all(&library_directory).unwrap();
+        let mut restored = App::new();
+        cmd_load_force(&mut restored, project_path.to_str().unwrap()).unwrap();
+        assert!(restored.library.get_module("gear").is_some());
+        assert!(restored.library.get_module("helper").is_some());
+        assert!(restored.library.get_function("pitch").is_some());
+    }
+
+    #[test]
+    fn test_use_requires_a_loaded_library_and_rejects_duplicates() {
+        let mut app = App::new();
+        let error = cmd_use_library(&mut app, "missing.scad").unwrap_err();
+        assert!(error.to_string().contains("not loaded"));
+
+        let directory = tempfile::tempdir().unwrap();
+        let library_path = directory.path().join("parts.scad");
+        fs::write(&library_path, "module part() { cube(1); }").unwrap();
+        cmd_load_library(&mut app, library_path.to_str().unwrap()).unwrap();
+        cmd_use_library(&mut app, "parts").unwrap();
+
+        let error = cmd_use_library(&mut app, "parts.scad").unwrap_err();
+        assert!(error.to_string().contains("already activated with use"));
+    }
+
+    #[test]
+    fn test_include_activates_loaded_library_with_include_semantics() {
+        let directory = tempfile::tempdir().unwrap();
+        let library_path = directory.path().join("scene.scad");
+        fs::write(
+            &library_path,
+            "global_size = 10; module scene_part() { cube(global_size); } scene_part();",
+        )
+        .unwrap();
+        let mut app = App::new();
+
+        cmd_load_library(&mut app, library_path.to_str().unwrap()).unwrap();
+        cmd_include_library(&mut app, "scene.scad").unwrap();
+
+        assert!(app.ast.uses.is_empty());
+        assert_eq!(app.ast.includes.len(), 1);
+        assert!(app.ast.to_scad().starts_with("include <"));
+        assert!(app.library.get_module("scene_part").is_some());
+        assert!(app.ast.source_dependencies.iter().any(|dependency| {
+            dependency.kind == openscad_core::SourceDependencyKind::Include
+                && dependency.to.ends_with("/scene.scad")
+        }));
+    }
+
+    #[test]
+    fn test_edit_scad_parses_a_structured_unsaved_project() {
+        let directory = tempfile::tempdir().unwrap();
+        let source_path = directory.path().join("existing.scad");
+        let source =
+            "include <parts/common.scad>;\nmodule bracket(size=10) { cube(size); }\nbracket(20);\n";
+        fs::write(&source_path, source).unwrap();
+        let mut app = App::new();
+
+        cmd_edit_scad_force(&mut app, source_path.to_str().unwrap()).unwrap();
+
+        assert_eq!(app.ast.includes, ["parts/common.scad"]);
+        assert_eq!(app.ast.modules.len(), 1);
+        assert_eq!(app.ast.modules[0].name, "bracket");
+        assert!(app.library.get_module("bracket").is_some());
+        assert_eq!(app.current_file, None);
+        assert!(!app.saved);
+    }
+
+    #[test]
+    fn test_imported_scad_is_stored_inside_saved_json_project() {
+        let directory = tempfile::tempdir().unwrap();
+        let source_directory = directory.path().join("original");
+        fs::create_dir(&source_directory).unwrap();
+        let source_path = source_directory.join("shape.scad");
+        let library_path = source_directory.join("parts.scad");
+        fs::write(&source_path, "use <parts.scad>;\npart(size=5);\n").unwrap();
+        fs::write(
+            &library_path,
+            "module part(size=1) { unsupported dependency logic ??; }\n",
+        )
+        .unwrap();
+        let project_path = directory.path().join("shape-project.json");
+        let mut app = App::new();
+
+        cmd_edit_scad_force(&mut app, source_path.to_str().unwrap()).unwrap();
+        assert!(app.library.get_module("part").is_some());
+        cmd_write_force(&mut app, project_path.to_str().unwrap()).unwrap();
+        fs::remove_dir_all(&source_directory).unwrap();
+
+        let mut restored = App::new();
+        cmd_load_force(&mut restored, project_path.to_str().unwrap()).unwrap();
+        assert_eq!(restored.ast.embedded_sources.len(), 2);
+        assert!(restored.library.get_module("part").is_some());
+        assert!(restored.ast.to_scad().contains("part(size=5);"));
+        assert!(restored.saved);
+    }
 
     #[test]
     fn test_cmd_help_generates_current_command_overview() {
