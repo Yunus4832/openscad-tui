@@ -30,6 +30,7 @@ pub enum CommandType {
     LibraryReference,
     ProjectSource,
     New,
+    Export,
 }
 
 /// Command type - used for dynamic completion context analysis

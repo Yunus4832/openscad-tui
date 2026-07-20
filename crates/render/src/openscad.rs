@@ -82,13 +82,26 @@ impl OpenScadGenerator {
     pub fn timeout(&self) -> Duration {
         self.timeout
     }
-}
 
-impl MeshGenerator for OpenScadGenerator {
-    fn generate(&self, scad_source: &str) -> Result<MeshGeneration> {
-        let mut temporary_root = None;
-        let mut temporary_source = None;
-        let (source_path, directory, output_directory) = if let Some(project) = &self.project {
+    /// Export an OpenSCAD artifact using the format inferred from the output extension.
+    pub fn export(
+        &self,
+        scad_source: &str,
+        output_path: impl AsRef<Path>,
+    ) -> Result<GenerationDiagnostics> {
+        let prepared = self.prepare_source(scad_source)?;
+        let output_path = output_path.as_ref();
+        if let Some(parent) = output_path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            fs::create_dir_all(parent).map_err(io_error)?;
+        }
+        self.run_openscad(&prepared.source_path, &prepared.directory, output_path)
+    }
+
+    fn prepare_source(&self, scad_source: &str) -> Result<PreparedSource> {
+        if let Some(project) = &self.project {
             let root = tempfile::tempdir().map_err(io_error)?;
             materialize_project(root.path(), project)?;
             let source_path = safe_project_path(root.path(), &project.entry_path)?;
@@ -101,16 +114,20 @@ impl MeshGenerator for OpenScadGenerator {
                 .unwrap_or_else(|| root.path())
                 .to_path_buf();
             let output_directory = root.path().to_path_buf();
-            temporary_root = Some(root);
-            (source_path, directory, output_directory)
+            Ok(PreparedSource {
+                source_path,
+                directory,
+                output_directory,
+                _root: Some(root),
+                _source: None,
+            })
         } else {
-            let root = match &self.working_directory {
-                Some(directory) => directory.clone(),
+            let (root, root_guard) = match &self.working_directory {
+                Some(directory) => (directory.clone(), None),
                 None => {
                     let root = tempfile::tempdir().map_err(io_error)?;
                     let path = root.path().to_path_buf();
-                    temporary_root = Some(root);
-                    path
+                    (path, Some(root))
                 }
             };
             let mut source = Builder::new()
@@ -120,28 +137,34 @@ impl MeshGenerator for OpenScadGenerator {
                 .map_err(io_error)?;
             source.write_all(scad_source.as_bytes()).map_err(io_error)?;
             source.flush().map_err(io_error)?;
-            let path = source.path().to_path_buf();
-            temporary_source = Some(source);
-            (path, root.clone(), root)
-        };
-        let _keep_temporary_root_alive = &temporary_root;
-        let _keep_temporary_source_alive = &temporary_source;
-        let output = Builder::new()
-            .prefix("openscad-tui-")
-            .suffix(".off")
-            .tempfile_in(&output_directory)
-            .map_err(io_error)?;
-        let stdout_path = output.path().with_extension("stdout.log");
-        let stderr_path = output.path().with_extension("stderr.log");
+            Ok(PreparedSource {
+                source_path: source.path().to_path_buf(),
+                directory: root.clone(),
+                output_directory: root,
+                _root: root_guard,
+                _source: Some(source),
+            })
+        }
+    }
+
+    fn run_openscad(
+        &self,
+        source_path: &Path,
+        directory: &Path,
+        output_path: &Path,
+    ) -> Result<GenerationDiagnostics> {
+        let logs = tempfile::tempdir().map_err(io_error)?;
+        let stdout_path = logs.path().join("stdout.log");
+        let stderr_path = logs.path().join("stderr.log");
         let stdout_file = File::create(&stdout_path).map_err(io_error)?;
         let stderr_file = File::create(&stderr_path).map_err(io_error)?;
 
         let started = Instant::now();
         let mut child = Command::new(&self.executable)
-            .current_dir(&directory)
+            .current_dir(directory)
             .arg("-o")
-            .arg(output.path())
-            .arg(&source_path)
+            .arg(output_path)
+            .arg(source_path)
             .stdout(Stdio::from(stdout_file))
             .stderr(Stdio::from(stderr_file))
             .spawn()
@@ -158,35 +181,50 @@ impl MeshGenerator for OpenScadGenerator {
             None => {
                 child.kill().map_err(io_error)?;
                 let _ = child.wait();
-                cleanup_log(&stdout_path);
-                cleanup_log(&stderr_path);
                 return Err(RenderError::OpenScadTimeout {
                     milliseconds: self.timeout.as_millis(),
                 });
             }
         };
         let elapsed = started.elapsed();
-        let stdout = fs::read_to_string(&stdout_path).unwrap_or_default();
-        let stderr = fs::read_to_string(&stderr_path).unwrap_or_default();
-        cleanup_log(&stdout_path);
-        cleanup_log(&stderr_path);
+        let stdout = fs::read_to_string(stdout_path).unwrap_or_default();
+        let stderr = fs::read_to_string(stderr_path).unwrap_or_default();
         if !status.success() {
             return Err(RenderError::OpenScadFailed {
                 exit_code: status.code(),
                 stderr,
             });
         }
+        Ok(GenerationDiagnostics {
+            stdout,
+            stderr,
+            elapsed,
+        })
+    }
+}
+
+struct PreparedSource {
+    source_path: PathBuf,
+    directory: PathBuf,
+    output_directory: PathBuf,
+    _root: Option<tempfile::TempDir>,
+    _source: Option<tempfile::NamedTempFile>,
+}
+
+impl MeshGenerator for OpenScadGenerator {
+    fn generate(&self, scad_source: &str) -> Result<MeshGeneration> {
+        let prepared = self.prepare_source(scad_source)?;
+        let output = Builder::new()
+            .prefix("openscad-tui-")
+            .suffix(".off")
+            .tempfile_in(&prepared.output_directory)
+            .map_err(io_error)?;
+        let diagnostics =
+            self.run_openscad(&prepared.source_path, &prepared.directory, output.path())?;
 
         let off_source = fs::read_to_string(output.path()).map_err(io_error)?;
         let mesh = parse_off(&off_source)?;
-        Ok(MeshGeneration {
-            mesh,
-            diagnostics: GenerationDiagnostics {
-                stdout,
-                stderr,
-                elapsed,
-            },
-        })
+        Ok(MeshGeneration { mesh, diagnostics })
     }
 }
 
@@ -222,10 +260,6 @@ fn safe_project_path(root: &Path, relative: &Path) -> Result<PathBuf> {
 
 fn io_error(error: std::io::Error) -> RenderError {
     RenderError::Io(error.to_string())
-}
-
-fn cleanup_log(path: &Path) {
-    let _ = fs::remove_file(path);
 }
 
 #[cfg(test)]
@@ -296,6 +330,32 @@ mod tests {
             .generate("// edited_main\ninclude <lib/parts.scad>;\npart();")
             .unwrap();
         assert_eq!(generation.mesh.triangle_count(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exports_project_artifacts_with_the_requested_extension() {
+        let (_directory, executable) = executable_script(
+            "#!/bin/sh\nentry_dir=$(dirname \"$3\")\ntest -f \"$entry_dir/lib/parts.scad\" || exit 8\nprintf 'solid exported\\nendsolid exported\\n' > \"$2\"\n",
+        );
+        let project = OpenScadProject {
+            entry_path: PathBuf::from("main.scad"),
+            files: vec![OpenScadProjectFile {
+                path: PathBuf::from("lib/parts.scad"),
+                content: "module part() { cube(1); }".to_string(),
+            }],
+        };
+        let output_directory = tempfile::tempdir().unwrap();
+        let output = output_directory.path().join("assembly.stl");
+
+        OpenScadGenerator::new(executable)
+            .with_project(project)
+            .export("use <lib/parts.scad>;\npart();", &output)
+            .unwrap();
+
+        assert!(fs::read_to_string(output)
+            .unwrap()
+            .contains("solid exported"));
     }
 
     #[test]

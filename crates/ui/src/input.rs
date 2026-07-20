@@ -1047,6 +1047,16 @@ fn analyze_input_context(input: &str, app: &App) -> CompletionContext {
             CommandType::Protocol => protocol_command_context(input, &parts),
             CommandType::ProjectSource => project_source_command_context(input, &parts, app),
             CommandType::New => literal_command_context(input, &parts, &["project", "file"], &[]),
+            CommandType::Export => {
+                if parts.len() == 1 || (parts.len() == 2 && !input.ends_with(' ')) {
+                    literal_command_context(input, &parts, &["source", "tree", "model"], &[])
+                } else {
+                    let kind = parts.get(1).copied().unwrap_or("");
+                    let prefix = format!("{} {kind}", parts[0]);
+                    let path = input.strip_prefix(&prefix).unwrap_or("");
+                    analyze_input_context(&format!("edit{path}"), app)
+                }
+            }
             CommandType::Camera => {
                 let second_level: &[&str] = match parts.get(1).copied() {
                     Some("projection") => &["perspective", "orthographic", "toggle"],
@@ -1076,20 +1086,21 @@ fn analyze_input_context(input: &str, app: &App) -> CompletionContext {
 }
 
 fn loaded_library_names(app: &App) -> Vec<String> {
-    let libraries = app
+    let active = app.ast.active_source.as_deref();
+    let sources = app
         .ast
         .embedded_sources
         .iter()
-        .filter(|source| source.role == openscad_core::EmbeddedSourceRole::Library)
+        .filter(|source| active != Some(source.virtual_path.as_str()))
         .collect::<Vec<_>>();
-    libraries
+    sources
         .iter()
         .map(|source| {
             let filename = Path::new(&source.virtual_path)
                 .file_name()
                 .and_then(|value| value.to_str())
                 .unwrap_or(&source.virtual_path);
-            let duplicate_filename = libraries.iter().any(|other| {
+            let duplicate_filename = sources.iter().any(|other| {
                 other.virtual_path != source.virtual_path
                     && Path::new(&other.virtual_path)
                         .file_name()
@@ -2280,7 +2291,7 @@ mod tests {
     }
 
     #[test]
-    fn test_use_and_include_completion_list_only_loaded_library_roots() {
+    fn test_use_and_include_completion_list_all_project_sources() {
         let mut app = App::new();
         app.ast_mut()
             .embedded_sources
@@ -2317,7 +2328,7 @@ mod tests {
         assert_eq!(
             analysis.context,
             CompletionContext::Literal {
-                candidates: vec!["gears.scad".to_string()],
+                candidates: vec!["gears.scad".to_string(), "helpers.scad".to_string()],
             }
         );
         assert_eq!(
@@ -2353,6 +2364,22 @@ mod tests {
         assert!(buffers
             .iter()
             .any(|candidate| candidate.content == "part.scad"));
+    }
+
+    #[test]
+    fn test_export_completion_selects_mode_then_file_path() {
+        let app = App::new();
+        let (modes, _) = generate_completions("export ", &app);
+        assert_eq!(
+            modes
+                .iter()
+                .map(|candidate| candidate.content.as_str())
+                .collect::<Vec<_>>(),
+            ["source", "tree", "model"]
+        );
+
+        let (_, analysis) = generate_completions("export source ./", &app);
+        assert!(matches!(analysis.context, CompletionContext::File { .. }));
     }
 
     #[test]

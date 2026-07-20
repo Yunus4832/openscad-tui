@@ -15,7 +15,7 @@ Vim 风格按键和命令修改 OpenSCAD AST，可在终端中查看模型树、
 - 生成并导出 OpenSCAD 源码
 - 将可编辑项目保存为版本化 `.scadtui` 包，并从项目包恢复
 - 将多文件 `.scad` 项目解析为 globals、functions、module definitions 和 module nodes，并嵌入项目包
-- 在同一实例中切换、编辑多个项目源文件，并独立选择默认渲染入口
+- 在同一实例中切换、编辑多个项目源文件，当前 buffer 同时也是默认渲染入口
 - 直接加载 `.scad` 库并提取模块、函数定义用于补全
 - 撤销、重做和命令历史
 - 复制、粘贴、移除和替换模块节点
@@ -67,8 +67,8 @@ cargo build --release
 | `t` / `r` / `s` | 打开平移、旋转或缩放命令 |
 | `d` | 删除所有选中节点的完整子树；无选中时删除当前节点、global、function 或 module 定义 |
 | `u` / `Ctrl+R` | 撤销或重做 |
-| `w` | 保存 JSON 项目 |
-| `o` | 打开 `open` 命令，加载 JSON 项目 |
+| `w` | 保存 `.scadtui` 项目包 |
+| `o` | 打开 `open` 命令，加载 `.scadtui` 项目包 |
 | `e` | 打开 `edit` 命令，解析 `.scad` 文件进行结构化编辑 |
 | `L` | 加载并嵌入 `.scad` 源码库 |
 | `:` | 进入命令模式 |
@@ -202,7 +202,9 @@ open! project.scadtui
 edit existing.scad
 new project
 new file part.scad
-export model.scad
+export source model.scad
+export tree ./source-tree
+export model model.stl
 library gears.scad
 use gears.scad
 include gears.scad
@@ -220,7 +222,7 @@ wq
 - `edit` 将已有 `.scad` 文件及其本地依赖导入当前项目，连续执行会归集为多个可编辑
   buffer，不会替换已有 source。导入后内容与原文件解耦。
 - `edit` 会递归收集能从项目目录或 OpenSCAD 库目录解析到的 `include` / `use` 文件，将
-  完整源码 AST、定义索引和依赖类型一起嵌入 JSON。项目目录内的主文件与配件文件可编辑；
+  完整源码 AST、定义索引和依赖类型一起嵌入项目包。项目目录内的主文件与配件文件可编辑；
   BOSL 等外部库保持只读，但仍会参与补全和渲染。
 - `[Project Sources]` 只展示项目内可编辑的 `entry` 和 `part` 文件，已加载或经
   `use` / `include` 引入的只读库不会显示在这里。`*` 表示当前编辑缓冲区；在源文件
@@ -231,15 +233,16 @@ wq
   外部只读库则恢复导入时的原文，再由 OpenSCAD 按原有 `include` / `use` 关系处理。
 - `edit` 后需使用 `write project.scadtui` 保存项目；不会覆盖原始 `.scad` 文件。
 - `open!` 和 `new! project` 允许明确丢弃未保存状态；`edit` 是增量操作，不需要 `edit!`。
-- `export` 只生成 `.scad` 文件，不会运行 OpenSCAD。
+- `export source <file.scad>` 只导出当前 buffer；`export tree <directory>` 导出当前 buffer
+  及其可达依赖组成的完整 SCAD 源码树；`export model <artifact>` 调用 OpenSCAD，并按
+  `.stl`、`.3mf` 等目标后缀生成模型产物。
 - `library gears.scad` 加载 OpenSCAD 源码库并递归收集本地 SCAD 依赖，但不会修改
   当前 source 的语义。源码会直接嵌入项目包，不需要额外的库描述文件。
-- `use gears.scad` 激活一个已经加载的库，在当前主文件中生成对应的 `use` 关系。
-  它只导入模块和函数定义，不执行库文件的顶层建模语句。
-- `include gears.scad` 以 `include` 语义激活已加载的库。除公开定义外，库中的顶层
-  变量和建模语句也会由 OpenSCAD 执行。
-- 只有通过 `use` 或 `include` 激活后，该库及其可达依赖中的定义才会进入补全并参与
-  渲染。已加载但未激活的库仍会随项目保存，之后可随时使用。
+- `use <source>` / `include <source>` 在当前 buffer 与项目内另一个 source 之间建立对应
+  关系；目标既可以是 `library` 加载的只读库，也可以是 `edit` 或 `new file` 创建的可编辑
+  配件。`use` 只导入模块和函数定义，`include` 还保留顶层变量和建模语句语义。
+- 只有建立 `use` 或 `include` 关系后，目标及其可达依赖中的定义才会进入当前 buffer 的
+  补全并参与渲染。已加载但未引用的 source 仍会随项目保存，之后可随时使用。
 
 ## 完整命令概览
 

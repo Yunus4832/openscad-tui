@@ -17,6 +17,22 @@ use crate::project_import::{attach_editable_scad, attach_scad_library};
 const MAX_RECURSION_DEPTH: usize = 1000;
 
 pub fn cmd_render(app: &mut App) -> CommandResult<()> {
+    let (source, render_project) = active_source_project(app)?;
+    let source_context = app
+        .ast
+        .source_directory
+        .clone()
+        .or_else(|| app.current_file.clone());
+    app.model_preview
+        .render(source, source_context.as_deref(), render_project)
+        .map_err(CommandError::Custom)?;
+    app.enter_model_screen();
+    Ok(())
+}
+
+fn active_source_project(
+    app: &mut App,
+) -> CommandResult<(String, Option<openscad_render::OpenScadProject>)> {
     app.ast_mut().sync_active_source();
     let target = app.ast.active_source.clone();
     let mut source = target
@@ -26,7 +42,7 @@ pub fn cmd_render(app: &mut App) -> CommandResult<()> {
     if let Some(target) = &target {
         source = rewrite_absolute_source_references(&source, target, &app.ast.source_dependencies);
     }
-    let render_project = target
+    let project = target
         .as_ref()
         .map(|target| openscad_render::OpenScadProject {
             entry_path: PathBuf::from(target),
@@ -44,16 +60,7 @@ pub fn cmd_render(app: &mut App) -> CommandResult<()> {
                 })
                 .collect(),
         });
-    let source_context = app
-        .ast
-        .source_directory
-        .clone()
-        .or_else(|| app.current_file.clone());
-    app.model_preview
-        .render(source, source_context.as_deref(), render_project)
-        .map_err(CommandError::Custom)?;
-    app.enter_model_screen();
-    Ok(())
+    Ok((source, project))
 }
 
 pub fn cmd_buffer(app: &mut App, value: Option<&str>) -> CommandResult<()> {
@@ -1305,26 +1312,26 @@ fn reachable_source_paths(ast: &openscad_core::AstRoot) -> HashSet<String> {
     reachable
 }
 
-/// Export AST to OpenSCAD code file
-pub fn cmd_export(app: &App, filename: &str) -> CommandResult<()> {
-    // Expand tilde in filename
-    let expanded_filepath = expand_tilde(filename);
+pub fn cmd_export(app: &mut App, kind: &str, destination: &str) -> CommandResult<()> {
+    match kind {
+        "source" => cmd_export_source(app, destination),
+        "tree" => cmd_export_tree(app, destination),
+        "model" => cmd_export_model(app, destination),
+        _ => Err(CommandError::InvalidCommand(
+            "Usage: export source <file.scad> | tree <directory> | model <artifact>".to_string(),
+        )),
+    }
+}
 
-    // Ensure filename ends with .scad
-    let filepath = if !expanded_filepath
-        .extension()
-        .map(|ext| ext == "scad")
-        .unwrap_or(false)
-    {
-        expanded_filepath.with_extension("scad")
-    } else {
-        expanded_filepath
-    };
-
-    // Generate OpenSCAD code
-    let code = app.ast.to_scad();
-
-    // Write to file
+fn cmd_export_source(app: &mut App, filename: &str) -> CommandResult<()> {
+    let filepath = ensure_extension(expand_tilde(filename), "scad");
+    app.ast_mut().sync_active_source();
+    let code = app
+        .ast
+        .active_source
+        .as_deref()
+        .and_then(|path| app.ast.source_code(path))
+        .unwrap_or_else(|| app.ast.to_scad());
     fs::write(&filepath, code).map_err(|e| {
         CommandError::Custom(format!(
             "Failed to write file '{}': {}",
@@ -1332,8 +1339,108 @@ pub fn cmd_export(app: &App, filename: &str) -> CommandResult<()> {
             e
         ))
     })?;
-
+    app.set_info(&format!(
+        "Exported active source to '{}'",
+        filepath.display()
+    ));
     Ok(())
+}
+
+fn cmd_export_tree(app: &mut App, directory: &str) -> CommandResult<()> {
+    let directory = expand_tilde(directory);
+    if directory.exists()
+        && directory
+            .read_dir()
+            .map_err(|error| CommandError::Custom(error.to_string()))?
+            .next()
+            .is_some()
+    {
+        return Err(CommandError::Custom(format!(
+            "Export directory '{}' is not empty",
+            directory.display()
+        )));
+    }
+    app.ast_mut().sync_active_source();
+    let reachable = reachable_source_paths(&app.ast);
+    let files = app
+        .ast
+        .embedded_sources
+        .iter()
+        .filter(|source| reachable.contains(&source.virtual_path))
+        .map(|source| {
+            let relative = safe_embedded_path(&source.virtual_path)?;
+            let content = rewrite_absolute_source_references(
+                &source.generated_content(),
+                &source.virtual_path,
+                &app.ast.source_dependencies,
+            );
+            Ok((relative, content))
+        })
+        .collect::<CommandResult<Vec<_>>>()?;
+    fs::create_dir_all(&directory).map_err(|error| CommandError::Custom(error.to_string()))?;
+    for (relative, content) in &files {
+        let path = directory.join(relative);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|error| CommandError::Custom(error.to_string()))?;
+        }
+        fs::write(&path, content).map_err(|error| CommandError::Custom(error.to_string()))?;
+    }
+    app.set_info(&format!(
+        "Exported {} source files to '{}'",
+        files.len(),
+        directory.display()
+    ));
+    Ok(())
+}
+
+fn cmd_export_model(app: &mut App, filename: &str) -> CommandResult<()> {
+    let filepath = expand_tilde(filename);
+    if filepath.extension().is_none() {
+        return Err(CommandError::Custom(
+            "export model requires an output extension supported by OpenSCAD".to_string(),
+        ));
+    }
+    let (source, project) = active_source_project(app)?;
+    let mut generator = openscad_render::OpenScadGenerator::new("openscad");
+    if let Some(project) = project {
+        generator = generator.with_project(project);
+    }
+    let diagnostics = generator
+        .export(&source, &filepath)
+        .map_err(|error| CommandError::Custom(error.to_string()))?;
+    app.set_info(&format!(
+        "Exported model to '{}' in {:.2}s",
+        filepath.display(),
+        diagnostics.elapsed.as_secs_f64()
+    ));
+    Ok(())
+}
+
+fn ensure_extension(path: PathBuf, extension: &str) -> PathBuf {
+    if has_extension(&path, extension) {
+        path
+    } else {
+        path.with_extension(extension)
+    }
+}
+
+fn safe_embedded_path(path: &str) -> CommandResult<PathBuf> {
+    let path = Path::new(path);
+    if path.as_os_str().is_empty()
+        || path.is_absolute()
+        || path.components().any(|component| {
+            !matches!(
+                component,
+                std::path::Component::Normal(_) | std::path::Component::CurDir
+            )
+        })
+    {
+        return Err(CommandError::Custom(format!(
+            "Unsafe embedded source path: {}",
+            path.display()
+        )));
+    }
+    Ok(path.to_path_buf())
 }
 
 /// Load and embed a SCAD source library without activating it.
@@ -1387,51 +1494,51 @@ pub fn cmd_load_library(app: &mut App, filename: &str) -> CommandResult<()> {
     Ok(())
 }
 
-/// Activate a previously loaded SCAD library in the current entry source.
+/// Add a use relationship from the active source to another project source.
 pub fn cmd_use_library(app: &mut App, name: &str) -> CommandResult<()> {
-    cmd_activate_library(app, name, openscad_core::SourceDependencyKind::Use)
+    cmd_activate_source(app, name, openscad_core::SourceDependencyKind::Use)
 }
 
-/// Include a previously loaded SCAD library in the current entry source.
+/// Add an include relationship from the active source to another project source.
 pub fn cmd_include_library(app: &mut App, name: &str) -> CommandResult<()> {
-    cmd_activate_library(app, name, openscad_core::SourceDependencyKind::Include)
+    cmd_activate_source(app, name, openscad_core::SourceDependencyKind::Include)
 }
 
-fn cmd_activate_library(
+fn cmd_activate_source(
     app: &mut App,
     name: &str,
     kind: openscad_core::SourceDependencyKind,
 ) -> CommandResult<()> {
+    let active = app
+        .ast
+        .active_source
+        .clone()
+        .or_else(|| app.ast.entry_source.clone())
+        .ok_or_else(|| CommandError::Custom("Project has no active source".to_string()))?;
     let matches = app
         .ast
         .embedded_sources
         .iter()
-        .filter(|source| source.role == openscad_core::EmbeddedSourceRole::Library)
+        .filter(|source| source.virtual_path != active)
         .filter(|source| library_source_matches(source, name))
         .map(|source| source.virtual_path.clone())
         .collect::<Vec<_>>();
     let target = match matches.as_slice() {
         [] => {
             return Err(CommandError::Custom(format!(
-                "SCAD library '{name}' is not loaded; use 'library <file.scad>' first"
+                "Project source '{name}' is not loaded; use 'edit' or 'library' first"
             )))
         }
         [target] => target.clone(),
         _ => {
             return Err(CommandError::Custom(format!(
-                "SCAD library name '{name}' is ambiguous; use its embedded path"
+                "Project source name '{name}' is ambiguous; use its embedded path"
             )))
         }
     };
-    let entry = app
-        .ast
-        .active_source
-        .clone()
-        .or_else(|| app.ast.entry_source.clone())
-        .ok_or_else(|| CommandError::Custom("Project has no active source".to_string()))?;
-    let reference = relative_virtual_path(&entry, &target);
+    let reference = relative_virtual_path(&active, &target);
     let dependency = openscad_core::SourceDependency {
-        from: entry,
+        from: active,
         to: target.clone(),
         reference: reference.clone(),
         kind,
@@ -1442,7 +1549,7 @@ fn cmd_activate_library(
     };
     if app.ast.source_dependencies.contains(&dependency) {
         return Err(CommandError::Custom(format!(
-            "SCAD library '{name}' is already activated with {directive}"
+            "Project source '{name}' is already referenced with {directive}"
         )));
     }
 
@@ -1463,7 +1570,7 @@ fn cmd_activate_library(
     reload_project_definitions(app);
     app.model_preview.mark_stale();
     app.set_info(&format!(
-        "Activated SCAD library '{target}' with {directive}"
+        "Referenced project source '{target}' with {directive}"
     ));
     Ok(())
 }
@@ -2810,19 +2917,24 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
         "export",
         vec![] as Vec<String>,
         |app, args| {
-            if args.len() != 1 {
+            if args.len() != 2 {
                 return Err(CommandError::InvalidCommand(
-                    "export command requires a filename".to_string(),
+                    "Usage: export source <file.scad> | tree <directory> | model <artifact>"
+                        .to_string(),
                 ));
             }
-            cmd_export(app, args[0])
+            cmd_export(app, args[0], args[1])
         },
-        "Export AST to OpenSCAD file",
-        1,
-        Some(1),
-        "export <filename>",
-        vec!["export model.scad"],
-        CommandType::File,
+        "Export the active source, its source tree, or a rendered model",
+        2,
+        Some(2),
+        "export source <file.scad> | tree <directory> | model <artifact>",
+        vec![
+            "export source model.scad",
+            "export tree ./source-tree",
+            "export model model.stl",
+        ],
+        CommandType::Export,
         false,
         true,
     ));
@@ -3614,7 +3726,7 @@ mod tests {
     }
 
     #[test]
-    fn test_use_requires_a_loaded_library_and_rejects_duplicates() {
+    fn test_use_requires_a_loaded_source_and_rejects_duplicates() {
         let mut app = App::new();
         let error = cmd_use_library(&mut app, "missing.scad").unwrap_err();
         assert!(error.to_string().contains("not loaded"));
@@ -3626,7 +3738,7 @@ mod tests {
         cmd_use_library(&mut app, "parts").unwrap();
 
         let error = cmd_use_library(&mut app, "parts.scad").unwrap_err();
-        assert!(error.to_string().contains("already activated with use"));
+        assert!(error.to_string().contains("already referenced with use"));
     }
 
     #[test]
@@ -3755,6 +3867,80 @@ mod tests {
             .source_code("part.scad")
             .unwrap()
             .contains("cube(2);"));
+    }
+
+    #[test]
+    fn test_editable_sources_can_be_related_with_use_and_include() {
+        let mut app = App::new();
+        cmd_new_file(&mut app, "parts/jaw.scad").unwrap();
+        cmd_buffer(&mut app, Some("main.scad")).unwrap();
+
+        cmd_use_library(&mut app, "jaw.scad").unwrap();
+
+        assert!(app.ast.source_dependencies.iter().any(|dependency| {
+            dependency.from == "main.scad"
+                && dependency.to == "parts/jaw.scad"
+                && dependency.kind == openscad_core::SourceDependencyKind::Use
+        }));
+        assert_eq!(app.ast.uses, ["parts/jaw.scad"]);
+    }
+
+    #[test]
+    fn test_export_source_writes_only_the_active_buffer() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = App::new();
+        app.ast_mut().modules.push(ModuleNode::new_leaf(
+            "main_cube".to_string(),
+            "cube".to_string(),
+            Vec::new(),
+        ));
+        cmd_new_file(&mut app, "part.scad").unwrap();
+        app.ast_mut().modules.push(ModuleNode::new_leaf(
+            "part_sphere".to_string(),
+            "sphere".to_string(),
+            Vec::new(),
+        ));
+        let output = directory.path().join("active");
+
+        cmd_export(&mut app, "source", output.to_str().unwrap()).unwrap();
+
+        let source = fs::read_to_string(output.with_extension("scad")).unwrap();
+        assert!(source.contains("sphere("));
+        assert!(!source.contains("cube("));
+    }
+
+    #[test]
+    fn test_export_tree_materializes_reachable_project_sources() {
+        let directory = tempfile::tempdir().unwrap();
+        let source_directory = directory.path().join("input");
+        fs::create_dir(&source_directory).unwrap();
+        fs::write(
+            source_directory.join("main.scad"),
+            "use <parts/jaw.scad>;\njaw();\n",
+        )
+        .unwrap();
+        fs::create_dir(source_directory.join("parts")).unwrap();
+        fs::write(
+            source_directory.join("parts/jaw.scad"),
+            "module jaw() { cube(1); }\n",
+        )
+        .unwrap();
+        let mut app = App::new();
+        cmd_edit_scad(
+            &mut app,
+            source_directory.join("main.scad").to_str().unwrap(),
+        )
+        .unwrap();
+        let output = directory.path().join("exported");
+
+        cmd_export(&mut app, "tree", output.to_str().unwrap()).unwrap();
+
+        assert!(fs::read_to_string(output.join("main.scad"))
+            .unwrap()
+            .contains("jaw();"));
+        assert!(fs::read_to_string(output.join("parts/jaw.scad"))
+            .unwrap()
+            .contains("module jaw"));
     }
 
     #[test]
