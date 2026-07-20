@@ -1344,7 +1344,7 @@ pub fn cmd_export(app: &mut App, kind: &str, destination: &str) -> CommandResult
 }
 
 fn cmd_export_source(app: &mut App, filename: &str) -> CommandResult<()> {
-    let filepath = ensure_extension(expand_tilde(filename), "scad");
+    let filepath = ensure_extension(resolve_export_path(app, filename)?, "scad");
     app.ast_mut().sync_active_source();
     let code = app
         .ast
@@ -1367,7 +1367,7 @@ fn cmd_export_source(app: &mut App, filename: &str) -> CommandResult<()> {
 }
 
 fn cmd_export_tree(app: &mut App, directory: &str) -> CommandResult<()> {
-    let directory = expand_tilde(directory);
+    let directory = resolve_export_path(app, directory)?;
     if directory.exists()
         && directory
             .read_dir()
@@ -1414,7 +1414,7 @@ fn cmd_export_tree(app: &mut App, directory: &str) -> CommandResult<()> {
 }
 
 fn cmd_export_model(app: &mut App, filename: &str) -> CommandResult<()> {
-    let filepath = expand_tilde(filename);
+    let filepath = resolve_export_path(app, filename)?;
     if filepath.extension().is_none() {
         return Err(CommandError::Custom(
             "export model requires an output extension supported by OpenSCAD".to_string(),
@@ -1434,6 +1434,30 @@ fn cmd_export_model(app: &mut App, filename: &str) -> CommandResult<()> {
         diagnostics.elapsed.as_secs_f64()
     ));
     Ok(())
+}
+
+fn resolve_export_path(app: &App, destination: &str) -> CommandResult<PathBuf> {
+    let destination = expand_tilde(destination);
+    if destination.is_absolute() {
+        return Ok(destination);
+    }
+    let current_directory = std::env::current_dir().map_err(|error| {
+        CommandError::Custom(format!("Failed to resolve current directory: {error}"))
+    })?;
+    let project_directory = app.current_file.as_deref().map(expand_tilde).map(|path| {
+        let project_path = if path.is_absolute() {
+            path
+        } else {
+            current_directory.join(path)
+        };
+        project_path
+            .parent()
+            .unwrap_or(&current_directory)
+            .to_path_buf()
+    });
+    Ok(project_directory
+        .unwrap_or(current_directory)
+        .join(destination))
 }
 
 fn ensure_extension(path: PathBuf, extension: &str) -> PathBuf {
@@ -3941,6 +3965,34 @@ mod tests {
         let source = fs::read_to_string(output.with_extension("scad")).unwrap();
         assert!(source.contains("sphere("));
         assert!(!source.contains("cube("));
+    }
+
+    #[test]
+    fn test_relative_exports_are_resolved_next_to_the_project_package() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = App::new();
+        app.current_file = Some(
+            directory
+                .path()
+                .join("test.scadtui")
+                .to_string_lossy()
+                .into_owned(),
+        );
+        app.ast_mut().modules.push(ModuleNode::new_leaf(
+            "main_cube".to_string(),
+            "cube".to_string(),
+            Vec::new(),
+        ));
+
+        assert_eq!(
+            resolve_export_path(&app, "model.stl").unwrap(),
+            directory.path().join("model.stl")
+        );
+        cmd_export(&mut app, "source", "snapshot").unwrap();
+
+        assert!(fs::read_to_string(directory.path().join("snapshot.scad"))
+            .unwrap()
+            .contains("cube("));
     }
 
     #[test]

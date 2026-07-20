@@ -235,7 +235,8 @@ wq
 - `open!` 和 `new! project` 允许明确丢弃未保存状态；`edit` 是增量操作，不需要 `edit!`。
 - `export source <file.scad>` 只导出当前 buffer；`export tree <directory>` 导出当前 buffer
   及其可达依赖组成的完整 SCAD 源码树；`export model <artifact>` 调用 OpenSCAD，并按
-  `.stl`、`.3mf` 等目标后缀生成模型产物。
+  `.stl`、`.3mf` 等目标后缀生成模型产物。相对导出路径以当前 `.scadtui` 项目包所在
+  目录为基准；没有项目文件时才使用启动程序时的工作目录。
 - `library gears.scad` 加载 OpenSCAD 源码库并递归收集本地 SCAD 依赖，但不会修改
   当前 source 的语义。源码会直接嵌入项目包，不需要额外的库描述文件。
 - `use <source>` / `include <source>` 在当前 buffer 与项目内另一个 source 之间建立对应

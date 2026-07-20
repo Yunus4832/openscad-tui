@@ -89,15 +89,15 @@ impl OpenScadGenerator {
         scad_source: &str,
         output_path: impl AsRef<Path>,
     ) -> Result<GenerationDiagnostics> {
+        let output_path = absolute_output_path(output_path.as_ref())?;
         let prepared = self.prepare_source(scad_source)?;
-        let output_path = output_path.as_ref();
         if let Some(parent) = output_path
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
         {
             fs::create_dir_all(parent).map_err(io_error)?;
         }
-        self.run_openscad(&prepared.source_path, &prepared.directory, output_path)
+        self.run_openscad(&prepared.source_path, &prepared.directory, &output_path)
     }
 
     fn prepare_source(&self, scad_source: &str) -> Result<PreparedSource> {
@@ -262,6 +262,14 @@ fn io_error(error: std::io::Error) -> RenderError {
     RenderError::Io(error.to_string())
 }
 
+fn absolute_output_path(path: &Path) -> Result<PathBuf> {
+    if path.is_absolute() {
+        Ok(path.to_path_buf())
+    } else {
+        Ok(std::env::current_dir().map_err(io_error)?.join(path))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -356,6 +364,31 @@ mod tests {
         assert!(fs::read_to_string(output)
             .unwrap()
             .contains("solid exported"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn relative_project_exports_survive_temporary_source_cleanup() {
+        let (_directory, executable) =
+            executable_script("#!/bin/sh\nprintf 'OFF\\n0 0 0\\n' > \"$2\"\n");
+        let current_directory = std::env::current_dir().unwrap();
+        let output_directory = tempfile::Builder::new()
+            .prefix("openscad-tui-export-")
+            .tempdir_in(&current_directory)
+            .unwrap();
+        let output = output_directory.path().join("model.off");
+        let relative_output = output.strip_prefix(&current_directory).unwrap();
+        let project = OpenScadProject {
+            entry_path: PathBuf::from("main.scad"),
+            files: Vec::new(),
+        };
+
+        OpenScadGenerator::new(executable)
+            .with_project(project)
+            .export("cube(1);", relative_output)
+            .unwrap();
+
+        assert_eq!(fs::read_to_string(output).unwrap(), "OFF\n0 0 0\n");
     }
 
     #[test]
