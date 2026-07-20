@@ -31,6 +31,7 @@ pub enum CommandType {
     ProjectSource,
     New,
     Export,
+    Axes,
 }
 
 /// Command type - used for dynamic completion context analysis

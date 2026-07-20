@@ -1,6 +1,12 @@
-use crate::{Camera, Framebuffer, Mesh, PixelSize, RgbaFrame, Vec2, Vec3, Vec4};
+use crate::{Camera, Framebuffer, Mesh, PixelSize, RenderOptions, RgbaFrame, Vec2, Vec3, Vec4};
 
 const AREA_EPSILON: f32 = 1.0e-6;
+const AXIS_DEPTH_BIAS: f32 = 1.0e-4;
+const AXIS_LENGTH_MARGIN: f32 = 1.1;
+const AXIS_LINE_RADIUS: i32 = 1;
+const AXIS_COLORS: [[u8; 4]; 3] = [[255, 96, 96, 255], [96, 255, 128, 255], [96, 160, 255, 255]];
+const NEGATIVE_AXIS_COLORS: [[u8; 4]; 3] =
+    [[128, 52, 52, 255], [52, 128, 68, 255], [52, 84, 128, 255]];
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RenderSettings {
@@ -46,6 +52,16 @@ impl CpuRenderer {
     }
 
     pub fn render(&self, mesh: &Mesh, camera: &Camera, size: PixelSize) -> RgbaFrame {
+        self.render_with_options(mesh, camera, size, RenderOptions::default())
+    }
+
+    pub fn render_with_options(
+        &self,
+        mesh: &Mesh,
+        camera: &Camera,
+        size: PixelSize,
+        options: RenderOptions,
+    ) -> RgbaFrame {
         let mut framebuffer = Framebuffer::new(size, self.settings.background);
         let view_projection = camera.view_projection(size.aspect_ratio());
         let light_direction = world_light_direction(self.settings, camera);
@@ -67,7 +83,72 @@ impl CpuRenderer {
             }
         }
 
+        if options.axes {
+            self.rasterize_axes(&mut framebuffer, mesh, view_projection);
+        }
+
         framebuffer.into_color()
+    }
+
+    fn rasterize_axes(&self, framebuffer: &mut Framebuffer, mesh: &Mesh, transform: glam::Mat4) {
+        let length = mesh
+            .bounds
+            .min
+            .abs()
+            .max(mesh.bounds.max.abs())
+            .max_element()
+            .max(mesh.bounds.radius())
+            .max(1.0)
+            * AXIS_LENGTH_MARGIN;
+        for (index, direction) in [Vec3::X, Vec3::Y, Vec3::Z].into_iter().enumerate() {
+            self.rasterize_line(
+                framebuffer,
+                [
+                    transform * Vec3::ZERO.extend(1.0),
+                    transform * (direction * length).extend(1.0),
+                ],
+                AXIS_COLORS[index],
+            );
+            self.rasterize_line(
+                framebuffer,
+                [
+                    transform * (-direction * length).extend(1.0),
+                    transform * Vec3::ZERO.extend(1.0),
+                ],
+                NEGATIVE_AXIS_COLORS[index],
+            );
+        }
+    }
+
+    fn rasterize_line(&self, framebuffer: &mut Framebuffer, clip: [Vec4; 2], color: [u8; 4]) {
+        let Some(clip) = clip_line(clip) else {
+            return;
+        };
+        if clip.iter().any(|vertex| vertex.w.abs() <= f32::EPSILON) {
+            return;
+        }
+        let size = framebuffer.size();
+        let screen = clip.map(|vertex| clip_to_screen(vertex, size));
+        let delta = screen[1].position - screen[0].position;
+        let steps = delta.x.abs().max(delta.y.abs()).ceil().max(1.0) as u32;
+        for step in 0..=steps {
+            let factor = step as f32 / steps as f32;
+            let position = screen[0].position.lerp(screen[1].position, factor);
+            let depth = (screen[0].depth + (screen[1].depth - screen[0].depth) * factor
+                - AXIS_DEPTH_BIAS)
+                .clamp(0.0, 1.0);
+            let center_x = position.x.round() as i32;
+            let center_y = position.y.round() as i32;
+            for offset_y in -AXIS_LINE_RADIUS..=AXIS_LINE_RADIUS {
+                for offset_x in -AXIS_LINE_RADIUS..=AXIS_LINE_RADIUS {
+                    let x = center_x + offset_x;
+                    let y = center_y + offset_y;
+                    if x >= 0 && y >= 0 {
+                        framebuffer.write_pixel(x as u32, y as u32, depth, color);
+                    }
+                }
+            }
+        }
     }
 
     fn rasterize_triangle(&self, framebuffer: &mut Framebuffer, clip: [Vec4; 3], color: [u8; 4]) {
@@ -75,16 +156,7 @@ impl CpuRenderer {
             return;
         }
         let size = framebuffer.size();
-        let screen = clip.map(|vertex| {
-            let ndc = vertex.truncate() / vertex.w;
-            ScreenVertex {
-                position: Vec2::new(
-                    (ndc.x * 0.5 + 0.5) * (size.width.saturating_sub(1)) as f32,
-                    (1.0 - (ndc.y * 0.5 + 0.5)) * (size.height.saturating_sub(1)) as f32,
-                ),
-                depth: ndc.z * 0.5 + 0.5,
-            }
-        });
+        let screen = clip.map(|vertex| clip_to_screen(vertex, size));
         let area = edge(screen[0].position, screen[1].position, screen[2].position);
         if area.abs() <= AREA_EPSILON || (self.settings.backface_culling && area >= 0.0) {
             return;
@@ -168,8 +240,9 @@ impl crate::FrameRenderer for CpuRenderer {
         mesh: &Mesh,
         camera: &Camera,
         size: PixelSize,
+        options: RenderOptions,
     ) -> crate::Result<RgbaFrame> {
-        Ok(self.render(mesh, camera, size))
+        Ok(self.render_with_options(mesh, camera, size, options))
     }
 }
 
@@ -177,6 +250,17 @@ impl crate::FrameRenderer for CpuRenderer {
 struct ScreenVertex {
     position: Vec2,
     depth: f32,
+}
+
+fn clip_to_screen(vertex: Vec4, size: PixelSize) -> ScreenVertex {
+    let ndc = vertex.truncate() / vertex.w;
+    ScreenVertex {
+        position: Vec2::new(
+            (ndc.x * 0.5 + 0.5) * (size.width.saturating_sub(1)) as f32,
+            (1.0 - (ndc.y * 0.5 + 0.5)) * (size.height.saturating_sub(1)) as f32,
+        ),
+        depth: ndc.z * 0.5 + 0.5,
+    }
 }
 
 fn edge(a: Vec2, b: Vec2, point: Vec2) -> f32 {
@@ -239,6 +323,33 @@ fn clip_polygon(mut polygon: Vec<Vec4>) -> Vec<Vec4> {
     polygon
 }
 
+fn clip_line(mut line: [Vec4; 2]) -> Option<[Vec4; 2]> {
+    let planes: [fn(Vec4) -> f32; 6] = [
+        |vertex| vertex.x + vertex.w,
+        |vertex| vertex.w - vertex.x,
+        |vertex| vertex.y + vertex.w,
+        |vertex| vertex.w - vertex.y,
+        |vertex| vertex.z + vertex.w,
+        |vertex| vertex.w - vertex.z,
+    ];
+    for distance in planes {
+        let distances = line.map(distance);
+        if distances[0] < 0.0 && distances[1] < 0.0 {
+            return None;
+        }
+        if (distances[0] < 0.0) != (distances[1] < 0.0) {
+            let factor = distances[0] / (distances[0] - distances[1]);
+            let intersection = line[0].lerp(line[1], factor);
+            if distances[0] < 0.0 {
+                line[0] = intersection;
+            } else {
+                line[1] = intersection;
+            }
+        }
+    }
+    Some(line)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -283,6 +394,94 @@ mod tests {
     }
 
     #[test]
+    fn world_axes_are_optional_and_use_xyz_colors() {
+        let mesh = Mesh::new(
+            vec![
+                Vec3::new(-1.0, -1.0, 0.0),
+                Vec3::new(1.0, -1.0, 0.0),
+                Vec3::new(0.0, 1.0, 0.0),
+            ],
+            vec![[0, 1, 2]],
+        )
+        .unwrap();
+        let renderer = CpuRenderer::default();
+        let size = PixelSize::new(96, 96).unwrap();
+        let camera = top_camera(&mesh);
+
+        let without_axes =
+            renderer.render_with_options(&mesh, &camera, size, RenderOptions { axes: false });
+        let with_axes =
+            renderer.render_with_options(&mesh, &camera, size, RenderOptions { axes: true });
+
+        assert_ne!(with_axes, without_axes);
+        assert!(with_axes
+            .pixels()
+            .chunks_exact(4)
+            .any(|pixel| pixel == AXIS_COLORS[0]));
+        assert!(with_axes
+            .pixels()
+            .chunks_exact(4)
+            .any(|pixel| pixel == AXIS_COLORS[1]));
+
+        let axis_mesh = Mesh::new(vec![Vec3::splat(-1.0), Vec3::splat(1.0)], Vec::new()).unwrap();
+        let mut perspective = Camera::default();
+        perspective.set_standard_view(
+            StandardView::Isometric,
+            axis_mesh.bounds,
+            size.aspect_ratio(),
+        );
+        let perspective_frame = renderer.render_with_options(
+            &axis_mesh,
+            &perspective,
+            size,
+            RenderOptions { axes: true },
+        );
+        for color in AXIS_COLORS {
+            assert!(
+                perspective_frame
+                    .pixels()
+                    .chunks_exact(4)
+                    .any(|pixel| pixel == color),
+                "missing axis color {color:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn model_depth_occludes_world_axes() {
+        let mesh = Mesh::new(
+            vec![
+                Vec3::new(-2.0, -2.0, 0.5),
+                Vec3::new(2.0, -2.0, 0.5),
+                Vec3::new(2.0, 2.0, 0.5),
+                Vec3::new(-2.0, 2.0, 0.5),
+            ],
+            vec![[0, 1, 2], [0, 2, 3]],
+        )
+        .unwrap();
+        let camera = top_camera(&mesh);
+        let size = PixelSize::new(96, 96).unwrap();
+        let renderer = CpuRenderer::new(RenderSettings {
+            backface_culling: false,
+            ..RenderSettings::default()
+        });
+        let frame =
+            renderer.render_with_options(&mesh, &camera, size, RenderOptions { axes: true });
+        let projected_axis_point = clip_to_screen(
+            camera.view_projection(size.aspect_ratio()) * Vec3::X.extend(1.0),
+            size,
+        );
+        let x = projected_axis_point.position.x.round() as u32;
+        let y = projected_axis_point.position.y.round() as u32;
+        let offset = (y as usize * size.width as usize + x as usize) * 4;
+
+        assert!(!AXIS_COLORS.contains(&frame.pixels()[offset..offset + 4].try_into().unwrap()));
+        assert!(
+            !NEGATIVE_AXIS_COLORS.contains(&frame.pixels()[offset..offset + 4].try_into().unwrap())
+        );
+    }
+
+    #[test]
     fn clips_a_triangle_crossing_the_view_boundary() {
         let mesh = Mesh::new(
             vec![
@@ -318,8 +517,18 @@ mod tests {
         let back = Mesh::new(positions, vec![[2, 1, 0]]).unwrap();
         let renderer = CpuRenderer::default();
         let size = PixelSize::new(32, 32).unwrap();
-        let front_frame = renderer.render(&front, &top_camera(&front), size);
-        let back_frame = renderer.render(&back, &top_camera(&back), size);
+        let front_frame = renderer.render_with_options(
+            &front,
+            &top_camera(&front),
+            size,
+            RenderOptions { axes: false },
+        );
+        let back_frame = renderer.render_with_options(
+            &back,
+            &top_camera(&back),
+            size,
+            RenderOptions { axes: false },
+        );
         let background = renderer.settings.background;
         let front_count = front_frame
             .pixels()

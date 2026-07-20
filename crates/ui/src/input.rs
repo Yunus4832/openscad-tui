@@ -384,6 +384,7 @@ fn model_key_command(key: KeyEvent) -> Option<&'static str> {
         KeyCode::Char('-') => Some("camera zoom 1.15"),
         KeyCode::Char('f') => Some("camera fit"),
         KeyCode::Char('p') => Some("camera projection toggle"),
+        KeyCode::Char('x') => Some("axes toggle"),
         KeyCode::Char(' ') => Some("camera auto-rotate toggle"),
         KeyCode::Char('1') => Some("camera view front"),
         KeyCode::Char('2') => Some("camera view back"),
@@ -1045,6 +1046,9 @@ fn analyze_input_context(input: &str, app: &App) -> CompletionContext {
                 literal_command_context(input, &parts, &["source", "model", "toggle"], &[])
             }
             CommandType::Protocol => protocol_command_context(input, &parts),
+            CommandType::Axes => {
+                literal_command_context(input, &parts, &["on", "off", "toggle"], &[])
+            }
             CommandType::ProjectSource => project_source_command_context(input, &parts, app),
             CommandType::New => literal_command_context(input, &parts, &["project", "file"], &[]),
             CommandType::Export => {
@@ -2288,6 +2292,9 @@ mod tests {
         assert!(protocol
             .iter()
             .any(|candidate| candidate.content == "braille"));
+
+        let (axes, _) = generate_completions("axes ", &app);
+        assert!(axes.iter().any(|candidate| candidate.content == "toggle"));
     }
 
     #[test]
@@ -2997,6 +3004,7 @@ mod tests {
             KeyCode::Char('P'),
             KeyCode::Char('f'),
             KeyCode::Char('p'),
+            KeyCode::Char('x'),
             KeyCode::Char('1'),
             KeyCode::Char('5'),
             KeyCode::Char('7'),

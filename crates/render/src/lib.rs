@@ -20,4 +20,6 @@ pub use openscad::{
     OpenScadProjectFile,
 };
 pub use rasterizer::{CpuRenderer, RenderSettings};
-pub use service::{FrameRenderer, RenderEvent, RenderFailureStage, RenderService, RenderedFrame};
+pub use service::{
+    FrameRenderer, RenderEvent, RenderFailureStage, RenderOptions, RenderService, RenderedFrame,
+};

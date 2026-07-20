@@ -4,8 +4,25 @@ use std::time::{Duration, Instant};
 
 use crate::{Aabb, Camera, Mesh, MeshGenerator, PixelSize, RenderError, Result, RgbaFrame};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RenderOptions {
+    pub axes: bool,
+}
+
+impl Default for RenderOptions {
+    fn default() -> Self {
+        Self { axes: true }
+    }
+}
+
 pub trait FrameRenderer: Send + Sync {
-    fn render_frame(&self, mesh: &Mesh, camera: &Camera, size: PixelSize) -> Result<RgbaFrame>;
+    fn render_frame(
+        &self,
+        mesh: &Mesh,
+        camera: &Camera,
+        size: PixelSize,
+        options: RenderOptions,
+    ) -> Result<RgbaFrame>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,11 +67,13 @@ enum RenderRequest {
         scad_source: String,
         camera: Camera,
         size: PixelSize,
+        options: RenderOptions,
     },
     Rasterize {
         camera_revision: u64,
         camera: Camera,
         size: PixelSize,
+        options: RenderOptions,
     },
     Shutdown,
 }
@@ -87,6 +106,7 @@ impl RenderService {
         scad_source: String,
         camera: Camera,
         size: PixelSize,
+        options: RenderOptions,
     ) -> Result<()> {
         self.requests
             .send(RenderRequest::Generate {
@@ -95,16 +115,24 @@ impl RenderService {
                 scad_source,
                 camera,
                 size,
+                options,
             })
             .map_err(|_| RenderError::WorkerDisconnected)
     }
 
-    pub fn rasterize(&self, camera_revision: u64, camera: Camera, size: PixelSize) -> Result<()> {
+    pub fn rasterize(
+        &self,
+        camera_revision: u64,
+        camera: Camera,
+        size: PixelSize,
+        options: RenderOptions,
+    ) -> Result<()> {
         self.requests
             .send(RenderRequest::Rasterize {
                 camera_revision,
                 camera,
                 size,
+                options,
             })
             .map_err(|_| RenderError::WorkerDisconnected)
     }
@@ -140,13 +168,14 @@ fn worker_loop(
             return;
         };
 
-        let (mesh_revision, camera_revision, camera, size) = match work {
+        let (mesh_revision, camera_revision, camera, size, options) = match work {
             RenderRequest::Generate {
                 mesh_revision,
                 camera_revision,
                 scad_source,
                 camera,
                 size,
+                options,
             } => {
                 let _ = events.send(RenderEvent::Generating { mesh_revision });
                 match generator.generate(&scad_source) {
@@ -167,12 +196,13 @@ fn worker_loop(
                         continue;
                     }
                 }
-                (mesh_revision, camera_revision, camera, size)
+                (mesh_revision, camera_revision, camera, size, options)
             }
             RenderRequest::Rasterize {
                 camera_revision,
                 camera,
                 size,
+                options,
             } => {
                 let Some((mesh_revision, _, _)) = cached_mesh.as_ref() else {
                     let _ = events.send(RenderEvent::Failed {
@@ -183,7 +213,7 @@ fn worker_loop(
                     });
                     continue;
                 };
-                (*mesh_revision, camera_revision, camera, size)
+                (*mesh_revision, camera_revision, camera, size, options)
             }
             RenderRequest::Shutdown => return,
         };
@@ -207,7 +237,7 @@ fn worker_loop(
             camera_revision,
         });
         let raster_started = Instant::now();
-        let rendered = renderer.render_frame(mesh, &camera, size);
+        let rendered = renderer.render_frame(mesh, &camera, size, options);
         let raster_time = raster_started.elapsed();
 
         // Preserve the newest pending request, but still publish this completed camera frame.
@@ -269,6 +299,7 @@ fn merge(current: RenderRequest, next: RenderRequest) -> RenderRequest {
                 camera_revision,
                 camera,
                 size,
+                options,
             },
         ) => RenderRequest::Generate {
             mesh_revision,
@@ -276,6 +307,7 @@ fn merge(current: RenderRequest, next: RenderRequest) -> RenderRequest {
             scad_source,
             camera,
             size,
+            options,
         },
         (_, next) => next,
     }
@@ -339,6 +371,7 @@ mod tests {
             _mesh: &Mesh,
             _camera: &Camera,
             size: PixelSize,
+            _options: RenderOptions,
         ) -> Result<RgbaFrame> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             thread::sleep(self.delay);
@@ -385,10 +418,19 @@ mod tests {
         );
         let size = PixelSize::new(8, 8).unwrap();
         service
-            .generate(4, 1, "cube(1);".to_string(), Camera::default(), size)
+            .generate(
+                4,
+                1,
+                "cube(1);".to_string(),
+                Camera::default(),
+                size,
+                RenderOptions::default(),
+            )
             .unwrap();
         assert_eq!(wait_ready(&service).mesh_revision, 4);
-        service.rasterize(2, Camera::default(), size).unwrap();
+        service
+            .rasterize(2, Camera::default(), size, RenderOptions::default())
+            .unwrap();
         let frame = wait_ready(&service);
         assert_eq!(frame.camera_revision, 2);
         assert_eq!(generator_calls.load(Ordering::SeqCst), 1);
@@ -402,10 +444,21 @@ mod tests {
         let service = service(generator_calls, renderer_calls, Duration::from_millis(20));
         let size = PixelSize::new(8, 8).unwrap();
         service
-            .generate(1, 1, "cube(1);".to_string(), Camera::default(), size)
+            .generate(
+                1,
+                1,
+                "cube(1);".to_string(),
+                Camera::default(),
+                size,
+                RenderOptions::default(),
+            )
             .unwrap();
-        service.rasterize(2, Camera::default(), size).unwrap();
-        service.rasterize(3, Camera::default(), size).unwrap();
+        service
+            .rasterize(2, Camera::default(), size, RenderOptions::default())
+            .unwrap();
+        service
+            .rasterize(3, Camera::default(), size, RenderOptions::default())
+            .unwrap();
         let frame = wait_ready(&service);
         assert_eq!(frame.mesh_revision, 1);
         assert_eq!(frame.camera_revision, 3);
@@ -420,7 +473,14 @@ mod tests {
         );
         let size = PixelSize::new(8, 8).unwrap();
         service
-            .generate(1, 1, "cube(1);".to_string(), Camera::default(), size)
+            .generate(
+                1,
+                1,
+                "cube(1);".to_string(),
+                Camera::default(),
+                size,
+                RenderOptions::default(),
+            )
             .unwrap();
         let deadline = std::time::Instant::now() + Duration::from_secs(1);
         let mut started = false;
@@ -432,7 +492,9 @@ mod tests {
             thread::sleep(Duration::from_millis(1));
         }
         assert!(started, "first camera frame did not start rasterizing");
-        service.rasterize(2, Camera::default(), size).unwrap();
+        service
+            .rasterize(2, Camera::default(), size, RenderOptions::default())
+            .unwrap();
 
         assert_eq!(wait_ready(&service).camera_revision, 1);
         assert_eq!(wait_ready(&service).camera_revision, 2);
@@ -446,7 +508,12 @@ mod tests {
             Duration::ZERO,
         );
         service
-            .rasterize(1, Camera::default(), PixelSize::new(8, 8).unwrap())
+            .rasterize(
+                1,
+                Camera::default(),
+                PixelSize::new(8, 8).unwrap(),
+                RenderOptions::default(),
+            )
             .unwrap();
         let deadline = std::time::Instant::now() + Duration::from_secs(1);
         while std::time::Instant::now() < deadline {
@@ -457,5 +524,34 @@ mod tests {
             thread::sleep(Duration::from_millis(2));
         }
         panic!("expected failure event");
+    }
+
+    #[test]
+    fn coalescing_keeps_the_latest_render_options() {
+        let merged = merge(
+            RenderRequest::Generate {
+                mesh_revision: 4,
+                camera_revision: 1,
+                scad_source: "cube(1);".to_string(),
+                camera: Camera::default(),
+                size: PixelSize::new(8, 8).unwrap(),
+                options: RenderOptions { axes: true },
+            },
+            RenderRequest::Rasterize {
+                camera_revision: 2,
+                camera: Camera::default(),
+                size: PixelSize::new(16, 16).unwrap(),
+                options: RenderOptions { axes: false },
+            },
+        );
+
+        assert!(matches!(
+            merged,
+            RenderRequest::Generate {
+                camera_revision: 2,
+                options: RenderOptions { axes: false },
+                ..
+            }
+        ));
     }
 }

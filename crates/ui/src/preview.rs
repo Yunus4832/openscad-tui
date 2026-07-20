@@ -8,7 +8,7 @@ use std::{fs::OpenOptions, io::Write};
 
 use openscad_render::{
     Aabb, Camera, CpuRenderer, OpenScadGenerator, OpenScadProject, PixelSize, Projection,
-    RenderEvent, RenderService, StandardView,
+    RenderEvent, RenderOptions, RenderService, StandardView,
 };
 use openscad_terminal::{DisplayProtocol, PresentationContext, TerminalImage, TerminalPresenter};
 use ratatui::layout::Rect;
@@ -50,6 +50,7 @@ pub struct ModelPreview {
     bounds: Option<Aabb>,
     fitted_revision: Option<u64>,
     pub auto_rotate: bool,
+    pub axes_visible: bool,
     pub metrics: RenderMetrics,
     last_animation_tick: Instant,
     last_presented_at: Option<Instant>,
@@ -88,6 +89,7 @@ impl ModelPreview {
             bounds: None,
             fitted_revision: None,
             auto_rotate: false,
+            axes_visible: true,
             metrics: RenderMetrics::default(),
             last_animation_tick: Instant::now(),
             last_presented_at: None,
@@ -201,6 +203,7 @@ impl ModelPreview {
                 source,
                 self.camera,
                 self.viewport,
+                self.render_options(),
             )
             .map_err(|error| error.to_string())?;
         self.service = Some(service);
@@ -332,6 +335,16 @@ impl ModelPreview {
         self.last_animation_tick = Instant::now();
     }
 
+    pub fn set_axes_visible(&mut self, visible: bool) {
+        if self.axes_visible == visible {
+            return;
+        }
+        self.axes_visible = visible;
+        if self.bounds.is_some() && self.service.is_some() {
+            self.request_rasterize();
+        }
+    }
+
     pub fn stop_auto_rotate(&mut self) {
         render_trace(|| {
             format!(
@@ -417,8 +430,19 @@ impl ModelPreview {
         };
         self.camera_revision = self.camera_revision.wrapping_add(1);
         self.status = ModelPreviewStatus::Rasterizing;
-        if let Err(error) = service.rasterize(self.camera_revision, self.camera, size) {
+        if let Err(error) = service.rasterize(
+            self.camera_revision,
+            self.camera,
+            size,
+            self.render_options(),
+        ) {
             self.status = ModelPreviewStatus::Failed(error.to_string());
+        }
+    }
+
+    fn render_options(&self) -> RenderOptions {
+        RenderOptions {
+            axes: self.axes_visible,
         }
     }
 
@@ -618,6 +642,30 @@ mod tests {
         assert_eq!(preview.camera_revision, initial_revision + 1);
         preview.pan(0.01, -0.01).unwrap();
         assert_eq!(preview.camera_revision, initial_revision + 2);
+    }
+
+    #[test]
+    fn toggling_axes_rasterizes_the_cached_mesh_only() {
+        let mut preview = ModelPreview {
+            bounds: Some(Aabb {
+                min: openscad_render::Vec3::splat(-1.0),
+                max: openscad_render::Vec3::splat(1.0),
+            }),
+            service: Some(RenderService::new(
+                Box::new(OpenScadGenerator::new("unused-in-this-test")),
+                Box::new(CpuRenderer::default()),
+            )),
+            ..ModelPreview::default()
+        };
+        let mesh_revision = preview.mesh_revision;
+        let camera_revision = preview.camera_revision;
+
+        preview.set_axes_visible(false);
+
+        assert!(!preview.axes_visible);
+        assert_eq!(preview.mesh_revision, mesh_revision);
+        assert_eq!(preview.camera_revision, camera_revision + 1);
+        assert_eq!(preview.status, ModelPreviewStatus::Rasterizing);
     }
 
     #[test]

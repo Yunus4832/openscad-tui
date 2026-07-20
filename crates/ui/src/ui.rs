@@ -92,10 +92,16 @@ fn draw_camera_toolbar(f: &mut Frame, app: &mut App, area: Rect) {
     } else {
         "Auto"
     };
+    let axes = if app.model_preview.axes_visible {
+        "Axes-"
+    } else {
+        "Axes+"
+    };
     let buttons = [
         ("P", "Source", "preview source"),
         ("f", "Fit", "camera fit"),
         ("p", projection, "camera projection toggle"),
+        ("x", axes, "axes toggle"),
         ("1", "Front", "camera view front"),
         ("5", "Top", "camera view top"),
         ("7", "Iso", "camera view iso"),
@@ -129,7 +135,7 @@ fn draw_camera_toolbar(f: &mut Frame, app: &mut App, area: Rect) {
         x = x.saturating_add(width + 1);
     }
     let shortcut_help = Line::styled(
-        "h/j/k/l Orbit  Arrows Pan  +/- Zoom  1..7 Views  Esc/q Source  : Command",
+        "h/j/k/l Orbit  Arrows Pan  +/- Zoom  x Axes  1..7 Views  Esc/q Source  : Command",
         Style::default().fg(Color::DarkGray),
     );
     f.render_widget(
@@ -921,6 +927,11 @@ mod tests {
             .camera_buttons
             .iter()
             .any(|button| button.command == "camera view iso"));
+        assert!(app
+            .ui_regions
+            .camera_buttons
+            .iter()
+            .any(|button| button.command == "axes toggle"));
 
         let buffer = terminal.backend().buffer();
         let row = |y| {
@@ -932,6 +943,7 @@ mod tests {
         assert!(buttons.contains("[P Source]"));
         assert!(buttons.contains("[f Fit]"));
         assert!(buttons.contains("[p Ortho]"));
+        assert!(buttons.contains("[x Axes-]"));
         assert!(buttons.contains("[Space Auto]"));
         let shortcuts = row(28);
         assert!(shortcuts.contains("h/j/k/l Orbit"));

@@ -303,6 +303,26 @@ pub fn cmd_protocol(app: &mut App, value: &str) -> CommandResult<()> {
     Ok(())
 }
 
+pub fn cmd_axes(app: &mut App, value: &str) -> CommandResult<()> {
+    let visible = match value {
+        "on" => true,
+        "off" => false,
+        "toggle" => !app.model_preview.axes_visible,
+        _ => {
+            return Err(CommandError::InvalidCommand(
+                "Usage: axes on|off|toggle".to_string(),
+            ))
+        }
+    };
+    app.model_preview.set_axes_visible(visible);
+    app.set_info(if visible {
+        "World axes enabled"
+    } else {
+        "World axes disabled"
+    });
+    Ok(())
+}
+
 #[derive(Error, Debug)]
 pub enum CommandError {
     #[error("Invalid command: {0}")]
@@ -3654,6 +3674,20 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
         false,
         true,
     ));
+
+    registry.register(CommandDef::new(
+        "axes",
+        Vec::<&str>::new(),
+        |app, args| cmd_axes(app, args[0]),
+        "Show or hide depth-aware world axes without regenerating the model",
+        1,
+        Some(1),
+        "axes <on|off|toggle>",
+        vec!["axes toggle", "axes on", "axes off"],
+        CommandType::Axes,
+        false,
+        true,
+    ));
 }
 
 #[cfg(test)]
@@ -4033,6 +4067,18 @@ mod tests {
         assert!(app.model_preview.auto_rotate);
         cmd_camera(&mut app, &["auto-rotate", "toggle"]).unwrap();
         assert!(!app.model_preview.auto_rotate);
+    }
+
+    #[test]
+    fn test_axes_command_toggles_world_axes() {
+        let mut app = App::new();
+        assert!(app.model_preview.axes_visible);
+
+        cmd_axes(&mut app, "toggle").unwrap();
+        assert!(!app.model_preview.axes_visible);
+        cmd_axes(&mut app, "on").unwrap();
+        assert!(app.model_preview.axes_visible);
+        assert!(cmd_axes(&mut app, "invalid").is_err());
     }
 
     #[test]
