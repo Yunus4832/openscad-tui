@@ -3,7 +3,6 @@ use crate::{Camera, Framebuffer, Mesh, PixelSize, RenderOptions, RgbaFrame, Vec2
 const AREA_EPSILON: f32 = 1.0e-6;
 const AXIS_DEPTH_BIAS: f32 = 1.0e-4;
 const AXIS_LENGTH_MARGIN: f32 = 1.1;
-const AXIS_LINE_RADIUS: i32 = 1;
 const AXIS_COLORS: [[u8; 4]; 3] = [[255, 96, 96, 255], [96, 255, 128, 255], [96, 160, 255, 255]];
 const NEGATIVE_AXIS_COLORS: [[u8; 4]; 3] =
     [[128, 52, 52, 255], [52, 128, 68, 255], [52, 84, 128, 255]];
@@ -137,16 +136,10 @@ impl CpuRenderer {
             let depth = (screen[0].depth + (screen[1].depth - screen[0].depth) * factor
                 - AXIS_DEPTH_BIAS)
                 .clamp(0.0, 1.0);
-            let center_x = position.x.round() as i32;
-            let center_y = position.y.round() as i32;
-            for offset_y in -AXIS_LINE_RADIUS..=AXIS_LINE_RADIUS {
-                for offset_x in -AXIS_LINE_RADIUS..=AXIS_LINE_RADIUS {
-                    let x = center_x + offset_x;
-                    let y = center_y + offset_y;
-                    if x >= 0 && y >= 0 {
-                        framebuffer.write_pixel(x as u32, y as u32, depth, color);
-                    }
-                }
+            let x = position.x.round() as i32;
+            let y = position.y.round() as i32;
+            if x >= 0 && y >= 0 {
+                framebuffer.write_pixel(x as u32, y as u32, depth, color);
             }
         }
     }
@@ -445,6 +438,36 @@ mod tests {
                 "missing axis color {color:?}"
             );
         }
+    }
+
+    #[test]
+    fn axis_lines_are_one_pixel_wide() {
+        let renderer = CpuRenderer::default();
+        let size = PixelSize::new(32, 16).unwrap();
+        let mut framebuffer = Framebuffer::new(size, renderer.settings.background);
+
+        renderer.rasterize_line(
+            &mut framebuffer,
+            [
+                Vec4::new(-0.8, 0.0, 0.0, 1.0),
+                Vec4::new(0.8, 0.0, 0.0, 1.0),
+            ],
+            AXIS_COLORS[0],
+        );
+
+        let frame = framebuffer.into_color();
+        let colored_per_column = (0..size.width)
+            .map(|x| {
+                (0..size.height)
+                    .filter(|&y| {
+                        let offset = (y as usize * size.width as usize + x as usize) * 4;
+                        frame.pixels()[offset..offset + 4] == AXIS_COLORS[0]
+                    })
+                    .count()
+            })
+            .collect::<Vec<_>>();
+        assert!(colored_per_column.contains(&1));
+        assert!(colored_per_column.iter().all(|&count| count <= 1));
     }
 
     #[test]

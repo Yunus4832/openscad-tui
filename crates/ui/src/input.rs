@@ -140,15 +140,15 @@ fn handle_preview_mouse(event: MouseEvent, app: &mut App) {
     }
 
     match event.kind {
-        MouseEventKind::Down(MouseButton::Left | MouseButton::Middle) => {
+        MouseEventKind::Down(MouseButton::Left | MouseButton::Right) => {
             app.mouse_drag = Some(MouseDrag {
                 last_column: event.column,
                 last_row: event.row,
-                pan: event.kind == MouseEventKind::Down(MouseButton::Middle)
+                pan: event.kind == MouseEventKind::Down(MouseButton::Right)
                     || event.modifiers.contains(KeyModifiers::SHIFT),
             });
         }
-        MouseEventKind::Drag(MouseButton::Left | MouseButton::Middle) => {
+        MouseEventKind::Drag(MouseButton::Left | MouseButton::Right) => {
             update_model_drag(app, event.column, event.row);
         }
         MouseEventKind::ScrollUp => {
@@ -2886,6 +2886,35 @@ mod tests {
         assert_eq!(app.mouse_drag.unwrap().last_column, 10);
         handle_mouse(
             mouse(MouseEventKind::Up(MouseButton::Left), 10, 5),
+            &mut app,
+        );
+        assert!(app.mouse_drag.is_none());
+    }
+
+    #[test]
+    fn test_right_mouse_drag_pans_and_middle_button_is_ignored() {
+        let mut app = App::new();
+        app.enter_model_screen();
+        app.ui_regions.preview = ratatui::layout::Rect::new(20, 0, 60, 20);
+
+        handle_mouse(
+            mouse(MouseEventKind::Down(MouseButton::Right), 30, 5),
+            &mut app,
+        );
+        assert!(app.mouse_drag.unwrap().pan);
+
+        handle_mouse(
+            mouse(MouseEventKind::Drag(MouseButton::Right), 10, 5),
+            &mut app,
+        );
+        assert_eq!(app.mouse_drag.unwrap().last_column, 10);
+        handle_mouse(
+            mouse(MouseEventKind::Up(MouseButton::Right), 10, 5),
+            &mut app,
+        );
+
+        handle_mouse(
+            mouse(MouseEventKind::Down(MouseButton::Middle), 30, 5),
             &mut app,
         );
         assert!(app.mouse_drag.is_none());
