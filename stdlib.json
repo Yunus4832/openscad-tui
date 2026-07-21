@@ -99,6 +99,128 @@
       ]
     },
     {
+      "name": "polygon",
+      "description": "Creates a 2D polygon from points and optional paths",
+      "accepts_children": false,
+      "parameters": [
+        {
+          "name": "points",
+          "param_type": "list",
+          "description": "List of 2D point coordinates"
+        },
+        {
+          "name": "paths",
+          "param_type": "list",
+          "default": "undef",
+          "description": "Optional lists of point indices defining polygon boundaries"
+        },
+        {
+          "name": "convexity",
+          "param_type": "integer",
+          "default": "1",
+          "description": "Maximum number of front and back faces along a ray"
+        }
+      ]
+    },
+    {
+      "name": "linear_extrude",
+      "description": "Extrudes 2D child geometry along the Z axis",
+      "accepts_children": true,
+      "parameters": [
+        {
+          "name": "height",
+          "param_type": "float",
+          "default": "1",
+          "description": "Extrusion height"
+        },
+        {
+          "name": "center",
+          "param_type": "boolean",
+          "default": "false",
+          "description": "Center the extrusion on the Z axis"
+        },
+        {
+          "name": "convexity",
+          "param_type": "integer",
+          "default": "1",
+          "description": "Maximum number of front and back faces along a ray"
+        },
+        {
+          "name": "twist",
+          "param_type": "float",
+          "default": "0",
+          "description": "Total twist angle in degrees"
+        },
+        {
+          "name": "slices",
+          "param_type": "integer",
+          "default": "undef",
+          "description": "Number of intermediate layers used for twisting"
+        },
+        {
+          "name": "scale",
+          "param_type": "any",
+          "default": "1",
+          "description": "Final XY scale as a scalar or two-element vector"
+        },
+        {
+          "name": "$fn",
+          "param_type": "integer",
+          "default": "0",
+          "description": "Fragment count used to refine a twisted extrusion"
+        },
+        {
+          "name": "$fa",
+          "param_type": "float",
+          "default": "12",
+          "description": "Minimum fragment angle"
+        },
+        {
+          "name": "$fs",
+          "param_type": "float",
+          "default": "2",
+          "description": "Minimum fragment size"
+        }
+      ]
+    },
+    {
+      "name": "rotate_extrude",
+      "description": "Rotates 2D child geometry around the Z axis",
+      "accepts_children": true,
+      "parameters": [
+        {
+          "name": "angle",
+          "param_type": "float",
+          "default": "360",
+          "description": "Sweep angle in degrees"
+        },
+        {
+          "name": "convexity",
+          "param_type": "integer",
+          "default": "1",
+          "description": "Maximum number of front and back faces along a ray"
+        },
+        {
+          "name": "$fn",
+          "param_type": "integer",
+          "default": "0",
+          "description": "Fragment count around the rotation"
+        },
+        {
+          "name": "$fa",
+          "param_type": "float",
+          "default": "12",
+          "description": "Minimum fragment angle"
+        },
+        {
+          "name": "$fs",
+          "param_type": "float",
+          "default": "2",
+          "description": "Minimum fragment size"
+        }
+      ]
+    },
+    {
       "name": "translate",
       "description": "Translates children by a vector",
       "accepts_children": true,

@@ -4,13 +4,13 @@
 //! Command mode: Free text input for complex commands with parameter input
 
 use crate::app::{
-    App, CandidateType, CompletionCandidate, CompletionContext, ExpressionCompletionKind,
-    InputMode, PendingModuleAction,
+    App, CandidateType, CompletionCandidate, CompletionContext, DefinitionCompletionKind,
+    ExpressionCompletionKind, InputMode, PendingModuleAction,
 };
 use crate::command_registry::CommandType;
 use crate::commands;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
-use openscad_core::ModuleNode;
+use openscad_core::{Argument, ModuleNode};
 use openscad_terminal::DisplayProtocol;
 use ratatui::layout::Position;
 use std::fs;
@@ -208,6 +208,12 @@ fn handle_normal_input(key: KeyEvent, app: &mut App) {
             app.input_buffer.set_content("insert ");
         }
 
+        // I - insert a module before the current node
+        KeyCode::Char('I') => {
+            app.input_mode = InputMode::Command;
+            app.input_buffer.set_content("insert-before ");
+        }
+
         // a - edit arguments on selected nodes or the current node
         KeyCode::Char('a') => {
             app.input_mode = InputMode::Command;
@@ -249,6 +255,10 @@ fn handle_normal_input(key: KeyEvent, app: &mut App) {
         // v - select/toggle node
         KeyCode::Char('v') => {
             execute_shortcut(app, "select");
+        }
+
+        KeyCode::Char(' ') => {
+            execute_shortcut(app, "visibility toggle");
         }
 
         // Vim-style structural editing
@@ -353,6 +363,9 @@ fn handle_normal_input(key: KeyEvent, app: &mut App) {
         // P - switch between source and model preview
         KeyCode::Char('P') => execute_shortcut(app, "preview toggle"),
 
+        // R - always render the active buffer and show the new model preview
+        KeyCode::Char('R') => execute_shortcut(app, "render"),
+
         _ => {}
     }
 }
@@ -372,6 +385,7 @@ fn handle_model_key(key: KeyEvent, app: &mut App) {
 fn model_key_command(key: KeyEvent) -> Option<&'static str> {
     match key.code {
         KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('P') => Some("preview source"),
+        KeyCode::Char('R') => Some("render"),
         KeyCode::Char('h') => Some("camera orbit -5 0"),
         KeyCode::Char('l') => Some("camera orbit 5 0"),
         KeyCode::Char('j') => Some("camera orbit 0 -5"),
@@ -591,6 +605,7 @@ fn handle_module_params_input(key: KeyEvent, app: &mut App) {
         KeyCode::Esc => {
             let action = match app.pending_module_action {
                 Some(PendingModuleAction::Insert) => "Insert",
+                Some(PendingModuleAction::InsertBefore) => "Insert before",
                 Some(PendingModuleAction::Replace { .. }) => "Replace",
                 None => "Module action",
             };
@@ -693,13 +708,15 @@ fn execute_command_registry(app: &mut App, cmd: &str, origin: CommandOrigin) -> 
             }
         }
 
+        // Clear stale feedback before execution; handlers may replace it with a useful success
+        // message that must remain visible after the command returns.
+        app.message = None;
         // Execute the command
         match handler(app, args) {
             Ok(_) => {
                 if change_ast {
                     app.mark_dirty();
                 }
-                app.set_info("");
             }
             Err(e) => {
                 app.set_error(&e.to_string());
@@ -970,21 +987,39 @@ fn analyze_input_context(input: &str, app: &App) -> CompletionContext {
                 // 无参数命令：无需补全
                 CompletionContext::Command
             }
-            CommandType::FunctionDefinition => input
-                .find('=')
-                .map(|_| CompletionContext::ExpressionValue {
-                    kind: ExpressionCompletionKind::FunctionBody,
-                    local_identifiers: function_definition_parameters(input),
-                })
-                .unwrap_or(CompletionContext::Command),
+            CommandType::FunctionDefinition => {
+                if input.contains('=') {
+                    CompletionContext::ExpressionValue {
+                        kind: ExpressionCompletionKind::FunctionBody,
+                        local_identifiers: function_definition_parameters(input),
+                    }
+                } else if input.find(char::is_whitespace).is_some()
+                    && !input
+                        .split_once(char::is_whitespace)
+                        .is_some_and(|(_, definition)| definition.contains('('))
+                {
+                    CompletionContext::DefinitionName {
+                        kind: DefinitionCompletionKind::Function,
+                    }
+                } else {
+                    CompletionContext::Command
+                }
+            }
             CommandType::ModuleDefinition => CompletionContext::Command,
-            CommandType::GlobalDefinition => input
-                .find('=')
-                .map(|_| CompletionContext::ExpressionValue {
-                    kind: ExpressionCompletionKind::GlobalValue,
-                    local_identifiers: Vec::new(),
-                })
-                .unwrap_or(CompletionContext::Command),
+            CommandType::GlobalDefinition => {
+                if input.contains('=') {
+                    CompletionContext::ExpressionValue {
+                        kind: ExpressionCompletionKind::GlobalValue,
+                        local_identifiers: Vec::new(),
+                    }
+                } else if input.find(char::is_whitespace).is_some() {
+                    CompletionContext::DefinitionName {
+                        kind: DefinitionCompletionKind::Global,
+                    }
+                } else {
+                    CompletionContext::Command
+                }
+            }
             CommandType::Replace => {
                 if parts.len() == 1 {
                     if input.ends_with(' ') {
@@ -1048,6 +1083,9 @@ fn analyze_input_context(input: &str, app: &App) -> CompletionContext {
             CommandType::Protocol => protocol_command_context(input, &parts),
             CommandType::Axes => {
                 literal_command_context(input, &parts, &["on", "off", "toggle"], &[])
+            }
+            CommandType::Visibility => {
+                literal_command_context(input, &parts, &["show", "hide", "toggle"], &[])
             }
             CommandType::ProjectSource => project_source_command_context(input, &parts, app),
             CommandType::New => literal_command_context(input, &parts, &["project", "file"], &[]),
@@ -1557,6 +1595,53 @@ fn node_parameter_names(app: &App) -> Vec<String> {
         .collect()
 }
 
+fn explicit_node_parameter_value(app: &App, node: &ModuleNode, name: &str) -> Option<String> {
+    if let Some(value) = node.args.iter().find_map(|argument| match argument {
+        Argument::Named {
+            name: argument_name,
+            value,
+        } if argument_name == name => Some(value),
+        _ => None,
+    }) {
+        return Some(value.to_scad());
+    }
+    let position = app
+        .library
+        .get_module(&node.name)?
+        .parameters
+        .iter()
+        .position(|parameter| parameter.name == name)?;
+    node.args
+        .iter()
+        .filter_map(|argument| match argument {
+            Argument::Positional(value) => Some(value),
+            Argument::Named { .. } => None,
+        })
+        .nth(position)
+        .map(|value| value.to_scad())
+}
+
+fn node_parameter_candidates(app: &App) -> Vec<CompletionCandidate> {
+    let targets = completion_target_nodes(app);
+    node_parameter_names(app)
+        .into_iter()
+        .map(|name| {
+            let values = targets
+                .iter()
+                .map(|node| explicit_node_parameter_value(app, node, &name))
+                .collect::<Vec<_>>();
+            let common_value = values.first().cloned().flatten().filter(|value| {
+                values
+                    .iter()
+                    .all(|candidate| candidate.as_ref() == Some(value))
+            });
+            let content =
+                common_value.map_or_else(|| name.clone(), |value| format!("{name}={value}"));
+            CompletionCandidate::new(content, CandidateType::ModuleParam)
+        })
+        .collect()
+}
+
 fn module_scope_parameter_names(app: &App) -> Vec<String> {
     let Some(target) = completion_target_nodes(app).first().copied() else {
         return Vec::new();
@@ -1722,7 +1807,14 @@ fn generate_completions(input: &str, app: &App) -> (Vec<CompletionCandidate>, Co
             }
             candidates
         }
-        CompletionContext::NodeParam | CompletionContext::NodeParamUnset => {
+        CompletionContext::NodeParam => {
+            let candidates = node_parameter_candidates(app);
+            let prefix = whitespace_token_range(input, 1)
+                .map(|(start, end)| &input[start..end])
+                .unwrap_or("");
+            filter_by_prefix(&candidates, prefix)
+        }
+        CompletionContext::NodeParamUnset => {
             let candidates: Vec<CompletionCandidate> = node_parameter_names(app)
                 .into_iter()
                 .map(|name| CompletionCandidate::new(name, CandidateType::ModuleParam))
@@ -1750,18 +1842,36 @@ fn generate_completions(input: &str, app: &App) -> (Vec<CompletionCandidate>, Co
             filter_by_prefix(&candidates, value_source[start..end].trim())
         }
         CompletionContext::ExpressionValue {
-            kind,
-            local_identifiers,
+            local_identifiers, ..
         } => {
-            let candidates = expression_candidates(
-                app,
-                local_identifiers,
-                None,
-                matches!(kind, ExpressionCompletionKind::FunctionBody),
-            );
+            let candidates = expression_candidates(app, local_identifiers, None, true);
             let value_source = input.split_once('=').map(|(_, value)| value).unwrap_or("");
             let (start, end) = value_fragment_range(value_source, 0, value_source.len());
             filter_by_prefix(&candidates, value_source[start..end].trim())
+        }
+        CompletionContext::DefinitionName { kind } => {
+            let candidates = match kind {
+                DefinitionCompletionKind::Function => app
+                    .ast
+                    .function_defines
+                    .iter()
+                    .map(|definition| {
+                        CompletionCandidate::new(definition.name.clone(), CandidateType::Function)
+                    })
+                    .collect::<Vec<_>>(),
+                DefinitionCompletionKind::Global => app
+                    .ast
+                    .global_variables
+                    .iter()
+                    .map(|variable| {
+                        CompletionCandidate::new(variable.name.clone(), CandidateType::GlobalVar)
+                    })
+                    .collect::<Vec<_>>(),
+            };
+            let prefix = whitespace_token_range(input, 1)
+                .map(|(start, end)| &input[start..end])
+                .unwrap_or("");
+            filter_by_prefix(&candidates, prefix)
         }
         CompletionContext::File {
             base_dir,
@@ -1941,6 +2051,9 @@ fn get_replacement_range(input: &str, context: &CompletionContext, app: &App) ->
             let value_start = equals + 1;
             value_fragment_range(input, value_start, input.len())
         }
+        CompletionContext::DefinitionName { .. } => {
+            whitespace_token_range(input, 1).unwrap_or((input.len(), input.len()))
+        }
         CompletionContext::File {
             current_path: _,
             base_dir: _,
@@ -2048,6 +2161,15 @@ fn apply_completion(app: &mut App) {
         CompletionContext::NodeParamValue { .. } | CompletionContext::ExpressionValue { .. } => {
             if candidate.candidate_type == CandidateType::Function {
                 app.input_buffer.insert_str("(");
+            }
+        }
+        CompletionContext::DefinitionName { kind } => match kind {
+            DefinitionCompletionKind::Function => app.input_buffer.insert_str("("),
+            DefinitionCompletionKind::Global => app.input_buffer.insert_str("="),
+        },
+        CompletionContext::NodeParam => {
+            if !candidate.content.contains('=') {
+                app.input_buffer.insert_str("=");
             }
         }
         CompletionContext::NodeParamUnset => {}
@@ -2295,6 +2417,24 @@ mod tests {
 
         let (axes, _) = generate_completions("axes ", &app);
         assert!(axes.iter().any(|candidate| candidate.content == "toggle"));
+
+        let (visibility, _) = generate_completions("visibility ", &app);
+        assert!(visibility
+            .iter()
+            .any(|candidate| candidate.content == "hide"));
+    }
+
+    #[test]
+    fn test_successful_command_keeps_handler_feedback() {
+        let mut app = App::new();
+        app.set_error("stale error");
+        assert!(execute_command_registry(
+            &mut app,
+            "axes off",
+            CommandOrigin::UserInput
+        ));
+        assert_eq!(app.message.as_deref(), Some("World axes disabled"));
+        assert_eq!(app.message_type, crate::app::MessageType::Info);
     }
 
     #[test]
@@ -2452,7 +2592,20 @@ mod tests {
         assert_eq!(parameter_analysis.context, CompletionContext::NodeParam);
         assert!(parameter_candidates
             .iter()
-            .any(|candidate| candidate.content == "size"));
+            .any(|candidate| candidate.content == "size=10"));
+
+        let size_index = parameter_candidates
+            .iter()
+            .position(|candidate| candidate.content == "size=10")
+            .unwrap();
+        app.input_buffer.set_content("set si");
+        app.completion_candidates = parameter_candidates;
+        app.completion_context = parameter_analysis.context;
+        app.completion_replacement_range = parameter_analysis.replacement_range;
+        app.completion_index = size_index;
+        app.completion_active = true;
+        apply_completion(&mut app);
+        assert_eq!(app.input_buffer.content(), "set size=10");
 
         let (value_candidates, value_analysis) = generate_completions("set size=si", &app);
         assert_eq!(
@@ -2484,6 +2637,28 @@ mod tests {
         completion_app.completion_active = true;
         apply_completion(&mut completion_app);
         assert_eq!(completion_app.input_buffer.content(), "unset size");
+    }
+
+    #[test]
+    fn test_set_completion_omits_value_when_selected_nodes_disagree() {
+        let mut app = App::new();
+        let first = commands::cmd_insert(&mut app, "cube", None, Some("size=10")).unwrap();
+        let second = commands::cmd_insert(&mut app, "cube", None, Some("size=20")).unwrap();
+        app.selected_nodes = vec![first, second];
+
+        let (candidates, analysis) = generate_completions("set si", &app);
+        let size_index = candidates
+            .iter()
+            .position(|candidate| candidate.content == "size")
+            .expect("different values should not be echoed");
+        app.input_buffer.set_content("set si");
+        app.completion_candidates = candidates;
+        app.completion_context = analysis.context;
+        app.completion_replacement_range = analysis.replacement_range;
+        app.completion_index = size_index;
+        app.completion_active = true;
+        apply_completion(&mut app);
+        assert_eq!(app.input_buffer.content(), "set size=");
     }
 
     #[test]
@@ -2556,7 +2731,46 @@ mod tests {
     }
 
     #[test]
-    fn test_global_value_completion_is_intentionally_simple() {
+    fn test_definition_name_completion_supports_redefinition() {
+        let mut app = App::new();
+        commands::cmd_global(&mut app, "width=10").unwrap();
+        commands::cmd_funcdef(&mut app, "wave(x) = sin(x)").unwrap();
+
+        let (global_candidates, global_analysis) = generate_completions("global wi", &app);
+        assert_eq!(
+            global_analysis.context,
+            CompletionContext::DefinitionName {
+                kind: DefinitionCompletionKind::Global,
+            }
+        );
+        app.input_buffer.set_content("global wi");
+        app.completion_candidates = global_candidates;
+        app.completion_context = global_analysis.context;
+        app.completion_replacement_range = global_analysis.replacement_range;
+        app.completion_index = 0;
+        app.completion_active = true;
+        apply_completion(&mut app);
+        assert_eq!(app.input_buffer.content(), "global width=");
+
+        let (function_candidates, function_analysis) = generate_completions("function wa", &app);
+        assert_eq!(
+            function_analysis.context,
+            CompletionContext::DefinitionName {
+                kind: DefinitionCompletionKind::Function,
+            }
+        );
+        app.input_buffer.set_content("function wa");
+        app.completion_candidates = function_candidates;
+        app.completion_context = function_analysis.context;
+        app.completion_replacement_range = function_analysis.replacement_range;
+        app.completion_index = 0;
+        app.completion_active = true;
+        apply_completion(&mut app);
+        assert_eq!(app.input_buffer.content(), "function wave(");
+    }
+
+    #[test]
+    fn test_global_value_completion_includes_existing_variables_and_functions() {
         let mut app = App::new();
         commands::cmd_global(&mut app, "width=10").unwrap();
 
@@ -2573,9 +2787,9 @@ mod tests {
             .iter()
             .any(|candidate| candidate.content == "width"));
         let (function_candidates, _) = generate_completions("global size=si", &app);
-        assert!(!function_candidates
-            .iter()
-            .any(|candidate| candidate.candidate_type == CandidateType::Function));
+        assert!(function_candidates.iter().any(|candidate| {
+            candidate.content == "sin" && candidate.candidate_type == CandidateType::Function
+        }));
     }
 
     #[test]
@@ -2671,7 +2885,7 @@ mod tests {
             KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE),
             &mut app,
         );
-        assert_eq!(app.node_clipboard.as_ref().unwrap().id, "cube_1");
+        assert_eq!(app.node_clipboard[0].id, "cube_1");
 
         handle_key(
             KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE),
@@ -2712,6 +2926,73 @@ mod tests {
         );
         assert_eq!(app.input_mode, InputMode::Command);
         assert_eq!(app.input_buffer.content(), "unset ");
+    }
+
+    #[test]
+    fn test_space_toggles_visibility_and_upper_i_opens_insert_before_command() {
+        let mut app = App::new();
+        app.ast_mut()
+            .modules
+            .push(openscad_core::ModuleNode::new_leaf(
+                "cube_1".into(),
+                "cube".into(),
+                Vec::new(),
+            ));
+        app.tree_state
+            .borrow_mut()
+            .select(vec!["__modules".into(), "cube_1".into()]);
+
+        handle_key(
+            KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
+            &mut app,
+        );
+        assert_eq!(app.ast.modules[0].modifier, Some('*'));
+
+        handle_key(
+            KeyEvent::new(KeyCode::Char('I'), KeyModifiers::SHIFT),
+            &mut app,
+        );
+        assert_eq!(app.input_mode, InputMode::Command);
+        assert_eq!(app.input_buffer.content(), "insert-before ");
+    }
+
+    #[test]
+    fn test_d_then_p_swaps_adjacent_nodes_through_registered_commands() {
+        let mut app = App::new();
+        app.ast_mut().modules = vec![
+            openscad_core::ModuleNode::new_leaf(
+                "cube_1".to_string(),
+                "cube".to_string(),
+                Vec::new(),
+            ),
+            openscad_core::ModuleNode::new_leaf(
+                "sphere_1".to_string(),
+                "sphere".to_string(),
+                Vec::new(),
+            ),
+        ];
+        app.tree_state
+            .borrow_mut()
+            .select(vec!["__modules".to_string(), "cube_1".to_string()]);
+
+        handle_key(
+            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
+            &mut app,
+        );
+        handle_key(
+            KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE),
+            &mut app,
+        );
+
+        assert_eq!(
+            app.ast
+                .modules
+                .iter()
+                .map(|node| node.name.as_str())
+                .collect::<Vec<_>>(),
+            ["sphere", "cube"]
+        );
+        assert_eq!(app.undo_stack.len(), 2);
     }
 
     #[test]
@@ -2867,6 +3148,23 @@ mod tests {
     }
 
     #[test]
+    fn test_uppercase_r_shortcut_always_starts_a_fresh_render() {
+        let mut app = App::new();
+        app.model_preview.status = crate::preview::ModelPreviewStatus::Ready { triangles: 12 };
+
+        handle_key(
+            KeyEvent::new(KeyCode::Char('R'), KeyModifiers::SHIFT),
+            &mut app,
+        );
+
+        assert_eq!(app.screen, crate::app::Screen::ModelPreview);
+        assert!(matches!(
+            app.model_preview.status,
+            crate::preview::ModelPreviewStatus::Generating
+        ));
+    }
+
+    #[test]
     fn test_model_mouse_drag_is_captured_until_button_up() {
         let mut app = App::new();
         app.enter_model_screen();
@@ -3011,6 +3309,10 @@ mod tests {
         assert_eq!(
             model_key_command(KeyEvent::new(KeyCode::Char('7'), KeyModifiers::NONE)),
             Some("camera view iso")
+        );
+        assert_eq!(
+            model_key_command(KeyEvent::new(KeyCode::Char('R'), KeyModifiers::SHIFT)),
+            Some("render")
         );
         assert_eq!(
             model_key_command(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),

@@ -26,6 +26,7 @@ use openscad_ui::{
 };
 
 const IMAGE_PROTOCOL_ENV: &str = "OPENSCAD_TUI_IMAGE_PROTOCOL";
+const HISTORY_FILE_NAME: &str = "history.json";
 
 #[derive(Debug, Parser)]
 #[command(
@@ -44,6 +45,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         .map_err(|message| io::Error::new(io::ErrorKind::InvalidInput, message))?;
 
     let mut app = App::new();
+    let history_path = command_history_path();
+    if let Some(path) = &history_path {
+        if let Err(error) = app.load_command_history(path) {
+            eprintln!("warning: could not load command history: {error}");
+        }
+    }
     if let Some(file) = cli.file {
         let filename = file.to_string_lossy();
         if file
@@ -70,7 +77,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     if let Some(protocol_type) = protocol_override {
         app.model_preview.set_protocol_type(protocol_type);
     }
-    let res = run_app(&mut terminal, app);
+    let res = run_app(&mut terminal, &mut app);
 
     // Restore terminal
     disable_raw_mode()?;
@@ -81,11 +88,21 @@ fn main() -> Result<(), Box<dyn Error>> {
     )?;
     terminal.show_cursor()?;
 
+    if let Some(path) = &history_path {
+        if let Err(error) = app.save_command_history(path) {
+            eprintln!("warning: could not save command history: {error}");
+        }
+    }
+
     if let Err(err) = res {
         println!("{:?}", err);
     }
 
     Ok(())
+}
+
+fn command_history_path() -> Option<PathBuf> {
+    dirs::data_local_dir().map(|directory| directory.join("openscad-tui").join(HISTORY_FILE_NAME))
 }
 
 fn image_protocol_override_from_env() -> Result<Option<DisplayProtocol>, String> {
@@ -110,7 +127,7 @@ fn parse_image_protocol_override(value: &str) -> Result<Option<DisplayProtocol>,
     })
 }
 
-fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Result<()> {
+fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> io::Result<()> {
     loop {
         app.poll_render_events();
         app.model_preview.tick(std::time::Instant::now());
@@ -119,7 +136,7 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Result<(
         }
         let draw_started = std::time::Instant::now();
         terminal.draw(|f| {
-            draw(f, &mut app);
+            draw(f, app);
         })?;
         app.model_preview.record_ui_draw(draw_started.elapsed());
 
@@ -137,7 +154,7 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Result<(
             // Drain a bounded batch before drawing another image so a stop key is not trapped
             // behind mouse movement or resize events.
             for _ in 0..64 {
-                handle_event(event::read()?, &mut app);
+                handle_event(event::read()?, app);
                 if !crossterm::event::poll(std::time::Duration::ZERO)? {
                     break;
                 }

@@ -559,12 +559,15 @@ impl ModuleNode {
 
     /// Get the display name, fallback to module name with args
     pub fn get_display_name(&self) -> String {
+        let modifier = self
+            .modifier
+            .map_or_else(String::new, |value| value.to_string());
         if let Some(ref name) = self.display_name {
-            return name.clone();
+            return format!("{modifier}{name}");
         }
 
         if self.args.is_empty() {
-            self.name.clone()
+            format!("{modifier}{}", self.name)
         } else {
             let args_str = self
                 .args
@@ -575,7 +578,7 @@ impl ModuleNode {
                 })
                 .collect::<Vec<_>>()
                 .join(", ");
-            format!("{}({})", self.name, args_str)
+            format!("{modifier}{}({})", self.name, args_str)
         }
     }
 
@@ -1424,14 +1427,12 @@ fn parse_list(content: &str) -> Result<Expr> {
         return Ok(Expr::List(Vec::new()));
     }
 
-    let items: Vec<&str> = content.split(',').collect();
-    let mut exprs = Vec::new();
-
-    for item in items {
-        exprs.push(Expr::parse(item.trim())?);
-    }
-
-    Ok(Expr::List(exprs))
+    let items = split_arguments(content).map_err(AstError::InvalidParameter)?;
+    items
+        .iter()
+        .map(|item| Expr::parse(item))
+        .collect::<Result<Vec<_>>>()
+        .map(Expr::List)
 }
 
 fn is_valid_identifier(s: &str) -> bool {
@@ -1753,9 +1754,7 @@ fn split_arguments(input: &str) -> std::result::Result<Vec<String>, String> {
             }
             ',' if !in_quotes && paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 => {
                 // This comma is an argument separator
-                if !current.trim().is_empty() {
-                    args.push(current.trim().to_string());
-                }
+                args.push(current.trim().to_string());
                 current.clear();
             }
             _ => current.push(ch),
@@ -1763,7 +1762,7 @@ fn split_arguments(input: &str) -> std::result::Result<Vec<String>, String> {
     }
 
     // Add the last argument
-    if !current.trim().is_empty() {
+    if !current.trim().is_empty() || !args.is_empty() {
         args.push(current.trim().to_string());
     }
 
@@ -1883,6 +1882,25 @@ mod tests {
     fn test_expr_parse_boolean() {
         assert_eq!(Expr::parse("true").unwrap(), Expr::Boolean(true));
         assert_eq!(Expr::parse("false").unwrap(), Expr::Boolean(false));
+    }
+
+    #[test]
+    fn test_expr_parse_nested_lists_and_list_functions() {
+        let expression = Expr::parse("[[1, 2], [sin(angle), [3, 4]]]").unwrap();
+
+        assert_eq!(expression.to_scad(), "[[1, 2], [sin(angle), [3, 4]]]");
+        assert!(matches!(
+            expression,
+            Expr::List(items)
+                if matches!(&items[0], Expr::List(inner) if inner.len() == 2)
+                    && matches!(&items[1], Expr::List(inner) if inner.len() == 2)
+        ));
+    }
+
+    #[test]
+    fn test_expr_rejects_empty_list_items() {
+        assert!(Expr::parse("[1,,2]").is_err());
+        assert!(Expr::parse("[1,]").is_err());
     }
 
     #[test]

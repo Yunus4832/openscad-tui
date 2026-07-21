@@ -190,6 +190,9 @@ impl OpenScadGenerator {
         let stdout = fs::read_to_string(stdout_path).unwrap_or_default();
         let stderr = fs::read_to_string(stderr_path).unwrap_or_default();
         if !status.success() {
+            if stderr.contains("Current top level object is not a 3D object") {
+                return Err(RenderError::OpenScadNon3d { stderr });
+            }
             return Err(RenderError::OpenScadFailed {
                 exit_code: status.code(),
                 stderr,
@@ -431,6 +434,18 @@ mod tests {
                 .generate("cube(1);"),
             Err(RenderError::OpenScadTimeout { .. })
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn classifies_top_level_2d_export_failure() {
+        let (directory, executable) = executable_script(
+            "#!/bin/sh\necho 'Current top level object is not a 3D object.' >&2\nexit 1\n",
+        );
+        let result = OpenScadGenerator::new(executable)
+            .with_working_directory(directory.path())
+            .generate("polygon(points=[[0,0],[1,0],[0,1]]);");
+        assert!(matches!(result, Err(RenderError::OpenScadNon3d { .. })));
     }
 
     #[test]

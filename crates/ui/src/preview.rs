@@ -56,6 +56,7 @@ pub struct ModelPreview {
     last_presented_at: Option<Instant>,
     last_drawn_sequence: u64,
     presentation_error: Option<String>,
+    last_error_details: Option<String>,
 }
 
 impl Default for ModelPreview {
@@ -95,6 +96,7 @@ impl ModelPreview {
             last_presented_at: None,
             last_drawn_sequence: 0,
             presentation_error: None,
+            last_error_details: None,
         }
     }
 
@@ -116,6 +118,12 @@ impl ModelPreview {
 
     pub fn presentation_error(&self) -> Option<&str> {
         self.presentation_error.as_deref()
+    }
+
+    pub fn diagnostics(&self) -> Option<&str> {
+        self.presentation_error
+            .as_deref()
+            .or(self.last_error_details.as_deref())
     }
 
     pub fn set_protocol_type(&mut self, protocol: DisplayProtocol) {
@@ -181,6 +189,7 @@ impl ModelPreview {
         self.fitted_revision = None;
         self.presenter.clear();
         self.status = ModelPreviewStatus::Generating;
+        self.last_error_details = None;
 
         let working_directory = project_file
             .and_then(|file| Path::new(file).parent())
@@ -273,7 +282,8 @@ impl ModelPreview {
                 } if mesh_revision == self.mesh_revision
                     && camera_revision == self.camera_revision =>
                 {
-                    self.status = ModelPreviewStatus::Failed(error.to_string());
+                    self.last_error_details = Some(error.to_string());
+                    self.status = ModelPreviewStatus::Failed(error.summary());
                 }
                 _ => {}
             }
@@ -436,7 +446,8 @@ impl ModelPreview {
             size,
             self.render_options(),
         ) {
-            self.status = ModelPreviewStatus::Failed(error.to_string());
+            self.last_error_details = Some(error.to_string());
+            self.status = ModelPreviewStatus::Failed(error.summary());
         }
     }
 

@@ -39,6 +39,9 @@ pub enum RenderError {
         stderr: String,
     },
 
+    #[error("OpenSCAD cannot export the top-level 2D object as a 3D OFF mesh: {stderr}")]
+    OpenScadNon3d { stderr: String },
+
     #[error("no generated mesh is available for camera rendering")]
     NoCachedMesh,
 
@@ -46,4 +49,33 @@ pub enum RenderError {
     WorkerDisconnected,
 }
 
+impl RenderError {
+    /// A compact, actionable message suitable for a status line.
+    pub fn summary(&self) -> String {
+        match self {
+            Self::OpenScadNon3d { .. } => {
+                "2D object: extrude before render; :diagnostics for details".to_string()
+            }
+            Self::OpenScadFailed { exit_code, .. } => {
+                format!("OpenSCAD failed (exit code {exit_code:?}); run :diagnostics")
+            }
+            _ => self.to_string(),
+        }
+    }
+}
+
 pub type Result<T> = std::result::Result<T, RenderError>;
+
+#[cfg(test)]
+mod tests {
+    use super::RenderError;
+
+    #[test]
+    fn non_3d_summary_is_actionable_without_flattening_diagnostics() {
+        let error = RenderError::OpenScadNon3d {
+            stderr: "Current top level object is not a 3D object.".into(),
+        };
+        assert!(error.summary().contains("extrude"));
+        assert!(error.to_string().contains("Current top level object"));
+    }
+}

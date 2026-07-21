@@ -32,6 +32,7 @@ pub enum CommandType {
     New,
     Export,
     Axes,
+    Visibility,
 }
 
 /// Command type - used for dynamic completion context analysis

@@ -345,6 +345,39 @@ mod tests {
     }
 
     #[test]
+    fn test_polygon_and_extrusion_builtin_signatures() {
+        let manager = LibraryManager::new();
+        let polygon = manager.get_module("polygon").unwrap();
+        assert!(!polygon.accepts_children);
+        assert_eq!(
+            polygon
+                .parameters
+                .iter()
+                .map(|parameter| parameter.name.as_str())
+                .collect::<Vec<_>>(),
+            ["points", "paths", "convexity"]
+        );
+
+        let linear = manager.get_module("linear_extrude").unwrap();
+        assert!(linear.accepts_children);
+        for parameter in ["height", "center", "twist", "slices", "scale", "$fn"] {
+            assert!(linear
+                .parameters
+                .iter()
+                .any(|definition| definition.name == parameter));
+        }
+
+        let rotate = manager.get_module("rotate_extrude").unwrap();
+        assert!(rotate.accepts_children);
+        for parameter in ["angle", "convexity", "$fn"] {
+            assert!(rotate
+                .parameters
+                .iter()
+                .any(|definition| definition.name == parameter));
+        }
+    }
+
+    #[test]
     fn test_get_builtin_function() {
         let manager = LibraryManager::new();
         let sin = manager.get_function("sin");

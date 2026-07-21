@@ -323,6 +323,69 @@ pub fn cmd_axes(app: &mut App, value: &str) -> CommandResult<()> {
     Ok(())
 }
 
+pub fn cmd_visibility(app: &mut App, value: &str) -> CommandResult<()> {
+    if !matches!(value, "show" | "hide" | "toggle") {
+        return Err(CommandError::InvalidCommand(
+            "Usage: visibility show|hide|toggle".to_string(),
+        ));
+    }
+    let target_ids = selected_or_current_node_ids(app)?;
+    if target_ids
+        .iter()
+        .any(|node_id| node_id.starts_with("__") || app.ast.find_node_anywhere(node_id).is_none())
+    {
+        return Err(CommandError::InvalidCommand(
+            "Visibility can only be changed on module nodes".to_string(),
+        ));
+    }
+
+    app.push_undo();
+    for node_id in &target_ids {
+        let node = app
+            .ast_mut()
+            .find_node_anywhere_mut(node_id)
+            .expect("targets were validated before mutation");
+        node.modifier = match value {
+            "hide" => Some('*'),
+            "show" if node.modifier == Some('*') => None,
+            "show" => node.modifier,
+            "toggle" if node.modifier == Some('*') => None,
+            "toggle" => Some('*'),
+            _ => unreachable!(),
+        };
+    }
+    app.set_info(&format!("{value} {} module node(s)", target_ids.len()));
+    Ok(())
+}
+
+pub fn cmd_diagnostics(app: &mut App, destination: Option<&str>) -> CommandResult<()> {
+    let details = app
+        .model_preview
+        .diagnostics()
+        .ok_or_else(|| CommandError::Custom("No render or display diagnostic is available".into()))?
+        .to_string();
+    if let Some(destination) = destination {
+        let destination = expand_tilde(destination);
+        fs::write(&destination, &details).map_err(|error| {
+            CommandError::Custom(format!(
+                "Failed to write diagnostics to '{}': {error}",
+                destination.display()
+            ))
+        })?;
+        app.set_info(&format!("Wrote diagnostics to '{}'", destination.display()));
+    } else {
+        let mut lines = vec!["Latest render diagnostic".to_string(), String::new()];
+        lines.extend(details.lines().map(str::to_string));
+        lines.extend([
+            String::new(),
+            "Use :diagnostics <file> to save this report.".to_string(),
+        ]);
+        app.set_help_doc(lines);
+        app.input_mode = InputMode::Help;
+    }
+    Ok(())
+}
+
 #[derive(Error, Debug)]
 pub enum CommandError {
     #[error("Invalid command: {0}")]
@@ -401,13 +464,36 @@ pub fn cmd_insert(
     params: Option<&str>,
 ) -> CommandResult<String> {
     let prepared = prepare_module(app, module_name, params)?;
-    insert_prepared_module(app, module_name, prepared)
+    insert_prepared_module(app, module_name, prepared, false)
+}
+
+pub fn cmd_insert_before(
+    app: &mut App,
+    module_name: &str,
+    params: Option<&str>,
+) -> CommandResult<String> {
+    ensure_insert_before_target(app)?;
+    let prepared = prepare_module(app, module_name, params)?;
+    insert_prepared_module(app, module_name, prepared, true)
+}
+
+fn ensure_insert_before_target(app: &App) -> CommandResult<()> {
+    let selected = app.tree_state.borrow().selected().last().cloned();
+    if selected.as_ref().is_none_or(|node_id| {
+        node_id.starts_with("__") || app.ast.find_node_anywhere(node_id).is_none()
+    }) {
+        return Err(CommandError::InvalidCommand(
+            "insert-before requires the cursor to be on a module node".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn insert_prepared_module(
     app: &mut App,
     module_name: &str,
     prepared: PreparedModule,
+    before: bool,
 ) -> CommandResult<String> {
     let node_id = prepared.node.id.clone();
 
@@ -436,6 +522,9 @@ fn insert_prepared_module(
 
         // Determine insertion point based on current selection
         let selected = app.tree_state.borrow().selected().last().cloned();
+        if before {
+            ensure_insert_before_target(app)?;
+        }
 
         // Check if selected node is in a module definition
         let mut in_module_def = if let Some(ref selected_id) = selected {
@@ -486,7 +575,11 @@ fn insert_prepared_module(
                 app.ast_mut().module_defines[mod_def_idx].body.push(module);
             } else {
                 // Insert after the selected node in module definition body
-                app.ast_mut().insert_after(&selected_id, module)?;
+                if before {
+                    app.ast_mut().insert_before(&selected_id, module)?;
+                } else {
+                    app.ast_mut().insert_after(&selected_id, module)?;
+                }
             }
         } else {
             // Check if selected node is in Modules section (not a section header)
@@ -503,7 +596,11 @@ fn insert_prepared_module(
                 app.ast_mut().add_module(module)?;
             } else if let Some(selected_id) = selected {
                 // Find the selected node and insert after it
-                app.ast_mut().insert_after(&selected_id, module)?;
+                if before {
+                    app.ast_mut().insert_before(&selected_id, module)?;
+                } else {
+                    app.ast_mut().insert_after(&selected_id, module)?;
+                }
             }
         }
 
@@ -543,6 +640,99 @@ fn insert_prepared_module(
     }
 }
 
+fn module_sibling_ids(nodes: &[ModuleNode], target_id: &str) -> Option<Vec<String>> {
+    if nodes.iter().any(|node| node.id == target_id) {
+        return Some(nodes.iter().map(|node| node.id.clone()).collect());
+    }
+    nodes
+        .iter()
+        .find_map(|node| module_sibling_ids(&node.children, target_id))
+}
+
+fn deletion_path(app: &App, target_id: &str) -> Option<Vec<String>> {
+    let section = if target_id.starts_with("__var_") {
+        Some("__globals")
+    } else if target_id.starts_with("__func_") {
+        Some("__functions")
+    } else if target_id.starts_with("__moddef_") {
+        Some("__moddefs")
+    } else {
+        None
+    };
+    section
+        .map(|section| vec![section.to_string(), target_id.to_string()])
+        .or_else(|| app.find_node_path(target_id))
+}
+
+fn sibling_ids(app: &App, target_id: &str) -> Option<Vec<String>> {
+    if target_id.starts_with("__var_") {
+        return Some(
+            app.ast
+                .global_variables
+                .iter()
+                .map(|variable| format!("__var_{}", variable.name))
+                .collect(),
+        );
+    }
+    if target_id.starts_with("__func_") {
+        return Some(
+            app.ast
+                .function_defines
+                .iter()
+                .map(|function| format!("__func_{}", function.name))
+                .collect(),
+        );
+    }
+    if target_id.starts_with("__moddef_") {
+        return Some(
+            app.ast
+                .module_defines
+                .iter()
+                .map(|module| format!("__moddef_{}", module.name))
+                .collect(),
+        );
+    }
+    module_sibling_ids(&app.ast.modules, target_id).or_else(|| {
+        app.ast
+            .module_defines
+            .iter()
+            .find_map(|definition| module_sibling_ids(&definition.body, target_id))
+    })
+}
+
+fn selection_after_removing(app: &App, target_ids: &[String]) -> Option<Vec<String>> {
+    let removed = target_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+    let (target_id, target_path) = target_ids
+        .iter()
+        .filter_map(|target_id| deletion_path(app, target_id).map(|path| (target_id, path)))
+        .min_by_key(|(_, path)| path.len())?;
+    let siblings = sibling_ids(app, target_id)?;
+    let position = siblings.iter().position(|sibling| sibling == target_id)?;
+    let nearest = siblings[position + 1..]
+        .iter()
+        .find(|sibling| !removed.contains(sibling.as_str()))
+        .or_else(|| {
+            siblings[..position]
+                .iter()
+                .rev()
+                .find(|sibling| !removed.contains(sibling.as_str()))
+        });
+
+    nearest
+        .and_then(|sibling| deletion_path(app, sibling))
+        .or_else(|| (target_path.len() > 1).then(|| target_path[..target_path.len() - 1].to_vec()))
+}
+
+fn restore_selection_after_removing(app: &mut App, selection: Option<Vec<String>>) {
+    if let Some(selection) = selection {
+        app.tree_state.borrow_mut().select(selection);
+    }
+    app.validate_tree_state();
+}
+
 /// Delete command
 pub fn cmd_delete(app: &mut App, node_id: &str) -> CommandResult<()> {
     let node_ids = if !node_id.is_empty() {
@@ -571,6 +761,8 @@ pub fn cmd_delete(app: &mut App, node_id: &str) -> CommandResult<()> {
         )));
     }
 
+    let fallback_selection = selection_after_removing(app, &node_ids);
+    let mut cut_nodes = Vec::new();
     for target_id in &node_ids {
         if let Some(name) = target_id.strip_prefix("__var_") {
             app.ast_mut().remove_global_variable(name)?;
@@ -580,13 +772,17 @@ pub fn cmd_delete(app: &mut App, node_id: &str) -> CommandResult<()> {
             app.ast_mut().remove_module_define(name)?;
         } else if app.ast.find_node_anywhere(target_id).is_some() {
             // A selected descendant may already have been removed with its parent.
-            let _ = app.ast_mut().delete_node(target_id);
+            if let Ok(node) = app.ast_mut().delete_node(target_id) {
+                cut_nodes.push(node);
+            }
         }
+    }
+    if !cut_nodes.is_empty() {
+        app.node_clipboard = cut_nodes;
     }
     reload_project_definitions(app);
     app.selected_nodes.clear();
-
-    app.restore_tree_selection();
+    restore_selection_after_removing(app, fallback_selection);
 
     Ok(())
 }
@@ -1839,12 +2035,13 @@ fn general_help_doc(app: &App) -> Vec<String> {
         "  j/k/h/l or arrows  navigate and expand/collapse the tree".to_string(),
         "  Enter              toggle node expansion".to_string(),
         "  v                  select/deselect current node".to_string(),
-        "  y / p              yank / paste module subtree".to_string(),
+        "  y / p              yank / paste module subtree(s)".to_string(),
         "  x                  remove node and promote its children".to_string(),
         "  c                  change current node (replace)".to_string(),
         "  i                  start insert command".to_string(),
         "  t/r/s              start translate/rotate/scale command".to_string(),
-        "  d                  delete current or selected nodes".to_string(),
+        "  d                  cut current or selected module subtree(s)".to_string(),
+        "  P / R              toggle preview / render a fresh model preview".to_string(),
         "  u / Ctrl+R         undo / redo".to_string(),
         "  w/o/e/L            save / open project / edit SCAD / load library".to_string(),
         "  :                  enter command mode".to_string(),
@@ -1902,6 +2099,10 @@ pub fn cmd_help(app: &mut App, command: Option<&str>) -> CommandResult<()> {
     app.set_help_doc(docs);
     app.input_mode = InputMode::Help;
     Ok(())
+}
+
+pub fn cmd_version(app: &mut App) {
+    app.set_info(&format!("openscad-tui {}", env!("CARGO_PKG_VERSION")));
 }
 
 /// Expand tilde (~) in file paths to the user's home directory
@@ -2217,22 +2418,30 @@ pub fn cmd_yank(app: &mut App, node_id: Option<&str>) -> CommandResult<()> {
     }
     let node = find_module_node(app, &node_id)
         .ok_or_else(|| CommandError::InvalidCommand(format!("Node not found: {}", node_id)))?;
-    app.node_clipboard = Some(node);
+    app.node_clipboard = vec![node];
     app.set_info(&format!("Yanked node: {}", node_id));
     Ok(())
 }
 
 pub fn cmd_paste(app: &mut App) -> CommandResult<String> {
-    let clipboard = app
+    if app.node_clipboard.is_empty() {
+        return Err(CommandError::InvalidCommand(
+            "Clipboard is empty".to_string(),
+        ));
+    }
+    let pasted = app
         .node_clipboard
-        .as_ref()
-        .ok_or_else(|| CommandError::InvalidCommand("Clipboard is empty".to_string()))?;
-    let pasted = clone_module_with_new_ids(clipboard);
-    let pasted_id = pasted.id.clone();
+        .iter()
+        .map(clone_module_with_new_ids)
+        .collect::<Vec<_>>();
+    let pasted_ids = pasted
+        .iter()
+        .map(|node| node.id.clone())
+        .collect::<Vec<_>>();
     let target_id = selected_tree_id(app).unwrap_or_else(|_| "__modules".to_string());
 
     if target_id == "__modules" {
-        app.ast_mut().modules.push(pasted);
+        app.ast_mut().modules.extend(pasted);
     } else if let Some(module_name) = target_id.strip_prefix("__moddef_") {
         let definition = app
             .ast_mut()
@@ -2245,19 +2454,28 @@ pub fn cmd_paste(app: &mut App) -> CommandResult<String> {
                     module_name
                 ))
             })?;
-        definition.body.push(pasted);
+        definition.body.extend(pasted);
     } else if target_id.starts_with("__") {
         return Err(CommandError::InvalidCommand(
             "Select a module node or the Modules section before pasting".to_string(),
         ));
     } else {
-        app.ast_mut().insert_after(&target_id, pasted)?;
+        let mut insertion_target = target_id;
+        for node in pasted {
+            let pasted_id = node.id.clone();
+            app.ast_mut().insert_after(&insertion_target, node)?;
+            insertion_target = pasted_id;
+        }
     }
 
+    let pasted_id = pasted_ids
+        .last()
+        .expect("non-empty clipboard produces pasted nodes")
+        .clone();
     if let Some(path) = app.find_node_path(&pasted_id) {
         app.tree_state.borrow_mut().select(path);
     }
-    app.set_info(&format!("Pasted node: {}", pasted_id));
+    app.set_info(&format!("Pasted {} node(s)", pasted_ids.len()));
     Ok(pasted_id)
 }
 
@@ -2276,12 +2494,13 @@ pub fn cmd_remove(app: &mut App, node_id: Option<&str>) -> CommandResult<()> {
         ));
     }
 
+    let fallback_selection = selection_after_removing(app, &node_ids);
     for node_id in &node_ids {
         app.ast_mut().remove_node_promote_children(node_id)?;
     }
 
     app.selected_nodes.clear();
-    app.restore_tree_selection();
+    restore_selection_after_removing(app, fallback_selection);
     app.set_info(&format!("Removed {} node(s)", node_ids.len()));
     Ok(())
 }
@@ -2371,7 +2590,10 @@ pub fn commit_pending_module_action(app: &mut App, params: &str) -> CommandResul
     let prepared = prepare_module(app, &module_name, Some(params))?;
     app.push_undo();
     let result = match action {
-        PendingModuleAction::Insert => insert_prepared_module(app, &module_name, prepared),
+        PendingModuleAction::Insert => insert_prepared_module(app, &module_name, prepared, false),
+        PendingModuleAction::InsertBefore => {
+            insert_prepared_module(app, &module_name, prepared, true)
+        }
         PendingModuleAction::Replace { target_ids } => {
             let mut result = None;
             let mut first_prepared = Some(prepared);
@@ -2397,6 +2619,57 @@ pub fn commit_pending_module_action(app: &mut App, params: &str) -> CommandResul
     }?;
     app.update_navigation_status();
     Ok(result)
+}
+
+fn run_insert_command(app: &mut App, args: &[&str], before: bool) -> CommandResult<()> {
+    if args.is_empty() {
+        let command = if before { "insert-before" } else { "insert" };
+        return Err(CommandError::InvalidCommand(format!(
+            "Usage: {command} <module_name> [params]"
+        )));
+    }
+    let module_name = args[0];
+    let module_def = app
+        .library
+        .get_module(module_name)
+        .ok_or_else(|| CommandError::InvalidCommand(format!("Unknown module: {module_name}")))?;
+    if module_def.accepts_children && app.selected_nodes.is_empty() {
+        return Err(CommandError::InvalidCommand(format!(
+            "'{module_name}' requires child modules. Select modules with 'v' first"
+        )));
+    }
+    if before && !module_def.accepts_children {
+        ensure_insert_before_target(app)?;
+    }
+    let params = (args.len() > 1).then(|| args[1..].join(" "));
+    if params.is_none() && !module_def.parameters.is_empty() {
+        let action = if before {
+            PendingModuleAction::InsertBefore
+        } else {
+            PendingModuleAction::Insert
+        };
+        begin_pending_module_action(app, action, module_name);
+        return Ok(());
+    }
+
+    app.push_undo();
+    let result = if before {
+        cmd_insert_before(app, module_name, params.as_deref().or(Some("")))
+    } else {
+        cmd_insert(app, module_name, None, params.as_deref().or(Some("")))
+    }?;
+    app.update_navigation_status();
+    app.set_info(&format!(
+        "Inserted '{}' {}",
+        module_name,
+        if before {
+            "before the current node"
+        } else {
+            "after the current node"
+        }
+    ));
+    let _ = result;
+    Ok(())
 }
 
 /// Find the parent ID of a node in a module tree
@@ -2784,7 +3057,7 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
             app.push_undo();
             cmd_delete(app, "")
         },
-        "Delete selected module subtrees or the current node, global, or function definition",
+        "Cut selected module subtrees, or delete the current global or definition",
         0,
         Some(0),
         "delete",
@@ -3132,6 +3405,28 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
         true,
     ));
 
+    registry.register(CommandDef::new(
+        "version",
+        vec!["ver"],
+        |app, args| {
+            if !args.is_empty() {
+                return Err(CommandError::InvalidCommand(
+                    "version command takes no arguments".to_string(),
+                ));
+            }
+            cmd_version(app);
+            Ok(())
+        },
+        "Show the OpenSCAD TUI version",
+        0,
+        Some(0),
+        "version",
+        vec!["version", "ver"],
+        CommandType::NoArg,
+        false,
+        true,
+    ));
+
     // Transform commands
     registry.register(CommandDef::new(
         "translate",
@@ -3295,63 +3590,26 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
     registry.register(CommandDef::new(
         "insert",
         vec!["i"],
-        |app, args| {
-            if args.is_empty() {
-                return Err(CommandError::InvalidCommand(
-                    "Usage: insert <module_name> [params]".to_string(),
-                ));
-            }
-
-            let module_name = args[0];
-
-            // Get module definition to check parameters and children requirements
-            let module_def = app.library.get_module(module_name);
-            if module_def.is_none() {
-                return Err(CommandError::InvalidCommand(format!(
-                    "Unknown module: {}",
-                    module_name
-                )));
-            }
-            let module_def = module_def.unwrap();
-
-            // Check if this module accepts children
-            if module_def.accepts_children && app.selected_nodes.is_empty() {
-                return Err(CommandError::InvalidCommand(format!(
-                    "'{}' requires child modules. Select modules with 'v' first",
-                    module_name
-                )));
-            }
-
-            // Determine if module has parameters
-            let module_has_params = !module_def.parameters.is_empty();
-
-            // Get parameters if provided
-            let params = if args.len() > 1 {
-                Some(args[1..].join(" "))
-            } else {
-                None
-            };
-
-            // If params not provided and module has parameters, ask for them in next stage
-            if params.is_none() && module_has_params {
-                begin_pending_module_action(app, PendingModuleAction::Insert, module_name);
-                return Ok(());
-            }
-
-            // If no params provided and module has no parameters, use empty params
-            let final_params = params.or_else(|| Some(String::new()));
-
-            app.push_undo();
-            cmd_insert(app, module_name, None, final_params.as_deref()).map(|_| {
-                app.update_navigation_status();
-                app.set_info(&format!("Inserted: {}", module_name));
-            })
-        },
+        |app, args| run_insert_command(app, args, false),
         "Insert a module into the AST",
         1,
         None, // Variable number of parameters (optional)
         "insert <module_name> [params]",
         vec!["insert cube", "i sphere", "insert translate 10,0,0"],
+        CommandType::Module,
+        true,
+        true,
+    ));
+
+    registry.register(CommandDef::new(
+        "insert-before",
+        vec!["I"],
+        |app, args| run_insert_command(app, args, true),
+        "Insert a module immediately before the current module node",
+        1,
+        None,
+        "insert-before <module_name> [params]",
+        vec!["insert-before cube size=10", "I sphere r=5"],
         CommandType::Module,
         true,
         true,
@@ -3485,7 +3743,7 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
             app.push_undo();
             cmd_paste(app).map(|_| ())
         },
-        "Paste a copied subtree after the current module node",
+        "Paste copied or cut subtrees after the current module node",
         0,
         Some(0),
         "paste",
@@ -3712,6 +3970,34 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
         false,
         true,
     ));
+
+    registry.register(CommandDef::new(
+        "visibility",
+        vec!["visible"],
+        |app, args| cmd_visibility(app, args[0]),
+        "Show, hide, or toggle selected/current modules using OpenSCAD's * modifier",
+        1,
+        Some(1),
+        "visibility <show|hide|toggle>",
+        vec!["visibility hide", "visibility show", "visibility toggle"],
+        CommandType::Visibility,
+        true,
+        true,
+    ));
+
+    registry.register(CommandDef::new(
+        "diagnostics",
+        vec!["diag"],
+        |app, args| cmd_diagnostics(app, args.first().copied()),
+        "Show the full latest render error or save it to a file",
+        0,
+        Some(1),
+        "diagnostics [file]",
+        vec!["diagnostics", "diagnostics ~/openscad-error.log"],
+        CommandType::File,
+        false,
+        true,
+    ));
 }
 
 #[cfg(test)]
@@ -3719,6 +4005,39 @@ mod tests {
     use super::*;
     #[allow(unused_imports)]
     use App;
+
+    #[test]
+    fn test_visibility_hides_shows_and_toggles_selected_modules() {
+        let mut app = App::new();
+        app.ast_mut()
+            .add_module(ModuleNode::new_leaf(
+                "cube_1".into(),
+                "cube".into(),
+                Vec::new(),
+            ))
+            .unwrap();
+        app.selected_nodes = vec!["cube_1".into()];
+
+        cmd_visibility(&mut app, "hide").unwrap();
+        assert_eq!(app.ast.modules[0].modifier, Some('*'));
+        assert_eq!(app.ast.modules[0].to_scad(0), "*cube();");
+
+        cmd_visibility(&mut app, "toggle").unwrap();
+        assert_eq!(app.ast.modules[0].modifier, None);
+
+        app.ast_mut().modules[0].modifier = Some('#');
+        cmd_visibility(&mut app, "show").unwrap();
+        assert_eq!(app.ast.modules[0].modifier, Some('#'));
+    }
+
+    #[test]
+    fn test_diagnostics_reports_when_no_failure_is_available() {
+        let mut app = App::new();
+        let error = cmd_diagnostics(&mut app, None).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("No render or display diagnostic"));
+    }
 
     #[test]
     fn test_render_rewrites_embedded_absolute_dependencies_to_virtual_paths() {
@@ -4057,6 +4376,18 @@ mod tests {
     }
 
     #[test]
+    fn test_cmd_version_uses_package_version() {
+        let mut app = App::new();
+        cmd_version(&mut app);
+        assert_eq!(
+            app.message.as_deref(),
+            Some(concat!("openscad-tui ", env!("CARGO_PKG_VERSION")))
+        );
+        assert!(app.command_registry.find("version").is_some());
+        assert!(app.command_registry.find("ver").is_some());
+    }
+
+    #[test]
     fn test_source_preview_requests_terminal_graphics_clear() {
         let mut app = App::new();
         app.enter_model_screen();
@@ -4216,7 +4547,7 @@ mod tests {
         cmd_remove(&mut app, Some("cube_1")).expect("remove should succeed");
 
         assert!(app.ast.find_node_by_id("cube_1").is_none());
-        assert_eq!(app.node_clipboard.as_ref().unwrap().id, "cube_1");
+        assert_eq!(app.node_clipboard[0].id, "cube_1");
     }
 
     #[test]
@@ -4237,6 +4568,91 @@ mod tests {
         assert_eq!(app.ast.modules.len(), 1);
         assert_eq!(app.ast.modules[0].id, "keep_1");
         assert!(app.selected_nodes.is_empty());
+        assert_eq!(app.node_clipboard.len(), 2);
+        assert_eq!(
+            app.tree_state.borrow().selected(),
+            ["__modules".to_string(), "keep_1".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_cmd_delete_then_paste_swaps_adjacent_nodes() {
+        let mut app = App::new();
+        app.ast_mut().modules = vec![
+            ModuleNode::new_leaf("cube_1".to_string(), "cube".to_string(), Vec::new()),
+            ModuleNode::new_leaf("sphere_1".to_string(), "sphere".to_string(), Vec::new()),
+            ModuleNode::new_leaf("cylinder_1".to_string(), "cylinder".to_string(), Vec::new()),
+        ];
+        app.tree_state
+            .borrow_mut()
+            .select(vec!["__modules".to_string(), "cube_1".to_string()]);
+
+        cmd_delete(&mut app, "").expect("delete should cut the current subtree");
+
+        assert_eq!(app.node_clipboard.len(), 1);
+        assert_eq!(app.node_clipboard[0].id, "cube_1");
+        assert_eq!(
+            app.tree_state.borrow().selected(),
+            ["__modules".to_string(), "sphere_1".to_string()]
+        );
+
+        let pasted_id = cmd_paste(&mut app).expect("paste should reinsert the cut subtree");
+        assert_eq!(
+            app.ast
+                .modules
+                .iter()
+                .map(|node| node.name.as_str())
+                .collect::<Vec<_>>(),
+            ["sphere", "cube", "cylinder"]
+        );
+        assert_eq!(app.tree_state.borrow().selected().last(), Some(&pasted_id));
+    }
+
+    #[test]
+    fn test_cmd_delete_last_sibling_selects_previous_sibling() {
+        let mut app = App::new();
+        app.ast_mut().modules = vec![
+            ModuleNode::new_leaf("cube_1".to_string(), "cube".to_string(), Vec::new()),
+            ModuleNode::new_leaf("sphere_1".to_string(), "sphere".to_string(), Vec::new()),
+        ];
+        app.tree_state
+            .borrow_mut()
+            .select(vec!["__modules".to_string(), "sphere_1".to_string()]);
+
+        cmd_delete(&mut app, "").unwrap();
+
+        assert_eq!(
+            app.tree_state.borrow().selected(),
+            ["__modules".to_string(), "cube_1".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_cmd_delete_only_child_selects_parent() {
+        let mut app = App::new();
+        let mut parent = ModuleNode::new_container(
+            "translate_1".to_string(),
+            "translate".to_string(),
+            Vec::new(),
+        );
+        parent.children.push(ModuleNode::new_leaf(
+            "cube_1".to_string(),
+            "cube".to_string(),
+            Vec::new(),
+        ));
+        app.ast_mut().modules.push(parent);
+        app.tree_state.borrow_mut().select(vec![
+            "__modules".to_string(),
+            "translate_1".to_string(),
+            "cube_1".to_string(),
+        ]);
+
+        cmd_delete(&mut app, "").unwrap();
+
+        assert_eq!(
+            app.tree_state.borrow().selected(),
+            ["__modules".to_string(), "translate_1".to_string()]
+        );
     }
 
     #[test]
@@ -4368,7 +4784,7 @@ mod tests {
 
         cmd_yank(&mut app, None).expect("yank should succeed");
 
-        assert_eq!(app.node_clipboard.as_ref().unwrap().id, "selected_1");
+        assert_eq!(app.node_clipboard[0].id, "selected_1");
     }
 
     #[test]
@@ -4759,6 +5175,116 @@ mod tests {
     }
 
     #[test]
+    fn test_cmd_insert_before_preserves_sibling_order_at_root_and_in_definition() {
+        let mut app = App::new();
+        let cube = cmd_insert(&mut app, "cube", None, Some("size=10")).unwrap();
+        app.tree_state
+            .borrow_mut()
+            .select(vec!["__modules".into(), cube]);
+        let sphere = cmd_insert_before(&mut app, "sphere", Some("r=5")).unwrap();
+        assert_eq!(
+            app.ast
+                .modules
+                .iter()
+                .map(|node| node.name.as_str())
+                .collect::<Vec<_>>(),
+            ["sphere", "cube"]
+        );
+        assert_eq!(app.tree_state.borrow().selected().last(), Some(&sphere));
+
+        app.selected_nodes = vec![app.ast.modules[1].id.clone()];
+        cmd_moddef(&mut app, "part", None).unwrap();
+        app.selected_nodes.clear();
+        let body_target = app.ast.module_defines[0].body[0].id.clone();
+        app.tree_state.borrow_mut().select(vec![
+            "__moddefs".into(),
+            "__moddef_part".into(),
+            body_target,
+        ]);
+        cmd_insert_before(&mut app, "sphere", Some("r=2")).unwrap();
+        assert_eq!(
+            app.ast.module_defines[0]
+                .body
+                .iter()
+                .map(|node| node.name.as_str())
+                .collect::<Vec<_>>(),
+            ["sphere", "cube"]
+        );
+    }
+
+    #[test]
+    fn test_insert_before_rejects_section_cursor() {
+        let mut app = App::new();
+        app.tree_state.borrow_mut().select(vec!["__modules".into()]);
+        let error = cmd_insert_before(&mut app, "cube", Some("size=1")).unwrap_err();
+        assert!(error.to_string().contains("module node"));
+    }
+
+    #[test]
+    fn test_insert_before_parameter_stage_keeps_position_semantics() {
+        let mut app = App::new();
+        let cube = cmd_insert(&mut app, "cube", None, Some("size=10")).unwrap();
+        app.tree_state
+            .borrow_mut()
+            .select(vec!["__modules".into(), cube]);
+
+        run_insert_command(&mut app, &["sphere"], true).unwrap();
+        assert_eq!(
+            app.pending_module_action,
+            Some(PendingModuleAction::InsertBefore)
+        );
+        commit_pending_module_action(&mut app, "r=3").unwrap();
+        assert_eq!(
+            app.ast
+                .modules
+                .iter()
+                .map(|node| node.name.as_str())
+                .collect::<Vec<_>>(),
+            ["sphere", "cube"]
+        );
+    }
+
+    #[test]
+    fn test_polygon_and_extrusion_modules_are_available_to_commands() {
+        let mut app = App::new();
+        let polygon = cmd_insert(
+            &mut app,
+            "polygon",
+            None,
+            Some("points=[[0,0],[10,0],[0,10]], paths=[[0,1,2]]"),
+        )
+        .unwrap();
+        app.selected_nodes = vec![polygon];
+
+        let linear = cmd_insert(
+            &mut app,
+            "linear_extrude",
+            None,
+            Some("height=5, twist=90, slices=12"),
+        )
+        .unwrap();
+
+        let extrusion = app.ast.find_node_by_id(&linear).unwrap();
+        assert_eq!(extrusion.name, "linear_extrude");
+        assert_eq!(extrusion.children[0].name, "polygon");
+
+        let mut revolved_app = App::new();
+        let circle = cmd_insert(&mut revolved_app, "circle", None, Some("r=2")).unwrap();
+        revolved_app.selected_nodes = vec![circle];
+        let rotate = cmd_insert(
+            &mut revolved_app,
+            "rotate_extrude",
+            None,
+            Some("angle=180, convexity=4"),
+        )
+        .unwrap();
+        assert_eq!(
+            revolved_app.ast.find_node_by_id(&rotate).unwrap().name,
+            "rotate_extrude"
+        );
+    }
+
+    #[test]
     fn test_cmd_insert_into_module_definition() {
         use App;
 
@@ -5140,6 +5666,18 @@ mod tests {
         } else {
             panic!("Expected list expression");
         }
+    }
+
+    #[test]
+    fn test_cmd_global_with_nested_list() {
+        let mut app = App::new();
+
+        cmd_global(&mut app, "points=[[0,0], [width,sin(angle)], [[1,2],3]]").unwrap();
+
+        assert_eq!(
+            app.ast.global_variables()[0].value.to_scad(),
+            "[[0, 0], [width, sin(angle)], [[1, 2], 3]]"
+        );
     }
 
     #[test]

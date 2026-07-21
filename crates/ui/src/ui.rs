@@ -427,8 +427,9 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
     match app.input_mode {
         InputMode::Normal => {
             title = " Normal Mode ".to_string();
-            prompt = "i insert  a args  j/k move  v select  P model  : command  ? help  q quit"
-                .to_string();
+            prompt =
+                "i/I insert after/before  Space show/hide  j/k move  v select  P model  : command"
+                    .to_string();
             style_fg = Color::Yellow;
         }
         InputMode::Command => {
@@ -439,6 +440,7 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
         InputMode::ModuleEnterParams => {
             let action = match app.pending_module_action {
                 Some(crate::app::PendingModuleAction::Replace { .. }) => "Replace",
+                Some(crate::app::PendingModuleAction::InsertBefore) => "Insert Before",
                 _ => "Insert",
             };
             title = format!(" {} Parameters ", action);
@@ -604,6 +606,11 @@ fn draw_model_preview(f: &mut Frame, app: &mut App, area: Rect) {
         );
     } else if let Some(image) = app.model_preview.image_widget() {
         f.render_widget(image, inner);
+    } else {
+        f.render_widget(
+            Paragraph::new(model_preview_status(app)).style(Style::default().fg(Color::Red)),
+            inner,
+        );
     }
 }
 

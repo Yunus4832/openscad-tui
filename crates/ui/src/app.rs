@@ -5,6 +5,9 @@ use openscad_library::LibraryManager;
 use ratatui::layout::Rect;
 use std::cell::RefCell;
 use std::collections::VecDeque;
+use std::fs;
+use std::io::{self, Write};
+use std::path::Path;
 use std::sync::Arc;
 use tui_tree_widget::TreeState;
 
@@ -240,6 +243,7 @@ pub enum Screen {
 #[derive(Debug, Clone, PartialEq)]
 pub enum PendingModuleAction {
     Insert,
+    InsertBefore,
     Replace { target_ids: Vec<String> },
 }
 
@@ -302,6 +306,9 @@ pub enum CompletionContext {
         kind: ExpressionCompletionKind,
         local_identifiers: Vec<String>,
     },
+    DefinitionName {
+        kind: DefinitionCompletionKind,
+    },
     Literal {
         candidates: Vec<String>,
     },
@@ -324,6 +331,12 @@ pub enum ExpressionCompletionKind {
     GlobalValue,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DefinitionCompletionKind {
+    Function,
+    Global,
+}
+
 pub struct App {
     pub ast: Arc<AstRoot>,
     pub library: LibraryManager,
@@ -333,8 +346,8 @@ pub struct App {
     pub selected_nodes: Vec<String>,
     pub undo_stack: VecDeque<Arc<AstRoot>>,
     pub redo_stack: VecDeque<Arc<AstRoot>>,
-    /// Application-local clipboard for copied module subtrees.
-    pub node_clipboard: Option<openscad_core::ModuleNode>,
+    /// Application-local clipboard for copied or cut module subtrees.
+    pub node_clipboard: Vec<openscad_core::ModuleNode>,
 
     // UI state - Tree navigation (using RefCell for interior mutability)
     pub tree_state: RefCell<TreeState<String>>,
@@ -397,7 +410,7 @@ impl App {
             selected_nodes: Vec::new(),
             undo_stack: VecDeque::with_capacity(100),
             redo_stack: VecDeque::with_capacity(100),
-            node_clipboard: None,
+            node_clipboard: Vec::new(),
             tree_state: RefCell::new(TreeState::default()),
             ui_regions: UiRegions::default(),
             mouse_drag: None,
@@ -1034,6 +1047,40 @@ impl App {
         self.saved = true;
     }
 
+    pub fn load_command_history(&mut self, path: &Path) -> io::Result<()> {
+        let contents = match fs::read(path) {
+            Ok(contents) => contents,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        let mut history = serde_json::from_slice::<Vec<String>>(&contents)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        history.retain(|command| !command.trim().is_empty());
+        if history.len() > self.history_max_size {
+            history.drain(..history.len() - self.history_max_size);
+        }
+        self.command_history = history;
+        self.history_index = None;
+        self.history_draft = None;
+        Ok(())
+    }
+
+    pub fn save_command_history(&self, path: &Path) -> io::Result<()> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let mut options = fs::OpenOptions::new();
+        options.create(true).truncate(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(path)?;
+        serde_json::to_writer_pretty(&mut file, &self.command_history).map_err(io::Error::other)?;
+        file.write_all(b"\n")
+    }
+
     /// Add command to history
     pub fn add_to_history(&mut self, command: &str) {
         if !command.trim().is_empty() {
@@ -1224,6 +1271,38 @@ mod tests {
         assert_eq!(app.command_history[0], "cmd3");
         assert_eq!(app.command_history[1], "cmd4");
         assert_eq!(app.command_history[2], "cmd5");
+    }
+
+    #[test]
+    fn test_command_history_persists_across_app_instances() {
+        let directory = tempfile::tempdir().unwrap();
+        let history_path = directory.path().join("history.json");
+        let mut first = App::new();
+        first.add_to_history("global points=[[0, 0], [1, 2]]");
+        first.add_to_history("function label() = \"saved history\"");
+        first.save_command_history(&history_path).unwrap();
+
+        let mut second = App::new();
+        second.load_command_history(&history_path).unwrap();
+
+        assert_eq!(second.command_history, first.command_history);
+        assert_eq!(
+            second.get_previous_command(""),
+            Some("function label() = \"saved history\"".to_string())
+        );
+    }
+
+    #[test]
+    fn test_loading_command_history_keeps_the_newest_entries_within_limit() {
+        let directory = tempfile::tempdir().unwrap();
+        let history_path = directory.path().join("history.json");
+        fs::write(&history_path, r#"["old", "middle", "new"]"#).unwrap();
+        let mut app = App::new();
+        app.history_max_size = 2;
+
+        app.load_command_history(&history_path).unwrap();
+
+        assert_eq!(app.command_history, ["middle", "new"]);
     }
 
     #[test]
