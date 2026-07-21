@@ -20,7 +20,7 @@ use std::path::PathBuf;
 
 use openscad_ui::{
     app::App,
-    commands::{cmd_edit_scad, cmd_load_force},
+    commands::{cmd_edit_scad, cmd_load_force, cmd_view},
     input::{handle_key, handle_mouse},
     ui::draw,
 };
@@ -35,7 +35,7 @@ const HISTORY_FILE_NAME: &str = "history.json";
     about = "A structured terminal editor for OpenSCAD"
 )]
 struct Cli {
-    /// .scadtui project or .scad source file to open/import
+    /// .scadtui project, .scad source, or .off/.stl model to open
     file: Option<PathBuf>,
 }
 
@@ -53,14 +53,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     if let Some(file) = cli.file {
         let filename = file.to_string_lossy();
-        if file
+        let extension = file
             .extension()
             .and_then(|extension| extension.to_str())
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("scad"))
-        {
-            cmd_edit_scad(&mut app, &filename)?;
-        } else {
-            cmd_load_force(&mut app, &filename)?;
+            .map(str::to_ascii_lowercase);
+        match extension.as_deref() {
+            Some("scad") => cmd_edit_scad(&mut app, &filename)?,
+            Some("off" | "stl") => cmd_view(&mut app, &filename)?,
+            _ => cmd_load_force(&mut app, &filename)?,
         }
     }
 

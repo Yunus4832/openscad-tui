@@ -24,6 +24,12 @@ pub enum RenderError {
     #[error("invalid OFF data: {0}")]
     InvalidOff(String),
 
+    #[error("invalid STL data: {0}")]
+    InvalidStl(String),
+
+    #[error("unsupported mesh file format for '{path}'; expected .off or .stl")]
+    UnsupportedMeshFormat { path: String },
+
     #[error("I/O error: {0}")]
     Io(String),
 
@@ -58,6 +64,9 @@ impl RenderError {
             }
             Self::OpenScadFailed { exit_code, .. } => {
                 format!("OpenSCAD failed (exit code {exit_code:?}); run :diagnostics")
+            }
+            Self::InvalidOff(_) | Self::InvalidStl(_) => {
+                format!("could not parse model: {self}; run :diagnostics")
             }
             _ => self.to_string(),
         }

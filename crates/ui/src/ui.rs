@@ -621,7 +621,7 @@ fn model_preview_status(app: &App) -> String {
     match &app.model_preview.status {
         ModelPreviewStatus::Empty => "not rendered".to_string(),
         ModelPreviewStatus::Stale => "stale — run :render".to_string(),
-        ModelPreviewStatus::Generating => "OpenSCAD generating OFF…".to_string(),
+        ModelPreviewStatus::Loading => "loading model…".to_string(),
         ModelPreviewStatus::Rasterizing => "rasterizing…".to_string(),
         ModelPreviewStatus::Ready { triangles } => format!("{triangles} triangles"),
         ModelPreviewStatus::Failed(error) => format!("failed: {error}"),

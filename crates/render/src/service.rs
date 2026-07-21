@@ -2,7 +2,7 @@ use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use crate::{Aabb, Camera, Mesh, MeshGenerator, PixelSize, RenderError, Result, RgbaFrame};
+use crate::{Aabb, Camera, Mesh, MeshInput, MeshLoader, PixelSize, RenderError, Result, RgbaFrame};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RenderOptions {
@@ -27,7 +27,7 @@ pub trait FrameRenderer: Send + Sync {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RenderFailureStage {
-    Generating,
+    Loading,
     Rasterizing,
 }
 
@@ -44,7 +44,7 @@ pub struct RenderedFrame {
 
 #[derive(Debug, PartialEq)]
 pub enum RenderEvent {
-    Generating {
+    Loading {
         mesh_revision: u64,
     },
     Rasterizing {
@@ -61,10 +61,10 @@ pub enum RenderEvent {
 }
 
 enum RenderRequest {
-    Generate {
+    Load {
         mesh_revision: u64,
         camera_revision: u64,
-        scad_source: String,
+        input: MeshInput,
         camera: Camera,
         size: PixelSize,
         options: RenderOptions,
@@ -85,12 +85,12 @@ pub struct RenderService {
 }
 
 impl RenderService {
-    pub fn new(generator: Box<dyn MeshGenerator>, renderer: Box<dyn FrameRenderer>) -> Self {
+    pub fn new(loader: Box<dyn MeshLoader>, renderer: Box<dyn FrameRenderer>) -> Self {
         let (request_sender, request_receiver) = mpsc::channel();
         let (event_sender, event_receiver) = mpsc::channel();
         let worker = thread::Builder::new()
             .name("openscad-render".to_string())
-            .spawn(move || worker_loop(request_receiver, event_sender, generator, renderer))
+            .spawn(move || worker_loop(request_receiver, event_sender, loader, renderer))
             .expect("failed to start render worker");
         Self {
             requests: request_sender,
@@ -99,20 +99,20 @@ impl RenderService {
         }
     }
 
-    pub fn generate(
+    pub fn load(
         &self,
         mesh_revision: u64,
         camera_revision: u64,
-        scad_source: String,
+        input: MeshInput,
         camera: Camera,
         size: PixelSize,
         options: RenderOptions,
     ) -> Result<()> {
         self.requests
-            .send(RenderRequest::Generate {
+            .send(RenderRequest::Load {
                 mesh_revision,
                 camera_revision,
-                scad_source,
+                input,
                 camera,
                 size,
                 options,
@@ -154,7 +154,7 @@ impl Drop for RenderService {
 fn worker_loop(
     requests: Receiver<RenderRequest>,
     events: Sender<RenderEvent>,
-    generator: Box<dyn MeshGenerator>,
+    loader: Box<dyn MeshLoader>,
     renderer: Box<dyn FrameRenderer>,
 ) {
     let mut cached_mesh: Option<(u64, Mesh, Duration)> = None;
@@ -169,16 +169,16 @@ fn worker_loop(
         };
 
         let (mesh_revision, camera_revision, camera, size, options) = match work {
-            RenderRequest::Generate {
+            RenderRequest::Load {
                 mesh_revision,
                 camera_revision,
-                scad_source,
+                input,
                 camera,
                 size,
                 options,
             } => {
-                let _ = events.send(RenderEvent::Generating { mesh_revision });
-                match generator.generate(&scad_source) {
+                let _ = events.send(RenderEvent::Loading { mesh_revision });
+                match loader.load(&input) {
                     Ok(generation) => {
                         cached_mesh = Some((
                             mesh_revision,
@@ -190,7 +190,7 @@ fn worker_loop(
                         let _ = events.send(RenderEvent::Failed {
                             mesh_revision,
                             camera_revision,
-                            stage: RenderFailureStage::Generating,
+                            stage: RenderFailureStage::Loading,
                             error,
                         });
                         continue;
@@ -290,9 +290,9 @@ fn coalesce(first: RenderRequest, requests: &Receiver<RenderRequest>) -> Option<
 fn merge(current: RenderRequest, next: RenderRequest) -> RenderRequest {
     match (current, next) {
         (
-            RenderRequest::Generate {
+            RenderRequest::Load {
                 mesh_revision,
-                scad_source,
+                input,
                 ..
             },
             RenderRequest::Rasterize {
@@ -301,10 +301,10 @@ fn merge(current: RenderRequest, next: RenderRequest) -> RenderRequest {
                 size,
                 options,
             },
-        ) => RenderRequest::Generate {
+        ) => RenderRequest::Load {
             mesh_revision,
             camera_revision,
-            scad_source,
+            input,
             camera,
             size,
             options,
@@ -340,13 +340,13 @@ mod tests {
     use super::*;
     use crate::{GenerationDiagnostics, MeshGeneration, Vec3};
 
-    struct FakeGenerator {
+    struct FakeLoader {
         calls: Arc<AtomicUsize>,
         delay: Duration,
     }
 
-    impl MeshGenerator for FakeGenerator {
-        fn generate(&self, _scad_source: &str) -> Result<MeshGeneration> {
+    impl MeshLoader for FakeLoader {
+        fn load(&self, _input: &MeshInput) -> Result<MeshGeneration> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             thread::sleep(self.delay);
             Ok(MeshGeneration {
@@ -380,13 +380,13 @@ mod tests {
     }
 
     fn service(
-        generator_calls: Arc<AtomicUsize>,
+        loader_calls: Arc<AtomicUsize>,
         renderer_calls: Arc<AtomicUsize>,
         delay: Duration,
     ) -> RenderService {
         RenderService::new(
-            Box::new(FakeGenerator {
-                calls: generator_calls,
+            Box::new(FakeLoader {
+                calls: loader_calls,
                 delay,
             }),
             Box::new(FakeRenderer {
@@ -409,19 +409,15 @@ mod tests {
 
     #[test]
     fn camera_render_reuses_the_generated_mesh() {
-        let generator_calls = Arc::new(AtomicUsize::new(0));
+        let loader_calls = Arc::new(AtomicUsize::new(0));
         let renderer_calls = Arc::new(AtomicUsize::new(0));
-        let service = service(
-            generator_calls.clone(),
-            renderer_calls.clone(),
-            Duration::ZERO,
-        );
+        let service = service(loader_calls.clone(), renderer_calls.clone(), Duration::ZERO);
         let size = PixelSize::new(8, 8).unwrap();
         service
-            .generate(
+            .load(
                 4,
                 1,
-                "cube(1);".to_string(),
+                MeshInput::OpenScad("cube(1);".to_string()),
                 Camera::default(),
                 size,
                 RenderOptions::default(),
@@ -433,21 +429,21 @@ mod tests {
             .unwrap();
         let frame = wait_ready(&service);
         assert_eq!(frame.camera_revision, 2);
-        assert_eq!(generator_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(loader_calls.load(Ordering::SeqCst), 1);
         assert_eq!(renderer_calls.load(Ordering::SeqCst), 2);
     }
 
     #[test]
     fn camera_requests_are_latest_wins() {
-        let generator_calls = Arc::new(AtomicUsize::new(0));
+        let loader_calls = Arc::new(AtomicUsize::new(0));
         let renderer_calls = Arc::new(AtomicUsize::new(0));
-        let service = service(generator_calls, renderer_calls, Duration::from_millis(20));
+        let service = service(loader_calls, renderer_calls, Duration::from_millis(20));
         let size = PixelSize::new(8, 8).unwrap();
         service
-            .generate(
+            .load(
                 1,
                 1,
-                "cube(1);".to_string(),
+                MeshInput::OpenScad("cube(1);".to_string()),
                 Camera::default(),
                 size,
                 RenderOptions::default(),
@@ -473,10 +469,10 @@ mod tests {
         );
         let size = PixelSize::new(8, 8).unwrap();
         service
-            .generate(
+            .load(
                 1,
                 1,
-                "cube(1);".to_string(),
+                MeshInput::OpenScad("cube(1);".to_string()),
                 Camera::default(),
                 size,
                 RenderOptions::default(),
@@ -529,10 +525,10 @@ mod tests {
     #[test]
     fn coalescing_keeps_the_latest_render_options() {
         let merged = merge(
-            RenderRequest::Generate {
+            RenderRequest::Load {
                 mesh_revision: 4,
                 camera_revision: 1,
-                scad_source: "cube(1);".to_string(),
+                input: MeshInput::OpenScad("cube(1);".to_string()),
                 camera: Camera::default(),
                 size: PixelSize::new(8, 8).unwrap(),
                 options: RenderOptions { axes: true },
@@ -547,7 +543,7 @@ mod tests {
 
         assert!(matches!(
             merged,
-            RenderRequest::Generate {
+            RenderRequest::Load {
                 camera_revision: 2,
                 options: RenderOptions { axes: false },
                 ..

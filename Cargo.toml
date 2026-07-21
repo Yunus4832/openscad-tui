@@ -27,6 +27,7 @@ base64 = "0.21"
 flate2 = "1"
 jpeg-encoder = "0.7"
 zip = { version = "6.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+stl_io = "0.11"
 
 [profile.dev.package.openscad-terminal]
 opt-level = 2

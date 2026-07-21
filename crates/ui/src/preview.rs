@@ -7,8 +7,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use std::{fs::OpenOptions, io::Write};
 
 use openscad_render::{
-    Aabb, Camera, CpuRenderer, OpenScadGenerator, OpenScadProject, PixelSize, Projection,
-    RenderEvent, RenderOptions, RenderService, StandardView,
+    Aabb, Camera, CpuRenderer, MeshInput, MeshPipeline, OpenScadGenerator, OpenScadProject,
+    PixelSize, Projection, RenderEvent, RenderOptions, RenderService, StandardView,
 };
 use openscad_terminal::{DisplayProtocol, PresentationContext, TerminalImage, TerminalPresenter};
 use ratatui::layout::Rect;
@@ -32,7 +32,7 @@ pub struct RenderMetrics {
 pub enum ModelPreviewStatus {
     Empty,
     Stale,
-    Generating,
+    Loading,
     Rasterizing,
     Ready { triangles: usize },
     Failed(String),
@@ -183,14 +183,6 @@ impl ModelPreview {
         project_file: Option<&str>,
         project: Option<OpenScadProject>,
     ) -> Result<(), String> {
-        self.mesh_revision = self.mesh_revision.wrapping_add(1);
-        self.camera_revision = self.camera_revision.wrapping_add(1);
-        self.bounds = None;
-        self.fitted_revision = None;
-        self.presenter.clear();
-        self.status = ModelPreviewStatus::Generating;
-        self.last_error_details = None;
-
         let working_directory = project_file
             .and_then(|file| Path::new(file).parent())
             .filter(|path| !path.as_os_str().is_empty())
@@ -204,12 +196,32 @@ impl ModelPreview {
         if let Some(directory) = working_directory {
             generator = generator.with_working_directory(expand_tilde(directory));
         }
-        let service = RenderService::new(Box::new(generator), Box::new(CpuRenderer::default()));
+        self.load(MeshInput::OpenScad(source), generator)
+    }
+
+    pub fn view_file(&mut self, path: PathBuf) -> Result<(), String> {
+        self.load(
+            MeshInput::File(expand_tilde(path)),
+            OpenScadGenerator::new("openscad"),
+        )
+    }
+
+    fn load(&mut self, input: MeshInput, generator: OpenScadGenerator) -> Result<(), String> {
+        self.mesh_revision = self.mesh_revision.wrapping_add(1);
+        self.camera_revision = self.camera_revision.wrapping_add(1);
+        self.bounds = None;
+        self.fitted_revision = None;
+        self.presenter.clear();
+        self.status = ModelPreviewStatus::Loading;
+        self.last_error_details = None;
+
+        let pipeline = MeshPipeline::new(generator);
+        let service = RenderService::new(Box::new(pipeline), Box::new(CpuRenderer::default()));
         service
-            .generate(
+            .load(
                 self.mesh_revision,
                 self.camera_revision,
-                source,
+                input,
                 self.camera,
                 self.viewport,
                 self.render_options(),
@@ -231,10 +243,8 @@ impl ModelPreview {
         self.handle_presentation_result(presentation);
         while let Some(event) = self.service.as_ref().and_then(RenderService::try_recv) {
             match event {
-                RenderEvent::Generating { mesh_revision }
-                    if mesh_revision == self.mesh_revision =>
-                {
-                    self.status = ModelPreviewStatus::Generating;
+                RenderEvent::Loading { mesh_revision } if mesh_revision == self.mesh_revision => {
+                    self.status = ModelPreviewStatus::Loading;
                 }
                 RenderEvent::Rasterizing {
                     mesh_revision,
@@ -642,7 +652,9 @@ mod tests {
                 max: openscad_render::Vec3::splat(1.0),
             }),
             service: Some(RenderService::new(
-                Box::new(OpenScadGenerator::new("unused-in-this-test")),
+                Box::new(MeshPipeline::new(OpenScadGenerator::new(
+                    "unused-in-this-test",
+                ))),
                 Box::new(CpuRenderer::default()),
             )),
             ..ModelPreview::default()
@@ -663,7 +675,9 @@ mod tests {
                 max: openscad_render::Vec3::splat(1.0),
             }),
             service: Some(RenderService::new(
-                Box::new(OpenScadGenerator::new("unused-in-this-test")),
+                Box::new(MeshPipeline::new(OpenScadGenerator::new(
+                    "unused-in-this-test",
+                ))),
                 Box::new(CpuRenderer::default()),
             )),
             ..ModelPreview::default()

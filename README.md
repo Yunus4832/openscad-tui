@@ -234,6 +234,9 @@ new file part.scad
 export source model.scad
 export tree ./source-tree
 export model model.stl
+export model model.dae
+view model.off
+view model.stl
 library gears.scad
 use gears.scad
 include gears.scad
@@ -263,9 +266,13 @@ wq
 - `edit` 后需使用 `write project.scadtui` 保存项目；不会覆盖原始 `.scad` 文件。
 - `open!` 和 `new! project` 允许明确丢弃未保存状态；`edit` 是增量操作，不需要 `edit!`。
 - `export source <file.scad>` 只导出当前 buffer；`export tree <directory>` 导出当前 buffer
-  及其可达依赖组成的完整 SCAD 源码树；`export model <artifact>` 调用 OpenSCAD，并按
-  `.stl`、`.3mf` 等目标后缀生成模型产物。相对导出路径以当前 `.scadtui` 项目包所在
-  目录为基准；没有项目文件时才使用启动程序时的工作目录。
+  及其可达依赖组成的完整 SCAD 源码树；`export model <artifact>` 按目标后缀生成模型产物。
+  `.stl`、`.3mf` 等格式仍由 OpenSCAD 原生导出；`.dae` 会先生成统一三角网格，再输出
+  静态 COLLADA 1.4.1 几何。DAE 导出不包含骨骼、动画、材质、相机或通用场景语义。
+  相对导出路径以当前 `.scadtui` 项目包所在目录为基准；没有项目文件时才使用启动程序时
+  的工作目录。
+- `view <model.off|model.stl>` 直接加载现有 OFF 或 ASCII/Binary STL 文件并进入模型预览，
+  不修改当前项目，也不调用 OpenSCAD。也可以把 `.off` / `.stl` 文件作为启动参数。
 - `library gears.scad` 加载 OpenSCAD 源码库并递归收集本地 SCAD 依赖，但不会修改
   当前 source 的语义。源码会直接嵌入项目包，不需要额外的库描述文件。
 - `use <source>` / `include <source>` 在当前 buffer 与项目内另一个 source 之间建立对应
@@ -284,14 +291,15 @@ wq
 - 布尔操作：`union`、`difference`、`intersection`
 - 定义：`global`、`function`、`module`
 - 文件：`new`、`new!`、`write`、`write!`、`open`、`open!`、`edit`、`buffer`、`export`、`library`、`use`、`include`
-- 预览：`render`、`preview source|model|toggle`、`camera ...`、`axes ...`、`protocol ...`
+- 预览：`render`、`view`、`preview source|model|toggle`、`camera ...`、`axes ...`、`protocol ...`
 - 系统：`help`、`version`、`diagnostics [file]`、`quit`、`quit!`、`wq`
 
 ## 模型预览
 
-执行 `render` 会调用本机 `openscad`，把当前模型导出为 OFF，再由
-`openscad-render` 在后台进行 CPU 光栅化并输出 RGBA 帧。终端展示由独立的
-`openscad-terminal` 后端处理，不参与模型生成、相机计算和光栅化。
+执行 `render` 会调用本机 `openscad`，把当前模型编译为内部三角网格；`view` 则直接将
+OFF/STL 文件加载为相同的 `Mesh`。两条路径共用 `openscad-render` 的后台 CPU 光栅化，
+输出 RGBA 帧。OFF 是 OpenSCAD 编译路径的内部中间格式，不会泄漏到下游渲染接口。
+终端展示由独立的 `openscad-terminal` 后端处理，不参与模型加载、相机计算和光栅化。
 
 终端后端支持 Kitty、Sixel、iTerm2、Halfblocks、Braille 和 ASCII。编码工作线程始终只
 保留一个正在处理的请求和一个可覆盖的最新请求；新帧编码完成前继续显示已有前帧，
@@ -320,6 +328,8 @@ OPENSCAD_TUI_IMAGE_PROTOCOL=sixel ./target/release/openscad-tui
 
 ```text
 render
+view model.off
+view model.stl
 preview source|model|toggle
 camera projection perspective|orthographic|toggle
 camera view front|back|left|right|top|bottom|iso

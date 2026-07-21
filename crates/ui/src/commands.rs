@@ -30,6 +30,23 @@ pub fn cmd_render(app: &mut App) -> CommandResult<()> {
     Ok(())
 }
 
+pub fn cmd_view(app: &mut App, filename: &str) -> CommandResult<()> {
+    let path = expand_tilde(filename);
+    if !path.is_file() {
+        return Err(CommandError::Custom(format!(
+            "Model file '{}' does not exist or is not a regular file",
+            path.display()
+        )));
+    }
+    openscad_render::MeshFileFormat::from_path(&path)
+        .map_err(|error| CommandError::Custom(error.to_string()))?;
+    app.model_preview
+        .view_file(path)
+        .map_err(CommandError::Custom)?;
+    app.enter_model_screen();
+    Ok(())
+}
+
 fn active_source_project(
     app: &mut App,
 ) -> CommandResult<(String, Option<openscad_render::OpenScadProject>)> {
@@ -1613,7 +1630,7 @@ fn cmd_export_model(app: &mut App, filename: &str) -> CommandResult<()> {
     let filepath = resolve_export_path(app, filename)?;
     if filepath.extension().is_none() {
         return Err(CommandError::Custom(
-            "export model requires an output extension supported by OpenSCAD".to_string(),
+            "export model requires an output extension".to_string(),
         ));
     }
     let (source, project) = active_source_project(app)?;
@@ -1621,13 +1638,22 @@ fn cmd_export_model(app: &mut App, filename: &str) -> CommandResult<()> {
     if let Some(project) = project {
         generator = generator.with_project(project);
     }
-    let diagnostics = generator
-        .export(&source, &filepath)
-        .map_err(|error| CommandError::Custom(error.to_string()))?;
+    let started = std::time::Instant::now();
+    if has_extension(&filepath, "dae") {
+        let generated = generator
+            .generate(&source)
+            .map_err(|error| CommandError::Custom(error.to_string()))?;
+        openscad_render::write_dae(&filepath, &generated.mesh)
+            .map_err(|error| CommandError::Custom(error.to_string()))?;
+    } else {
+        generator
+            .export(&source, &filepath)
+            .map_err(|error| CommandError::Custom(error.to_string()))?;
+    }
     app.set_info(&format!(
         "Exported model to '{}' in {:.2}s",
         filepath.display(),
-        diagnostics.elapsed.as_secs_f64()
+        started.elapsed().as_secs_f64()
     ));
     Ok(())
 }
@@ -3897,6 +3923,20 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
     ));
 
     registry.register(CommandDef::new(
+        "view",
+        Vec::<&str>::new(),
+        |app, args| cmd_view(app, args[0]),
+        "Preview an OFF or STL mesh file without importing it into the project",
+        1,
+        Some(1),
+        "view <model.off|model.stl>",
+        vec!["view model.off", "view exported/model.stl"],
+        CommandType::File,
+        false,
+        true,
+    ));
+
+    registry.register(CommandDef::new(
         "buffer",
         vec!["b"],
         |app, args| cmd_buffer(app, args.first().copied()),
@@ -4410,11 +4450,41 @@ mod tests {
         assert_eq!(app.screen, crate::app::Screen::ModelPreview);
         assert!(matches!(
             app.model_preview.status,
-            crate::preview::ModelPreviewStatus::Generating
+            crate::preview::ModelPreviewStatus::Loading
         ));
 
         app.input_mode = InputMode::ModuleEnterParams;
         assert_eq!(app.screen, crate::app::Screen::ModelPreview);
+    }
+
+    #[test]
+    fn test_view_loads_off_without_changing_the_project() {
+        let directory = tempfile::tempdir().unwrap();
+        let model = directory.path().join("triangle.off");
+        fs::write(&model, "OFF\n3 1 0\n0 0 0\n1 0 0\n0 1 0\n3 0 1 2\n").unwrap();
+        let mut app = App::new();
+        let original_source = app.ast.to_scad();
+
+        cmd_view(&mut app, model.to_str().unwrap()).unwrap();
+
+        assert_eq!(app.screen, crate::app::Screen::ModelPreview);
+        assert_eq!(app.ast.to_scad(), original_source);
+        assert!(matches!(
+            app.model_preview.status,
+            crate::preview::ModelPreviewStatus::Loading
+        ));
+    }
+
+    #[test]
+    fn test_view_rejects_dae_inputs_explicitly() {
+        let directory = tempfile::tempdir().unwrap();
+        let model = directory.path().join("scene.dae");
+        fs::write(&model, "<COLLADA/>").unwrap();
+        let mut app = App::new();
+
+        let error = cmd_view(&mut app, model.to_str().unwrap()).unwrap_err();
+
+        assert!(error.to_string().contains("expected .off or .stl"));
     }
 
     #[test]

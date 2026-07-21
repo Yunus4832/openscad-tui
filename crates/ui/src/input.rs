@@ -3143,7 +3143,7 @@ mod tests {
         assert_eq!(app.screen, crate::app::Screen::ModelPreview);
         assert!(matches!(
             app.model_preview.status,
-            crate::preview::ModelPreviewStatus::Generating
+            crate::preview::ModelPreviewStatus::Loading
         ));
     }
 
@@ -3160,7 +3160,7 @@ mod tests {
         assert_eq!(app.screen, crate::app::Screen::ModelPreview);
         assert!(matches!(
             app.model_preview.status,
-            crate::preview::ModelPreviewStatus::Generating
+            crate::preview::ModelPreviewStatus::Loading
         ));
     }
 

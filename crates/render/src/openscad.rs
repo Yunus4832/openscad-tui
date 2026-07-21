@@ -22,10 +22,6 @@ pub struct MeshGeneration {
     pub diagnostics: GenerationDiagnostics,
 }
 
-pub trait MeshGenerator: Send + Sync {
-    fn generate(&self, scad_source: &str) -> Result<MeshGeneration>;
-}
-
 #[derive(Debug, Clone)]
 pub struct OpenScadGenerator {
     executable: PathBuf,
@@ -81,6 +77,22 @@ impl OpenScadGenerator {
 
     pub fn timeout(&self) -> Duration {
         self.timeout
+    }
+
+    /// Compile OpenSCAD source into the renderer's normalized triangle mesh.
+    pub fn generate(&self, scad_source: &str) -> Result<MeshGeneration> {
+        let prepared = self.prepare_source(scad_source)?;
+        let output = Builder::new()
+            .prefix("openscad-tui-")
+            .suffix(".off")
+            .tempfile_in(&prepared.output_directory)
+            .map_err(io_error)?;
+        let diagnostics =
+            self.run_openscad(&prepared.source_path, &prepared.directory, output.path())?;
+
+        let off_source = fs::read_to_string(output.path()).map_err(io_error)?;
+        let mesh = parse_off(&off_source)?;
+        Ok(MeshGeneration { mesh, diagnostics })
     }
 
     /// Export an OpenSCAD artifact using the format inferred from the output extension.
@@ -212,23 +224,6 @@ struct PreparedSource {
     output_directory: PathBuf,
     _root: Option<tempfile::TempDir>,
     _source: Option<tempfile::NamedTempFile>,
-}
-
-impl MeshGenerator for OpenScadGenerator {
-    fn generate(&self, scad_source: &str) -> Result<MeshGeneration> {
-        let prepared = self.prepare_source(scad_source)?;
-        let output = Builder::new()
-            .prefix("openscad-tui-")
-            .suffix(".off")
-            .tempfile_in(&prepared.output_directory)
-            .map_err(io_error)?;
-        let diagnostics =
-            self.run_openscad(&prepared.source_path, &prepared.directory, output.path())?;
-
-        let off_source = fs::read_to_string(output.path()).map_err(io_error)?;
-        let mesh = parse_off(&off_source)?;
-        Ok(MeshGeneration { mesh, diagnostics })
-    }
 }
 
 fn materialize_project(root: &Path, project: &OpenScadProject) -> Result<()> {
