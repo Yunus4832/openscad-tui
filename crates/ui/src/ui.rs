@@ -83,6 +83,10 @@ fn draw_editor_screen(f: &mut Frame, app: &mut App) {
 }
 
 fn draw_camera_toolbar(f: &mut Frame, app: &mut App, area: Rect) {
+    let close_label = match app.preview_close_action {
+        crate::app::PreviewCloseAction::Source => "Source",
+        crate::app::PreviewCloseAction::Quit => "Quit",
+    };
     let projection = match app.model_preview.camera.projection {
         openscad_render::Projection::Perspective { .. } => "Ortho",
         openscad_render::Projection::Orthographic { .. } => "Persp",
@@ -98,7 +102,7 @@ fn draw_camera_toolbar(f: &mut Frame, app: &mut App, area: Rect) {
         "Axes+"
     };
     let buttons = [
-        ("P", "Source", "preview source"),
+        ("P", close_label, "preview close"),
         ("f", "Fit", "camera fit"),
         ("p", projection, "camera projection toggle"),
         ("x", axes, "axes toggle"),
@@ -928,7 +932,7 @@ mod tests {
             .ui_regions
             .camera_buttons
             .iter()
-            .any(|button| button.command == "preview source"));
+            .any(|button| button.command == "preview close"));
         assert!(app
             .ui_regions
             .camera_buttons

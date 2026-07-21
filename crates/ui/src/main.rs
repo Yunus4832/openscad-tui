@@ -19,7 +19,7 @@ use std::io;
 use std::path::PathBuf;
 
 use openscad_ui::{
-    app::App,
+    app::{App, PreviewCloseAction},
     commands::{cmd_edit_scad, cmd_load_force, cmd_view},
     input::{handle_key, handle_mouse},
     ui::draw,
@@ -59,7 +59,10 @@ fn main() -> Result<(), Box<dyn Error>> {
             .map(str::to_ascii_lowercase);
         match extension.as_deref() {
             Some("scad") => cmd_edit_scad(&mut app, &filename)?,
-            Some("off" | "stl") => cmd_view(&mut app, &filename)?,
+            Some("off" | "stl") => {
+                cmd_view(&mut app, &filename)?;
+                app.preview_close_action = PreviewCloseAction::Quit;
+            }
             _ => cmd_load_force(&mut app, &filename)?,
         }
     }

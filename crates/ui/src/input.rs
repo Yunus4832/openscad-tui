@@ -384,7 +384,7 @@ fn handle_model_key(key: KeyEvent, app: &mut App) {
 
 fn model_key_command(key: KeyEvent) -> Option<&'static str> {
     match key.code {
-        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('P') => Some("preview source"),
+        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('P') => Some("preview close"),
         KeyCode::Char('R') => Some("render"),
         KeyCode::Char('h') => Some("camera orbit -5 0"),
         KeyCode::Char('l') => Some("camera orbit 5 0"),
@@ -1078,7 +1078,7 @@ fn analyze_input_context(input: &str, app: &App) -> CompletionContext {
                 }
             }
             CommandType::Preview => {
-                literal_command_context(input, &parts, &["source", "model", "toggle"], &[])
+                literal_command_context(input, &parts, &["source", "model", "toggle", "close"], &[])
             }
             CommandType::Protocol => protocol_command_context(input, &parts),
             CommandType::Axes => {
@@ -2385,7 +2385,7 @@ mod tests {
                 .iter()
                 .map(|candidate| candidate.content.as_str())
                 .collect::<Vec<_>>(),
-            vec!["source", "model", "toggle"]
+            vec!["source", "model", "toggle", "close"]
         );
 
         let (camera, _) = generate_completions("camera view ", &app);
@@ -3316,8 +3316,23 @@ mod tests {
         );
         assert_eq!(
             model_key_command(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
-            Some("preview source")
+            Some("preview close")
         );
+    }
+
+    #[test]
+    fn test_q_quits_a_standalone_model_session_through_preview_close() {
+        let mut app = App::new();
+        app.enter_model_screen();
+        app.preview_close_action = crate::app::PreviewCloseAction::Quit;
+
+        handle_key(
+            KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
+            &mut app,
+        );
+
+        assert!(app.should_quit);
+        assert_eq!(app.screen, crate::app::Screen::ModelPreview);
     }
 
     #[test]

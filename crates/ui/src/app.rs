@@ -240,6 +240,12 @@ pub enum Screen {
     ModelPreview,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreviewCloseAction {
+    Source,
+    Quit,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum PendingModuleAction {
     Insert,
@@ -342,6 +348,7 @@ pub struct App {
     pub library: LibraryManager,
     pub command_registry: CommandRegistry,
     pub screen: Screen,
+    pub preview_close_action: PreviewCloseAction,
     pub model_preview: crate::preview::ModelPreview,
     pub selected_nodes: Vec<String>,
     pub undo_stack: VecDeque<Arc<AstRoot>>,
@@ -406,6 +413,7 @@ impl App {
             library: LibraryManager::new(),
             command_registry: CommandRegistry::new(),
             screen: Screen::Editor,
+            preview_close_action: PreviewCloseAction::Source,
             model_preview: crate::preview::ModelPreview::default(),
             selected_nodes: Vec::new(),
             undo_stack: VecDeque::with_capacity(100),
@@ -1035,6 +1043,7 @@ impl App {
         self.model_preview.stop_auto_rotate();
         self.mouse_drag = None;
         self.screen = Screen::Editor;
+        self.preview_close_action = PreviewCloseAction::Source;
         self.input_mode = InputMode::Normal;
         self.terminal_clear_requested = true;
     }

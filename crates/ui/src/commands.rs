@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use thiserror::Error;
 
-use crate::app::{App, InputMode, PendingModuleAction, Screen};
+use crate::app::{App, InputMode, PendingModuleAction, PreviewCloseAction, Screen};
 use crate::command_registry::CommandType;
 use crate::project_file::{load_project, save_project, PROJECT_EXTENSION};
 use crate::project_import::{attach_editable_scad, attach_scad_library};
@@ -219,6 +219,10 @@ fn relative_virtual_path(from_file: &str, to_file: &str) -> String {
 pub fn cmd_preview(app: &mut App, mode: &str) -> CommandResult<()> {
     match mode {
         "source" => app.enter_editor_screen(),
+        "close" => match app.preview_close_action {
+            PreviewCloseAction::Source => app.enter_editor_screen(),
+            PreviewCloseAction::Quit => return cmd_quit(app),
+        },
         "model"
             if matches!(
                 app.model_preview.status,
@@ -230,11 +234,11 @@ pub fn cmd_preview(app: &mut App, mode: &str) -> CommandResult<()> {
         "model" => app.enter_model_screen(),
         "toggle" => match app.screen {
             Screen::Editor => return cmd_preview(app, "model"),
-            Screen::ModelPreview => return cmd_preview(app, "source"),
+            Screen::ModelPreview => return cmd_preview(app, "close"),
         },
         _ => {
             return Err(CommandError::InvalidCommand(
-                "Usage: preview source|model|toggle".to_string(),
+                "Usage: preview source|model|toggle|close".to_string(),
             ))
         }
     };
@@ -3957,8 +3961,13 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
         "Show source or model preview; model renders once when no preview exists",
         1,
         Some(1),
-        "preview source|model|toggle",
-        vec!["preview source", "preview model", "preview toggle"],
+        "preview source|model|toggle|close",
+        vec![
+            "preview source",
+            "preview model",
+            "preview toggle",
+            "preview close",
+        ],
         CommandType::Preview,
         false,
         true,
@@ -4509,6 +4518,29 @@ mod tests {
         cmd_preview(&mut app, "toggle").unwrap();
         assert_eq!(app.screen, crate::app::Screen::ModelPreview);
         cmd_preview(&mut app, "toggle").unwrap();
+        assert_eq!(app.screen, crate::app::Screen::Editor);
+    }
+
+    #[test]
+    fn test_preview_close_quits_a_standalone_model_session() {
+        let mut app = App::new();
+        app.enter_model_screen();
+        app.preview_close_action = PreviewCloseAction::Quit;
+
+        cmd_preview(&mut app, "close").unwrap();
+
+        assert!(app.should_quit);
+        assert_eq!(app.screen, crate::app::Screen::ModelPreview);
+    }
+
+    #[test]
+    fn test_preview_close_returns_project_preview_to_source() {
+        let mut app = App::new();
+        app.enter_model_screen();
+
+        cmd_preview(&mut app, "close").unwrap();
+
+        assert!(!app.should_quit);
         assert_eq!(app.screen, crate::app::Screen::Editor);
     }
 
