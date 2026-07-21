@@ -1,4 +1,4 @@
-use crate::{RenderError, Result, Vec3};
+use crate::{Mat4, RenderError, Result, Vec3};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Aabb {
@@ -34,6 +34,28 @@ impl Aabb {
 
     pub fn radius(self) -> f32 {
         self.size().length() * 0.5
+    }
+
+    pub fn union(self, other: Self) -> Self {
+        Self {
+            min: self.min.min(other.min),
+            max: self.max.max(other.max),
+        }
+    }
+
+    pub fn transformed(self, transform: Mat4) -> Result<Self> {
+        let corners = [
+            Vec3::new(self.min.x, self.min.y, self.min.z),
+            Vec3::new(self.min.x, self.min.y, self.max.z),
+            Vec3::new(self.min.x, self.max.y, self.min.z),
+            Vec3::new(self.min.x, self.max.y, self.max.z),
+            Vec3::new(self.max.x, self.min.y, self.min.z),
+            Vec3::new(self.max.x, self.min.y, self.max.z),
+            Vec3::new(self.max.x, self.max.y, self.min.z),
+            Vec3::new(self.max.x, self.max.y, self.max.z),
+        ]
+        .map(|corner| transform.transform_point3(corner));
+        Self::from_points(&corners)
     }
 }
 
@@ -121,5 +143,16 @@ mod tests {
         let mesh = Mesh::new(vec![Vec3::ZERO, Vec3::X, Vec3::X * 2.0], vec![[0, 1, 2]]).unwrap();
         assert!(mesh.triangles.is_empty());
         assert!(mesh.triangle_normals.is_empty());
+    }
+
+    #[test]
+    fn bounds_transform_and_union_cover_instances() {
+        let first = Aabb::from_points(&[Vec3::ZERO, Vec3::ONE]).unwrap();
+        let moved = first
+            .transformed(Mat4::from_translation(Vec3::new(4.0, -2.0, 1.0)))
+            .unwrap();
+        assert_eq!(moved.min, Vec3::new(4.0, -2.0, 1.0));
+        assert_eq!(moved.max, Vec3::new(5.0, -1.0, 2.0));
+        assert_eq!(first.union(moved).max, Vec3::new(5.0, 1.0, 2.0));
     }
 }

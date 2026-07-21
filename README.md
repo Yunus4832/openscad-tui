@@ -22,6 +22,8 @@ Vim 风格按键和命令修改 OpenSCAD AST，可在终端中查看模型树、
 - 补全命令、模块、参数、值、函数和文件路径
 - 在函数调用与列表嵌套表达式中继续补全
 - 调用 OpenSCAD 生成 OFF 网格，并通过 CPU 光栅化显示交互式模型预览
+- 将多个可编辑项目源编译为共享 mesh，在独立 Assembly Screen 中分层装配、变换和预览
+- 将装配以保留零件层级与几何实例的白膜 COLLADA `.dae` 场景导出
 - 切换透视/正交投影、标准视角、相机环绕/平移/缩放和自动旋转
 
 核心表达式支持布尔值、整数、浮点数、字符串、`undef`、标识符、列表、范围、
@@ -244,6 +246,12 @@ buffer
 buffer vernier_cursor.scad
 buffer next
 render
+assembly new robot
+assembly add vernier_body.scad body
+assembly add vernier_cursor.scad cursor
+assembly translate cursor 20 0 0
+assembly render
+assembly export vernier.dae
 wq
 ```
 
@@ -271,6 +279,9 @@ wq
   静态 COLLADA 1.4.1 几何。DAE 导出不包含骨骼、动画、材质、相机或通用场景语义。
   相对导出路径以当前 `.scadtui` 项目包所在目录为基准；没有项目文件时才使用启动程序时
   的工作目录。
+- `assembly` 管理与源码 AST 分离的刚性零件装配。`assembly add` 只接受项目中的可编辑
+  source，每个唯一 source 由 OpenSCAD 编译一次并在实例之间共享 mesh；平移、旋转、缩放、
+  pivot、父子关系和可见性变化只重新组装/光栅化场景，不会再次调用 OpenSCAD。完整命令见下节。
 - `view <model.off|model.stl>` 直接加载现有 OFF 或 ASCII/Binary STL 文件并进入模型预览，
   不修改当前项目，也不调用 OpenSCAD。也可以把 `.off` / `.stl` 文件作为启动参数。
 - `library gears.scad` 加载 OpenSCAD 源码库并递归收集本地 SCAD 依赖，但不会修改
@@ -292,12 +303,67 @@ wq
 - 定义：`global`、`function`、`module`
 - 文件：`new`、`new!`、`write`、`write!`、`open`、`open!`、`edit`、`buffer`、`export`、`library`、`use`、`include`
 - 预览：`render`、`view`、`preview source|model|toggle|close`、`camera ...`、`axes ...`、`protocol ...`
+- 装配：`assembly new|open|list|add|select|copy|paste|remove|parent|translate|rotate|scale|pivot|visibility|render|export|close`
 - 系统：`help`、`version`、`diagnostics [file]`、`quit`、`quit!`、`wq`
+
+## 零件装配与 DAE 导出
+
+装配是 `.scadtui` 项目中的独立数据模型。源码 buffer 只负责产生不可变 mesh；装配保存
+mesh 来源、零件实例、父子层级、局部 TRS、pivot 和可见性。它不会把变换写回 OpenSCAD AST。
+
+```text
+assembly new robot
+assembly add body.scad body
+assembly add parts/arm.scad left_arm
+assembly add parts/arm.scad right_arm
+assembly parent left_arm body
+assembly parent right_arm body
+assembly translate left_arm -12 0 8
+assembly translate right_arm 12 0 8
+assembly rotate right_arm 0 0 180
+assembly scale body 1 1 1.2
+assembly pivot left_arm 0 0 4
+assembly visibility right_arm toggle
+assembly copy right_arm
+assembly paste root
+assembly render
+assembly export exports/robot.dae
+```
+
+`assembly open [name]` 切换装配，`assembly list` 列出项目中的装配，`assembly select`、
+`assembly remove` 和 `assembly parent <part> root` 分别选择、移除和解除父级。命令参数支持
+项目 source 与零件 ID 的补全。相对导出路径仍以 `.scadtui` 所在目录为基准；省略 `.dae`
+后缀会自动补齐。`parent`、四种变换和 `visibility` 都可以省略零件 ID，默认作用于当前
+选中的零件；显式 ID 形式继续保留，便于脚本和 CLI 使用。重复添加或粘贴同名零件时，
+显示名与 ID 会依次变为 `arm`、`arm2`、`arm3`。`assembly copy [part]` 复制一个零件实例，
+`assembly paste [parent|root]` 保留其 source、变换、可见性以及默认父级，并产生新的唯一名字。
+
+`pivot` 是零件局部坐标中的旋转/缩放中心，不是额外位移。实际变换顺序为
+`translate × pivot × rotate × scale × -pivot`。例如把 pivot 设为 `[10, 0, 0]` 后绕 Z 轴
+旋转，零件会绕局部坐标中的 `[10, 0, 0]` 转动，而不是绕原点转动；制作门轴、车轮轴、
+机械臂关节时很有用。普通摆放只需要 translate/rotate/scale，可以一直保持 pivot 为零。
+
+Assembly Screen 左侧显示零件层级与当前零件的 source、父级、可见性和 TRS/pivot，右侧
+显示共享多网格场景。`j/k` 选择零件，`v` 切换其可见性，`Space` 与 Model Screen 一致用于
+启停自动旋转，`d` 删除，`x` 切换坐标轴，`R` 重新编译并渲染，`Esc/q/P` 返回 Source。
+`a`、`n`、`e` 分别预填 add、new、export 命令；`t/r/s/o/g` 会把当前零件及其
+translate/rotate/scale/pivot/parent 值带入命令行，直接修改即可。鼠标可选择零件并使用与
+Model Screen 相同的环绕、右键平移和滚轮缩放；`y/p` 复制和粘贴零件。Assembly 中的
+`p` 因此不再切换投影，投影仍可点击工具栏按钮或执行 `camera projection toggle`。所有按键和按钮都通过已注册的
+`assembly`、`camera`、`axes`、`protocol` 命令执行。
+
+装配导出的 COLLADA 1.4.1 是刻意受限的白膜交换格式：包含具名且唯一的零件节点、
+去重后的三角几何、法线、局部矩阵和 geometry instances。装配不会额外注入根节点；所有
+未设置 parent 的零件会直接成为 visual scene 的顶层节点，根层级完全由装配数据决定。相同
+source 的多个零件节点会共享一份 geometry，这是 DAE 的实例化语义；零件名属于 node，
+geometry 名代表共享 mesh 数据。不包含材质/贴图、UV、动画、骨骼、蒙皮、
+灯光或相机。需要这些内容时，应把 DAE 继续交给 Blender 或游戏资产管线处理。
 
 ## 模型预览
 
 执行 `render` 会调用本机 `openscad`，把当前模型编译为内部三角网格；`view` 则直接将
-OFF/STL 文件加载为相同的 `Mesh`。两条路径共用 `openscad-render` 的后台 CPU 光栅化，
+OFF/STL 文件加载为相同的 `Mesh`。单模型会适配为一个 instance；装配则提供多个共享 mesh
+和实例矩阵。三条路径共用 `openscad-render` 的 `RenderScene` 后台 CPU 光栅化，
 输出 RGBA 帧。OFF 是 OpenSCAD 编译路径的内部中间格式，不会泄漏到下游渲染接口。
 终端展示由独立的 `openscad-terminal` 后端处理，不参与模型加载、相机计算和光栅化。
 
@@ -394,8 +460,9 @@ replace sphere
 openscad-tui/
 ├── crates/
 │   ├── core/       # AST、表达式解析和 OpenSCAD 代码生成
+│   ├── assembly/   # 刚性零件装配模型、层级解析和多节点 DAE 导出
 │   ├── library/    # 内置/外部模块与函数元数据
-│   ├── render/     # OFF、相机、CPU 光栅化和异步渲染服务
+│   ├── render/     # Mesh/RenderScene、相机、CPU 光栅化和异步渲染服务
 │   ├── terminal/   # 双缓冲终端编码、协议后端和 Ratatui 展示适配
 │   └── ui/         # TUI、输入、命令和应用状态
 ├── stdlib.json     # 程序内部使用的 OpenSCAD 内建签名表
@@ -411,7 +478,7 @@ cargo test --workspace
 cargo check --workspace
 ```
 
-测试覆盖 core、library、render 和 ui 四个 crate；实际数量以
+测试覆盖 core、assembly、library、render、terminal 和 ui crate；实际数量以
 `cargo test --workspace` 输出为准。
 
 ## 当前限制
@@ -423,8 +490,8 @@ cargo check --workspace
 - 能从调用文件相对路径解析到的 `.scad` 依赖会嵌入项目；只能通过 `OPENSCADPATH`、
   OpenSCAD 内置库或安装库找到的依赖仍保持外部引用
 - STL、OFF、DXF、SVG、PNG 等由 `import` / `surface` 引用的非 SCAD 资源尚未嵌入项目
-- 入口文件可进行结构化编辑；嵌入的依赖文件当前用于定义补全和渲染，尚不能在 UI 中
-  切换为活动编辑文件
+- Assembly 当前只支持刚性白膜零件、父子层级、TRS/pivot 和可见性；不提供顶点编辑、
+  UV/材质、骨骼、蒙皮、动画、物理或 DAE 导入/预览
 - 不是自由文本源码编辑器，主要通过 AST 树和命令编辑
 - 函数参数默认值、语义类型检查和高级补全仍有限
 - README 描述的是当前代码状态，项目尚未提供稳定发布或安装包

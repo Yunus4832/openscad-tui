@@ -33,6 +33,7 @@ pub enum CommandType {
     Export,
     Axes,
     Visibility,
+    Assembly,
 }
 
 /// Command type - used for dynamic completion context analysis

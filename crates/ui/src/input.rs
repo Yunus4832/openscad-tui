@@ -24,6 +24,7 @@ pub fn handle_key(key: KeyEvent, app: &mut App) {
         InputMode::Normal => match app.screen {
             crate::app::Screen::Editor => handle_normal_input(key, app),
             crate::app::Screen::ModelPreview => handle_model_key(key, app),
+            crate::app::Screen::Assembly => handle_assembly_key(key, app),
         },
     }
 }
@@ -45,6 +46,7 @@ pub fn handle_mouse(event: MouseEvent, app: &mut App) {
     match app.screen {
         crate::app::Screen::Editor => handle_editor_mouse(event, app),
         crate::app::Screen::ModelPreview => handle_model_mouse(event, app),
+        crate::app::Screen::Assembly => handle_assembly_mouse(event, app),
     }
 }
 
@@ -78,17 +80,54 @@ fn handle_model_mouse(event: MouseEvent, app: &mut App) {
             .ui_regions
             .camera_buttons
             .iter()
-            .copied()
             .find(|button| button.area.contains(position))
-            .map(|button| button.command)
+            .map(|button| button.command.clone())
         {
-            execute_shortcut(app, command);
+            execute_shortcut(app, &command);
             return;
         }
     }
     if app.ui_regions.preview.contains(position) {
         handle_preview_mouse(event, app);
     }
+}
+
+fn handle_assembly_mouse(event: MouseEvent, app: &mut App) {
+    let position = Position::new(event.column, event.row);
+    if app.ui_regions.tree.contains(position) {
+        if event.kind == MouseEventKind::ScrollUp {
+            execute_shortcut(app, "assembly select prev");
+            return;
+        }
+        if event.kind == MouseEventKind::ScrollDown {
+            execute_shortcut(app, "assembly select next");
+            return;
+        }
+        if event.kind != MouseEventKind::Down(MouseButton::Left) {
+            return;
+        }
+        let row = event
+            .row
+            .saturating_sub(app.ui_regions.tree.y.saturating_add(1)) as usize
+            + app.assembly_scroll_offset;
+        let part_id = app.active_assembly.as_deref().and_then(|active| {
+            app.assemblies
+                .iter()
+                .find(|assembly| assembly.id == active || assembly.name == active)
+                .and_then(|assembly| {
+                    assembly
+                        .hierarchy_rows()
+                        .get(row)
+                        .map(|(index, _)| &assembly.parts[*index])
+                })
+                .map(|part| part.id.clone())
+        });
+        if let Some(part_id) = part_id {
+            execute_shortcut(app, &format!("assembly select {part_id}"));
+        }
+        return;
+    }
+    handle_model_mouse(event, app);
 }
 
 fn handle_tree_mouse(event: MouseEvent, app: &mut App, position: Position) {
@@ -380,6 +419,89 @@ fn handle_model_key(key: KeyEvent, app: &mut App) {
     if let Some(command) = model_key_command(key) {
         execute_shortcut(app, command);
     }
+}
+
+fn handle_assembly_key(key: KeyEvent, app: &mut App) {
+    match key.code {
+        KeyCode::Char(':') => begin_assembly_command(app, ""),
+        KeyCode::Char('n') => begin_assembly_command(app, "assembly new "),
+        KeyCode::Char('a') => begin_assembly_command(app, "assembly add "),
+        KeyCode::Char('t') => prefill_assembly_transform(app, "translate"),
+        KeyCode::Char('r') => prefill_assembly_transform(app, "rotate"),
+        KeyCode::Char('s') => prefill_assembly_transform(app, "scale"),
+        KeyCode::Char('o') => prefill_assembly_transform(app, "pivot"),
+        KeyCode::Char('g') => prefill_assembly_parent(app),
+        KeyCode::Char('e') => begin_assembly_command(app, "assembly export "),
+        _ => {}
+    }
+    if app.input_mode == InputMode::Command {
+        return;
+    }
+    let command: Option<String> = match key.code {
+        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('P') => Some("assembly close".into()),
+        KeyCode::Char('j') => Some("assembly select next".into()),
+        KeyCode::Char('k') => Some("assembly select prev".into()),
+        KeyCode::Char('R') => Some("assembly render".into()),
+        KeyCode::Char('v') => Some("assembly visibility toggle".into()),
+        KeyCode::Char('y') => Some("assembly copy".into()),
+        KeyCode::Char('p') => Some("assembly paste".into()),
+        KeyCode::Char('d') => Some("assembly remove".into()),
+        _ => model_key_command(key).map(str::to_string),
+    };
+    if let Some(command) = command {
+        execute_shortcut(app, &command);
+    }
+}
+
+fn begin_assembly_command(app: &mut App, command: &str) {
+    app.input_mode = InputMode::Command;
+    app.input_buffer.set_content(command);
+    app.completion_active = false;
+    app.completion_candidates.clear();
+    app.clear_error();
+}
+
+fn selected_assembly_part(app: &App) -> Option<&openscad_assembly::PartInstance> {
+    let active = app.active_assembly.as_deref()?;
+    let selected = app.selected_assembly_part.as_deref()?;
+    app.assemblies
+        .iter()
+        .find(|assembly| assembly.id == active || assembly.name == active)?
+        .part(selected)
+}
+
+fn format_assembly_values(values: [f32; 3]) -> String {
+    format!("{} {} {}", values[0], values[1], values[2])
+}
+
+fn prefill_assembly_transform(app: &mut App, operation: &str) {
+    let Some(part) = selected_assembly_part(app) else {
+        app.set_error("No assembly part is selected");
+        return;
+    };
+    let values = match operation {
+        "translate" => part.transform.translation,
+        "rotate" => part.transform.rotation_degrees,
+        "scale" => part.transform.scale,
+        "pivot" => part.transform.pivot,
+        _ => unreachable!(),
+    };
+    let command = format!(
+        "assembly {operation} {} {}",
+        part.id,
+        format_assembly_values(values)
+    );
+    begin_assembly_command(app, &command);
+}
+
+fn prefill_assembly_parent(app: &mut App) {
+    let Some(part) = selected_assembly_part(app) else {
+        app.set_error("No assembly part is selected");
+        return;
+    };
+    let parent = part.parent.as_deref().unwrap_or("root");
+    let command = format!("assembly parent {} {parent}", part.id);
+    begin_assembly_command(app, &command);
 }
 
 fn model_key_command(key: KeyEvent) -> Option<&'static str> {
@@ -1087,6 +1209,7 @@ fn analyze_input_context(input: &str, app: &App) -> CompletionContext {
             CommandType::Visibility => {
                 literal_command_context(input, &parts, &["show", "hide", "toggle"], &[])
             }
+            CommandType::Assembly => assembly_command_context(input, &parts, app),
             CommandType::ProjectSource => project_source_command_context(input, &parts, app),
             CommandType::New => literal_command_context(input, &parts, &["project", "file"], &[]),
             CommandType::Export => {
@@ -1213,6 +1336,96 @@ fn project_source_command_context(input: &str, parts: &[&str], app: &App) -> Com
             .filter(|source| source.editable)
             .map(|source| source.virtual_path.clone()),
     );
+    CompletionContext::Literal { candidates }
+}
+
+fn assembly_command_context(input: &str, parts: &[&str], app: &App) -> CompletionContext {
+    const OPERATIONS: &[&str] = &[
+        "new",
+        "open",
+        "list",
+        "add",
+        "select",
+        "copy",
+        "paste",
+        "remove",
+        "parent",
+        "translate",
+        "rotate",
+        "scale",
+        "pivot",
+        "visibility",
+        "render",
+        "export",
+        "close",
+    ];
+    if parts.len() == 1 || (parts.len() == 2 && !input.ends_with(' ')) {
+        return CompletionContext::Literal {
+            candidates: OPERATIONS
+                .iter()
+                .map(|value| (*value).to_string())
+                .collect(),
+        };
+    }
+    let operation = parts.get(1).copied().unwrap_or("");
+    if operation == "export" {
+        let prefix = format!("{} export", parts[0]);
+        let path = input.strip_prefix(&prefix).unwrap_or("");
+        return analyze_input_context(&format!("edit{path}"), app);
+    }
+    let active = app.active_assembly.as_deref().and_then(|id| {
+        app.assemblies
+            .iter()
+            .find(|assembly| assembly.id == id || assembly.name == id)
+    });
+    let part_names = || {
+        active
+            .into_iter()
+            .flat_map(|assembly| assembly.parts.iter().map(|part| part.id.clone()))
+            .collect::<Vec<_>>()
+    };
+    let candidates = match (operation, parts.len(), input.ends_with(' ')) {
+        ("open", 2, true) | ("open", 3, false) => app
+            .assemblies
+            .iter()
+            .map(|assembly| assembly.id.clone())
+            .collect(),
+        ("add", 2, true) | ("add", 3, false) => app
+            .ast
+            .embedded_sources
+            .iter()
+            .filter(|source| source.editable)
+            .map(|source| source.virtual_path.clone())
+            .collect(),
+        ("select", 2, true) | ("select", 3, false) => {
+            let mut values = vec!["next".to_string(), "prev".to_string()];
+            values.extend(part_names());
+            values
+        }
+        ("parent", 2, true) | ("parent", 3, false) | ("parent", 3, true) | ("parent", 4, false) => {
+            let mut values = vec!["root".to_string()];
+            values.extend(part_names());
+            values
+        }
+        ("visibility", 2, true) | ("visibility", 3, false) => {
+            let mut values = vec!["show".into(), "hide".into(), "toggle".into()];
+            values.extend(part_names());
+            values
+        }
+        ("visibility", 3, true) | ("visibility", 4, false) => {
+            vec!["show".into(), "hide".into(), "toggle".into()]
+        }
+        ("paste", 2, true) | ("paste", 3, false) => {
+            let mut values = vec!["root".to_string()];
+            values.extend(part_names());
+            values
+        }
+        ("copy" | "remove" | "translate" | "rotate" | "scale" | "pivot", 2, true)
+        | ("copy" | "remove" | "translate" | "rotate" | "scale" | "pivot", 3, false) => {
+            part_names()
+        }
+        _ => return CompletionContext::Command,
+    };
     CompletionContext::Literal { candidates }
 }
 
@@ -3279,7 +3492,7 @@ mod tests {
             .camera_buttons
             .push(crate::app::CameraButtonRegion {
                 area: ratatui::layout::Rect::new(2, 20, 8, 1),
-                command: "preview source",
+                command: "preview source".into(),
             });
 
         handle_mouse(
@@ -3434,5 +3647,119 @@ mod tests {
         handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &mut app);
         assert_eq!(app.input_mode, InputMode::Normal);
         assert_eq!(app.screen, crate::app::Screen::ModelPreview);
+    }
+
+    #[test]
+    fn test_assembly_shortcuts_execute_registered_commands() {
+        let mut app = App::new();
+        commands::cmd_assembly(&mut app, &["new", "robot"]).unwrap();
+        commands::cmd_assembly(&mut app, &["add", "main.scad", "body"]).unwrap();
+        commands::cmd_assembly(&mut app, &["add", "main.scad", "arm"]).unwrap();
+        app.selected_assembly_part = Some("body".into());
+
+        handle_key(
+            KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
+            &mut app,
+        );
+        assert_eq!(app.selected_assembly_part.as_deref(), Some("arm"));
+        handle_key(
+            KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
+            &mut app,
+        );
+        assert!(app.assembly_preview.auto_rotate);
+        assert!(app.assemblies[0].part("arm").unwrap().visible);
+        handle_key(
+            KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE),
+            &mut app,
+        );
+        assert!(!app.assemblies[0].part("arm").unwrap().visible);
+        handle_key(
+            KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE),
+            &mut app,
+        );
+        handle_key(
+            KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE),
+            &mut app,
+        );
+        assert_eq!(app.selected_assembly_part.as_deref(), Some("arm2"));
+        assert!(!app.assemblies[0].part("arm2").unwrap().visible);
+        handle_key(
+            KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE),
+            &mut app,
+        );
+        assert_eq!(app.input_mode, InputMode::Command);
+        assert_eq!(app.input_buffer.content(), "assembly rotate arm2 0 0 0");
+        handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &mut app);
+        handle_key(
+            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
+            &mut app,
+        );
+        assert!(app.assemblies[0].part("arm2").is_none());
+        assert!(app.assemblies[0].part("arm").is_some());
+        handle_key(
+            KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
+            &mut app,
+        );
+        assert_eq!(app.screen, crate::app::Screen::Editor);
+    }
+
+    #[test]
+    fn test_assembly_completion_includes_operations_sources_and_parts() {
+        let mut app = App::new();
+        commands::cmd_assembly(&mut app, &["new", "robot"]).unwrap();
+        commands::cmd_assembly(&mut app, &["add", "main.scad", "body"]).unwrap();
+
+        let operations = generate_completions("assembly ", &app);
+        assert!(operations
+            .0
+            .iter()
+            .any(|candidate| candidate.content == "render"));
+        let sources = generate_completions("assembly add ", &app);
+        assert!(sources
+            .0
+            .iter()
+            .any(|candidate| candidate.content == "main.scad"));
+        let parts = generate_completions("assembly translate ", &app);
+        assert!(parts.0.iter().any(|candidate| candidate.content == "body"));
+        let visibility = generate_completions("assembly visibility ", &app);
+        assert!(visibility
+            .0
+            .iter()
+            .any(|candidate| candidate.content == "toggle"));
+        let parent = generate_completions("assembly parent ", &app);
+        assert!(parent.0.iter().any(|candidate| candidate.content == "root"));
+        let copy = generate_completions("assembly copy ", &app);
+        assert!(copy.0.iter().any(|candidate| candidate.content == "body"));
+        let paste = generate_completions("assembly paste ", &app);
+        assert!(paste.0.iter().any(|candidate| candidate.content == "root"));
+    }
+
+    #[test]
+    fn test_assembly_edit_shortcuts_prefill_current_values() {
+        let mut app = App::new();
+        commands::cmd_assembly(&mut app, &["new", "robot"]).unwrap();
+        commands::cmd_assembly(&mut app, &["add", "main.scad", "arm"]).unwrap();
+        commands::cmd_assembly(&mut app, &["translate", "arm", "1", "2", "3"]).unwrap();
+
+        handle_key(
+            KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE),
+            &mut app,
+        );
+        assert_eq!(app.input_mode, InputMode::Command);
+        assert_eq!(app.input_buffer.content(), "assembly translate arm 1 2 3");
+        handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &mut app);
+
+        handle_key(
+            KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE),
+            &mut app,
+        );
+        assert_eq!(app.input_buffer.content(), "assembly parent arm root");
+        handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &mut app);
+
+        handle_key(
+            KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
+            &mut app,
+        );
+        assert_eq!(app.input_buffer.content(), "assembly add ");
     }
 }

@@ -238,6 +238,7 @@ pub enum InputMode {
 pub enum Screen {
     Editor,
     ModelPreview,
+    Assembly,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -264,10 +265,10 @@ pub enum MessageType {
     Warning,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CameraButtonRegion {
     pub area: Rect,
-    pub command: &'static str,
+    pub command: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -345,11 +346,22 @@ pub enum DefinitionCompletionKind {
 
 pub struct App {
     pub ast: Arc<AstRoot>,
+    pub assemblies: Vec<openscad_assembly::AssemblyDocument>,
+    pub active_assembly: Option<String>,
+    pub selected_assembly_part: Option<String>,
+    pub assembly_scroll_offset: usize,
+    pub assembly_mesh_cache: std::collections::HashMap<
+        openscad_assembly::MeshSourceRef,
+        (u64, Arc<openscad_render::Mesh>),
+    >,
+    /// Application-local clipboard for one rigid assembly part instance.
+    pub assembly_clipboard: Option<openscad_assembly::PartInstance>,
     pub library: LibraryManager,
     pub command_registry: CommandRegistry,
     pub screen: Screen,
     pub preview_close_action: PreviewCloseAction,
     pub model_preview: crate::preview::ModelPreview,
+    pub assembly_preview: crate::preview::ModelPreview,
     pub selected_nodes: Vec<String>,
     pub undo_stack: VecDeque<Arc<AstRoot>>,
     pub redo_stack: VecDeque<Arc<AstRoot>>,
@@ -410,11 +422,18 @@ impl App {
     pub fn new() -> Self {
         let mut app = Self {
             ast: Arc::new(AstRoot::new_project("main.scad")),
+            assemblies: Vec::new(),
+            active_assembly: None,
+            selected_assembly_part: None,
+            assembly_scroll_offset: 0,
+            assembly_mesh_cache: std::collections::HashMap::new(),
+            assembly_clipboard: None,
             library: LibraryManager::new(),
             command_registry: CommandRegistry::new(),
             screen: Screen::Editor,
             preview_close_action: PreviewCloseAction::Source,
             model_preview: crate::preview::ModelPreview::default(),
+            assembly_preview: crate::preview::ModelPreview::default(),
             selected_nodes: Vec::new(),
             undo_stack: VecDeque::with_capacity(100),
             redo_stack: VecDeque::with_capacity(100),
@@ -827,7 +846,7 @@ impl App {
         if let Some(prev) = self.undo_stack.pop_back() {
             self.redo_stack.push_back(self.ast.clone());
             self.ast = prev;
-            self.model_preview.mark_stale();
+            self.invalidate_source_previews();
             self.restore_tree_selection();
             self.clear_error();
         } else {
@@ -839,7 +858,7 @@ impl App {
         if let Some(next) = self.redo_stack.pop_back() {
             self.undo_stack.push_back(self.ast.clone());
             self.ast = next;
-            self.model_preview.mark_stale();
+            self.invalidate_source_previews();
             self.restore_tree_selection();
             self.clear_error();
         } else {
@@ -1020,15 +1039,23 @@ impl App {
 
     pub fn mark_dirty(&mut self) {
         self.saved = false;
+        self.invalidate_source_previews();
+    }
+
+    pub fn invalidate_source_previews(&mut self) {
         self.model_preview.mark_stale();
+        self.assembly_mesh_cache.clear();
+        self.assembly_preview.mark_stale();
     }
 
     pub fn configure_image_picker(&mut self, picker: ratatui_image::picker::Picker) {
         self.model_preview.set_picker(picker);
+        self.assembly_preview.set_picker(picker);
     }
 
     pub fn poll_render_events(&mut self) {
         self.model_preview.poll();
+        self.assembly_preview.poll();
     }
 
     pub fn enter_model_screen(&mut self) {
@@ -1036,11 +1063,21 @@ impl App {
         self.screen = Screen::ModelPreview;
     }
 
+    pub fn enter_assembly_screen(&mut self) {
+        self.model_preview.stop_auto_rotate();
+        self.assembly_preview.prepare_for_display();
+        self.mouse_drag = None;
+        self.screen = Screen::Assembly;
+        self.input_mode = InputMode::Normal;
+        self.terminal_clear_requested = true;
+    }
+
     pub fn enter_editor_screen(&mut self) {
         // Model animation belongs to the model screen. Stop scheduling camera frames as soon as
         // the user returns to source; an already-running CPU frame may still finish in the
         // background, but it cannot start another rotation frame.
         self.model_preview.stop_auto_rotate();
+        self.assembly_preview.stop_auto_rotate();
         self.mouse_drag = None;
         self.screen = Screen::Editor;
         self.preview_close_action = PreviewCloseAction::Source;

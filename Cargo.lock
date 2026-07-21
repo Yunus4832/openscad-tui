@@ -640,6 +640,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
+name = "openscad-assembly"
+version = "0.0.1"
+dependencies = [
+ "glam",
+ "openscad-render",
+ "serde",
+ "thiserror",
+]
+
+[[package]]
 name = "openscad-core"
 version = "0.0.1"
 dependencies = [
@@ -686,6 +696,7 @@ dependencies = [
  "clap",
  "crossterm 0.29.0",
  "dirs",
+ "openscad-assembly",
  "openscad-core",
  "openscad-library",
  "openscad-render",

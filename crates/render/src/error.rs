@@ -21,6 +21,12 @@ pub enum RenderError {
         vertex_count: usize,
     },
 
+    #[error("render instance references mesh {index}, but only {mesh_count} meshes exist")]
+    InvalidMeshInstance { index: usize, mesh_count: usize },
+
+    #[error("render instance {index} contains a non-finite transform")]
+    NonFiniteTransform { index: usize },
+
     #[error("invalid OFF data: {0}")]
     InvalidOff(String),
 

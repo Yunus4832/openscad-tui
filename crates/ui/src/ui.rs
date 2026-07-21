@@ -23,7 +23,164 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     match app.screen {
         Screen::Editor => draw_editor_screen(f, app),
         Screen::ModelPreview => draw_model_screen(f, app),
+        Screen::Assembly => draw_assembly_screen(f, app),
     }
+}
+
+fn draw_assembly_screen(f: &mut Frame, app: &mut App) {
+    let main_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(8), Constraint::Length(4)])
+        .split(f.area());
+    let content = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Length(38), Constraint::Min(20)])
+        .split(main_chunks[0]);
+    app.ui_regions.camera_buttons.clear();
+    app.ui_regions.preview = content[1];
+    app.ui_regions.input = main_chunks[1];
+    if content[0].height >= 14 {
+        let sidebar = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(5), Constraint::Length(11)])
+            .split(content[0]);
+        app.ui_regions.tree = sidebar[0];
+        draw_assembly_parts(f, app, sidebar[0]);
+        draw_assembly_details(f, app, sidebar[1]);
+    } else {
+        app.ui_regions.tree = content[0];
+        draw_assembly_parts(f, app, content[0]);
+    }
+    draw_assembly_preview(f, app, content[1]);
+    match app.input_mode {
+        crate::app::InputMode::Command | crate::app::InputMode::ModuleEnterParams => {
+            if app.completion_active && !app.completion_candidates.is_empty() {
+                draw_completion_popup(f, app, main_chunks[1]);
+            }
+            draw_input(f, app, main_chunks[1]);
+        }
+        crate::app::InputMode::Normal | crate::app::InputMode::Help => {
+            draw_camera_toolbar(f, app, main_chunks[1]);
+        }
+    }
+    if app.input_mode == crate::app::InputMode::Help {
+        draw_help_modal(f, app);
+    }
+}
+
+fn draw_assembly_parts(f: &mut Frame, app: &mut App, area: Rect) {
+    let active = app.active_assembly.as_deref().and_then(|id| {
+        app.assemblies
+            .iter()
+            .find(|assembly| assembly.id == id || assembly.name == id)
+    });
+    let title = active
+        .map(|assembly| format!(" Assembly: {} ", assembly.name))
+        .unwrap_or_else(|| " Assembly ".to_string());
+    let rows = active.map(|assembly| assembly.hierarchy_rows());
+    let visible_height = area.height.saturating_sub(2) as usize;
+    if let (Some(assembly), Some(rows)) = (active, rows.as_ref()) {
+        if let Some(selected_row) = app.selected_assembly_part.as_deref().and_then(|selected| {
+            rows.iter()
+                .position(|(index, _)| assembly.parts[*index].id == selected)
+        }) {
+            if selected_row < app.assembly_scroll_offset {
+                app.assembly_scroll_offset = selected_row;
+            } else if visible_height > 0
+                && selected_row >= app.assembly_scroll_offset + visible_height
+            {
+                app.assembly_scroll_offset = selected_row + 1 - visible_height;
+            }
+        }
+        app.assembly_scroll_offset = app
+            .assembly_scroll_offset
+            .min(rows.len().saturating_sub(visible_height.max(1)));
+    } else {
+        app.assembly_scroll_offset = 0;
+    }
+    let lines = active
+        .map(|assembly| {
+            rows.as_ref()
+                .expect("active assembly has hierarchy rows")
+                .iter()
+                .skip(app.assembly_scroll_offset)
+                .take(visible_height)
+                .map(|(index, depth)| {
+                    let part = &assembly.parts[*index];
+                    let selected = app.selected_assembly_part.as_deref() == Some(&part.id);
+                    let marker = if selected { ">" } else { " " };
+                    let visibility = if part.visible { "●" } else { "○" };
+                    Line::styled(
+                        format!("{marker}{} {visibility} {}", "  ".repeat(*depth), part.name),
+                        if selected {
+                            Style::default()
+                                .fg(Color::Black)
+                                .bg(Color::Cyan)
+                                .add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default().fg(Color::White)
+                        },
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_else(|| vec![Line::styled("No active assembly", Color::DarkGray)]);
+    f.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .title(title)
+                .borders(Borders::ALL)
+                .style(Style::default().fg(Color::Yellow)),
+        ),
+        area,
+    );
+}
+
+fn draw_assembly_details(f: &mut Frame, app: &App, area: Rect) {
+    let part = app.active_assembly.as_deref().and_then(|active| {
+        let selected = app.selected_assembly_part.as_deref()?;
+        app.assemblies
+            .iter()
+            .find(|assembly| assembly.id == active || assembly.name == active)?
+            .part(selected)
+    });
+    let lines = part
+        .map(|part| {
+            vec![
+                Line::from(format!("Name: {}", part.name)),
+                Line::from(format!("ID: {}", part.id)),
+                Line::from(format!("Source: {}", part.source.virtual_path())),
+                Line::from(format!(
+                    "Parent: {}",
+                    part.parent.as_deref().unwrap_or("root")
+                )),
+                Line::from(format!(
+                    "Visible: {}",
+                    if part.visible { "yes" } else { "no" }
+                )),
+                Line::from(format_assembly_vec3("T", part.transform.translation)),
+                Line::from(format_assembly_vec3("R", part.transform.rotation_degrees)),
+                Line::from(format_assembly_vec3("S", part.transform.scale)),
+                Line::from(format_assembly_vec3("Pivot R/S", part.transform.pivot)),
+            ]
+        })
+        .unwrap_or_else(|| vec![Line::styled("No part selected", Color::DarkGray)]);
+    f.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .title(" Selected Part ")
+                .borders(Borders::ALL)
+                .style(Style::default().fg(Color::Cyan)),
+        ),
+        area,
+    );
+}
+
+fn format_assembly_vec3(label: &str, values: [f32; 3]) -> String {
+    format!(
+        "{label}: [{:.3}, {:.3}, {:.3}]",
+        values[0], values[1], values[2]
+    )
 }
 
 fn draw_model_screen(f: &mut Frame, app: &mut App) {
@@ -83,36 +240,89 @@ fn draw_editor_screen(f: &mut Frame, app: &mut App) {
 }
 
 fn draw_camera_toolbar(f: &mut Frame, app: &mut App, area: Rect) {
-    let close_label = match app.preview_close_action {
-        crate::app::PreviewCloseAction::Source => "Source",
-        crate::app::PreviewCloseAction::Quit => "Quit",
+    let close_label = match app.screen {
+        Screen::Assembly => "Source",
+        Screen::Editor | Screen::ModelPreview => match app.preview_close_action {
+            crate::app::PreviewCloseAction::Source => "Source",
+            crate::app::PreviewCloseAction::Quit => "Quit",
+        },
     };
-    let projection = match app.model_preview.camera.projection {
+    let preview = match app.screen {
+        Screen::Assembly => &app.assembly_preview,
+        Screen::Editor | Screen::ModelPreview => &app.model_preview,
+    };
+    let projection = match preview.camera.projection {
         openscad_render::Projection::Perspective { .. } => "Ortho",
         openscad_render::Projection::Orthographic { .. } => "Persp",
     };
-    let auto = if app.model_preview.auto_rotate {
-        "Stop"
-    } else {
-        "Auto"
-    };
-    let axes = if app.model_preview.axes_visible {
+    let auto = if preview.auto_rotate { "Stop" } else { "Auto" };
+    let axes = if preview.axes_visible {
         "Axes-"
     } else {
         "Axes+"
     };
-    let buttons = [
-        ("P", close_label, "preview close"),
-        ("f", "Fit", "camera fit"),
-        ("p", projection, "camera projection toggle"),
-        ("x", axes, "axes toggle"),
-        ("1", "Front", "camera view front"),
-        ("5", "Top", "camera view top"),
-        ("7", "Iso", "camera view iso"),
-        ("Space", auto, "camera auto-rotate toggle"),
-    ];
+    let buttons = if app.screen == Screen::Assembly {
+        let selected_visible = app.active_assembly.as_deref().and_then(|active| {
+            let selected = app.selected_assembly_part.as_deref()?;
+            app.assemblies
+                .iter()
+                .find(|assembly| assembly.id == active || assembly.name == active)?
+                .part(selected)
+                .map(|part| part.visible)
+        });
+        let visibility_label = match selected_visible {
+            Some(true) => "Hide",
+            Some(false) => "Show",
+            None => "Select",
+        };
+        let visibility = if selected_visible.is_some() {
+            "assembly visibility toggle".to_string()
+        } else {
+            "assembly select next".to_string()
+        };
+        vec![
+            ("P", "Source".to_string(), "assembly close".to_string()),
+            ("R", "Render".to_string(), "assembly render".to_string()),
+            ("v", visibility_label.to_string(), visibility),
+            ("y", "Copy".to_string(), "assembly copy".to_string()),
+            ("p", "Paste".to_string(), "assembly paste".to_string()),
+            (
+                "Space",
+                auto.to_string(),
+                "camera auto-rotate toggle".to_string(),
+            ),
+            (
+                "Proj",
+                projection.to_string(),
+                "camera projection toggle".to_string(),
+            ),
+        ]
+    } else {
+        vec![
+            ("P", close_label.to_string(), "preview close".to_string()),
+            ("f", "Fit".to_string(), "camera fit".to_string()),
+            (
+                "p",
+                projection.to_string(),
+                "camera projection toggle".to_string(),
+            ),
+            ("x", axes.to_string(), "axes toggle".to_string()),
+            ("1", "Front".to_string(), "camera view front".to_string()),
+            ("5", "Top".to_string(), "camera view top".to_string()),
+            ("7", "Iso".to_string(), "camera view iso".to_string()),
+            (
+                "Space",
+                auto.to_string(),
+                "camera auto-rotate toggle".to_string(),
+            ),
+        ]
+    };
     let block = Block::default()
-        .title(" Camera Controls ")
+        .title(if app.screen == Screen::Assembly {
+            " Assembly Controls "
+        } else {
+            " Camera Controls "
+        })
         .borders(Borders::ALL)
         .style(Style::default().fg(Color::Magenta));
     let inner = block.inner(area);
@@ -139,7 +349,11 @@ fn draw_camera_toolbar(f: &mut Frame, app: &mut App, area: Rect) {
         x = x.saturating_add(width + 1);
     }
     let shortcut_help = Line::styled(
-        "h/j/k/l Orbit  Arrows Pan  +/- Zoom  x Axes  1..7 Views  Esc/q Source  : Command",
+        if app.screen == Screen::Assembly {
+            "j/k Select  a Add  t/r/s Transform  o Pivot  g Parent  v Hide  y/p Copy/Paste  Space Auto"
+        } else {
+            "h/j/k/l Orbit  Arrows Pan  +/- Zoom  x Axes  1..7 Views  Esc/q Source  : Command"
+        },
         Style::default().fg(Color::DarkGray),
     );
     f.render_widget(
@@ -595,34 +809,48 @@ fn draw_preview(f: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn draw_model_preview(f: &mut Frame, app: &mut App, area: Rect) {
-    app.model_preview.set_area(area);
     let title = model_preview_title(app);
+    draw_preview_surface(f, &mut app.model_preview, area, title);
+}
+
+fn draw_assembly_preview(f: &mut Frame, app: &mut App, area: Rect) {
+    let title = preview_title(&app.assembly_preview, "Assembly");
+    draw_preview_surface(f, &mut app.assembly_preview, area, title);
+}
+
+fn draw_preview_surface(
+    f: &mut Frame,
+    preview: &mut crate::preview::ModelPreview,
+    area: Rect,
+    title: String,
+) {
+    preview.set_area(area);
     let block = Block::default()
         .title(title)
         .borders(Borders::ALL)
         .style(Style::default().fg(Color::Green));
     let inner = block.inner(area);
     f.render_widget(block, area);
-    if matches!(app.model_preview.status, ModelPreviewStatus::Empty) {
+    if matches!(preview.status, ModelPreviewStatus::Empty) {
         f.render_widget(
-            Paragraph::new(model_preview_status(app)).style(Style::default().fg(Color::DarkGray)),
+            Paragraph::new(preview_status(preview)).style(Style::default().fg(Color::DarkGray)),
             inner,
         );
-    } else if let Some(image) = app.model_preview.image_widget() {
+    } else if let Some(image) = preview.image_widget() {
         f.render_widget(image, inner);
     } else {
         f.render_widget(
-            Paragraph::new(model_preview_status(app)).style(Style::default().fg(Color::Red)),
+            Paragraph::new(preview_status(preview)).style(Style::default().fg(Color::Red)),
             inner,
         );
     }
 }
 
-fn model_preview_status(app: &App) -> String {
-    if let Some(error) = app.model_preview.presentation_error() {
+fn preview_status(preview: &crate::preview::ModelPreview) -> String {
+    if let Some(error) = preview.presentation_error() {
         return format!("display failed: {error}");
     }
-    match &app.model_preview.status {
+    match &preview.status {
         ModelPreviewStatus::Empty => "not rendered".to_string(),
         ModelPreviewStatus::Stale => "stale — run :render".to_string(),
         ModelPreviewStatus::Loading => "loading model…".to_string(),
@@ -633,19 +861,22 @@ fn model_preview_status(app: &App) -> String {
 }
 
 fn model_preview_title(app: &App) -> String {
+    preview_title(&app.model_preview, "Model")
+}
+
+fn preview_title(preview: &crate::preview::ModelPreview, label: &str) -> String {
     let protocol = fixed_display_width(
-        &format!("{:?}", app.model_preview.protocol_type()),
+        &format!("{:?}", preview.protocol_type()),
         MODEL_PROTOCOL_WIDTH,
     );
-    let status = fixed_display_width(&model_preview_status(app), MODEL_STATUS_WIDTH);
-    let frame_size = app
-        .model_preview
+    let status = fixed_display_width(&preview_status(preview), MODEL_STATUS_WIDTH);
+    let frame_size = preview
         .metrics
         .frame_size
         .map(|size| format!("{}x{}", size.width, size.height))
         .unwrap_or_else(|| "-".to_string());
     let frame_size = fixed_display_width(&frame_size, MODEL_FRAME_SIZE_WIDTH);
-    let metrics = &app.model_preview.metrics;
+    let metrics = &preview.metrics;
     let generation = fixed_metric(
         metrics.generation_time.as_secs_f64() * 1000.0,
         MODEL_TIME_WIDTH,
@@ -679,7 +910,7 @@ fn model_preview_title(app: &App) -> String {
     };
 
     format!(
-        " Model [{protocol}] {status} | {frame_size} G:{generation} R:{raster} E:{encode} D:{draw}ms {fps}fps {size_estimate_marker}{size_kb}KB ",
+        " {label} [{protocol}] {status} | {frame_size} G:{generation} R:{raster} E:{encode} D:{draw}ms {fps}fps {size_estimate_marker}{size_kb}KB ",
     )
 }
 
@@ -864,7 +1095,7 @@ fn draw_completion_popup(f: &mut Frame, app: &App, input_area: Rect) {
 mod tests {
     use super::{draw, model_preview_title, shows_input_buffer};
     use crate::app::{App, InputMode};
-    use crate::commands::{cmd_edit_scad, cmd_load_library};
+    use crate::commands::{cmd_assembly, cmd_edit_scad, cmd_load_library};
     use crate::preview::ModelPreviewStatus;
     use ratatui::{backend::TestBackend, Terminal};
     use std::fs;
@@ -962,6 +1193,53 @@ mod tests {
         assert!(shortcuts.contains("+/- Zoom"));
         assert!(shortcuts.contains("1..7 Views"));
         assert!(shortcuts.contains("Esc/q Source"));
+    }
+
+    #[test]
+    fn test_assembly_screen_draws_parts_and_uses_command_backed_toolbar() {
+        let mut app = App::new();
+        cmd_assembly(&mut app, &["new", "robot"]).unwrap();
+        cmd_assembly(&mut app, &["add", "main.scad", "body"]).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(110, 30)).unwrap();
+
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+        assert_eq!(app.screen, crate::app::Screen::Assembly);
+        assert_eq!(app.ui_regions.tree.width, 38);
+        assert!(app
+            .ui_regions
+            .camera_buttons
+            .iter()
+            .any(|button| button.command == "assembly close"));
+        assert!(app
+            .ui_regions
+            .camera_buttons
+            .iter()
+            .any(|button| button.command == "assembly visibility toggle"));
+        assert!(app
+            .ui_regions
+            .camera_buttons
+            .iter()
+            .any(|button| button.command == "camera auto-rotate toggle"));
+        assert!(app
+            .ui_regions
+            .camera_buttons
+            .iter()
+            .any(|button| button.command == "assembly copy"));
+        assert!(app
+            .ui_regions
+            .camera_buttons
+            .iter()
+            .any(|button| button.command == "assembly paste"));
+        let buffer = terminal.backend().buffer();
+        let screen = (0..buffer.area.height)
+            .flat_map(|y| (0..buffer.area.width).map(move |x| buffer[(x, y)].symbol()))
+            .collect::<String>();
+        assert!(screen.contains("Assembly: robot"));
+        assert!(screen.contains("body"));
+        assert!(screen.contains("Selected Part"));
+        assert!(screen.contains("Source: main.scad"));
+        assert!(screen.contains("T: [0.000, 0.000, 0.000]"));
     }
 
     #[test]

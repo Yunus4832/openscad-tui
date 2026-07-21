@@ -19,6 +19,7 @@ tui-tree-widget.workspace = true
 dirs.workspace = true
 ratatui-image.workspace = true
 openscad-core = { path = "../core" }
+openscad-assembly = { path = "../assembly" }
 openscad-library = { path = "../library" }
 openscad-render = { path = "../render" }
 openscad-terminal = { path = "../terminal" }

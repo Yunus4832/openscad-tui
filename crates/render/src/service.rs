@@ -2,7 +2,9 @@ use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use crate::{Aabb, Camera, Mesh, MeshInput, MeshLoader, PixelSize, RenderError, Result, RgbaFrame};
+use crate::{
+    Aabb, Camera, MeshInput, MeshLoader, PixelSize, RenderError, RenderScene, Result, RgbaFrame,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RenderOptions {
@@ -18,7 +20,7 @@ impl Default for RenderOptions {
 pub trait FrameRenderer: Send + Sync {
     fn render_frame(
         &self,
-        mesh: &Mesh,
+        scene: &RenderScene,
         camera: &Camera,
         size: PixelSize,
         options: RenderOptions,
@@ -40,6 +42,12 @@ pub struct RenderedFrame {
     pub bounds: Aabb,
     pub generation_time: Duration,
     pub raster_time: Duration,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SceneGeneration {
+    pub scene: RenderScene,
+    pub generation_time: Duration,
 }
 
 #[derive(Debug, PartialEq)]
@@ -65,6 +73,15 @@ enum RenderRequest {
         mesh_revision: u64,
         camera_revision: u64,
         input: MeshInput,
+        camera: Camera,
+        size: PixelSize,
+        options: RenderOptions,
+    },
+    SetScene {
+        mesh_revision: u64,
+        camera_revision: u64,
+        scene: RenderScene,
+        generation_time: Duration,
         camera: Camera,
         size: PixelSize,
         options: RenderOptions,
@@ -137,6 +154,28 @@ impl RenderService {
             .map_err(|_| RenderError::WorkerDisconnected)
     }
 
+    pub fn set_scene(
+        &self,
+        mesh_revision: u64,
+        camera_revision: u64,
+        generation: SceneGeneration,
+        camera: Camera,
+        size: PixelSize,
+        options: RenderOptions,
+    ) -> Result<()> {
+        self.requests
+            .send(RenderRequest::SetScene {
+                mesh_revision,
+                camera_revision,
+                scene: generation.scene,
+                generation_time: generation.generation_time,
+                camera,
+                size,
+                options,
+            })
+            .map_err(|_| RenderError::WorkerDisconnected)
+    }
+
     pub fn try_recv(&self) -> Option<RenderEvent> {
         self.events.try_recv().ok()
     }
@@ -157,7 +196,7 @@ fn worker_loop(
     loader: Box<dyn MeshLoader>,
     renderer: Box<dyn FrameRenderer>,
 ) {
-    let mut cached_mesh: Option<(u64, Mesh, Duration)> = None;
+    let mut cached_scene: Option<(u64, RenderScene, Duration)> = None;
     let mut pending = None;
     loop {
         let first = match pending.take().map(Ok).unwrap_or_else(|| requests.recv()) {
@@ -180,9 +219,9 @@ fn worker_loop(
                 let _ = events.send(RenderEvent::Loading { mesh_revision });
                 match loader.load(&input) {
                     Ok(generation) => {
-                        cached_mesh = Some((
+                        cached_scene = Some((
                             mesh_revision,
-                            generation.mesh,
+                            RenderScene::single(generation.mesh),
                             generation.diagnostics.elapsed,
                         ))
                     }
@@ -198,13 +237,26 @@ fn worker_loop(
                 }
                 (mesh_revision, camera_revision, camera, size, options)
             }
+            RenderRequest::SetScene {
+                mesh_revision,
+                camera_revision,
+                scene,
+                generation_time,
+                camera,
+                size,
+                options,
+            } => {
+                let _ = events.send(RenderEvent::Loading { mesh_revision });
+                cached_scene = Some((mesh_revision, scene, generation_time));
+                (mesh_revision, camera_revision, camera, size, options)
+            }
             RenderRequest::Rasterize {
                 camera_revision,
                 camera,
                 size,
                 options,
             } => {
-                let Some((mesh_revision, _, _)) = cached_mesh.as_ref() else {
+                let Some((mesh_revision, _, _)) = cached_scene.as_ref() else {
                     let _ = events.send(RenderEvent::Failed {
                         mesh_revision: 0,
                         camera_revision,
@@ -229,7 +281,7 @@ fn worker_loop(
             DrainResult::Empty => {}
         }
 
-        let Some((_, mesh, generation_time)) = &cached_mesh else {
+        let Some((_, scene, generation_time)) = &cached_scene else {
             continue;
         };
         let _ = events.send(RenderEvent::Rasterizing {
@@ -237,7 +289,7 @@ fn worker_loop(
             camera_revision,
         });
         let raster_started = Instant::now();
-        let rendered = renderer.render_frame(mesh, &camera, size, options);
+        let rendered = renderer.render_frame(scene, &camera, size, options);
         let raster_time = raster_started.elapsed();
 
         // Preserve the newest pending request, but still publish this completed camera frame.
@@ -254,8 +306,8 @@ fn worker_loop(
                     mesh_revision,
                     camera_revision,
                     frame,
-                    triangle_count: mesh.triangle_count(),
-                    bounds: mesh.bounds,
+                    triangle_count: scene.triangle_count(),
+                    bounds: scene.bounds,
                     generation_time: *generation_time,
                     raster_time,
                 }));
@@ -309,6 +361,28 @@ fn merge(current: RenderRequest, next: RenderRequest) -> RenderRequest {
             size,
             options,
         },
+        (
+            RenderRequest::SetScene {
+                mesh_revision,
+                scene,
+                generation_time,
+                ..
+            },
+            RenderRequest::Rasterize {
+                camera_revision,
+                camera,
+                size,
+                options,
+            },
+        ) => RenderRequest::SetScene {
+            mesh_revision,
+            camera_revision,
+            scene,
+            generation_time,
+            camera,
+            size,
+            options,
+        },
         (_, next) => next,
     }
 }
@@ -338,7 +412,7 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::{GenerationDiagnostics, MeshGeneration, Vec3};
+    use crate::{GenerationDiagnostics, Mesh, MeshGeneration, Vec3};
 
     struct FakeLoader {
         calls: Arc<AtomicUsize>,
@@ -368,7 +442,7 @@ mod tests {
     impl FrameRenderer for FakeRenderer {
         fn render_frame(
             &self,
-            _mesh: &Mesh,
+            _scene: &RenderScene,
             _camera: &Camera,
             size: PixelSize,
             _options: RenderOptions,
@@ -430,6 +504,50 @@ mod tests {
         let frame = wait_ready(&service);
         assert_eq!(frame.camera_revision, 2);
         assert_eq!(loader_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(renderer_calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn resolved_scene_bypasses_loader_and_remains_camera_rasterizable() {
+        let loader_calls = Arc::new(AtomicUsize::new(0));
+        let renderer_calls = Arc::new(AtomicUsize::new(0));
+        let service = service(loader_calls.clone(), renderer_calls.clone(), Duration::ZERO);
+        let size = PixelSize::new(8, 8).unwrap();
+        let mesh = Mesh::new(vec![Vec3::ZERO, Vec3::X, Vec3::Y], vec![[0, 1, 2]]).unwrap();
+        let scene = RenderScene::new(
+            vec![Arc::new(mesh)],
+            vec![
+                crate::RenderInstance::new(0, crate::Mat4::IDENTITY),
+                crate::RenderInstance::new(
+                    0,
+                    crate::Mat4::from_translation(Vec3::new(2.0, 0.0, 0.0)),
+                ),
+            ],
+        )
+        .unwrap();
+        service
+            .set_scene(
+                9,
+                1,
+                SceneGeneration {
+                    scene,
+                    generation_time: Duration::from_millis(12),
+                },
+                Camera::default(),
+                size,
+                RenderOptions::default(),
+            )
+            .unwrap();
+
+        let initial = wait_ready(&service);
+        assert_eq!(initial.mesh_revision, 9);
+        assert_eq!(initial.triangle_count, 2);
+        assert_eq!(initial.generation_time, Duration::from_millis(12));
+        service
+            .rasterize(2, Camera::default(), size, RenderOptions::default())
+            .unwrap();
+        assert_eq!(wait_ready(&service).camera_revision, 2);
+        assert_eq!(loader_calls.load(Ordering::SeqCst), 0);
         assert_eq!(renderer_calls.load(Ordering::SeqCst), 2);
     }
 

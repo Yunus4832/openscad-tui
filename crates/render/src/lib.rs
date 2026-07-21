@@ -10,6 +10,7 @@ mod off;
 mod openscad;
 mod pipeline;
 mod rasterizer;
+mod scene;
 mod service;
 
 pub use camera::{Camera, Projection, StandardView};
@@ -25,6 +26,8 @@ pub use openscad::{
 };
 pub use pipeline::{MeshInput, MeshLoader, MeshPipeline};
 pub use rasterizer::{CpuRenderer, RenderSettings};
+pub use scene::{RenderInstance, RenderScene};
 pub use service::{
     FrameRenderer, RenderEvent, RenderFailureStage, RenderOptions, RenderService, RenderedFrame,
+    SceneGeneration,
 };

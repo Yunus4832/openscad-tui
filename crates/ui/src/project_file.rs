@@ -1,5 +1,7 @@
+use openscad_assembly::AssemblyDocument;
 use openscad_core::AstRoot;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::{Component, Path};
@@ -8,7 +10,26 @@ use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
 pub const PROJECT_EXTENSION: &str = "scadtui";
 const FORMAT_NAME: &str = "openscad-tui-project";
-const FORMAT_VERSION: u32 = 1;
+const FORMAT_VERSION: u32 = 2;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectDocument {
+    pub sources: AstRoot,
+    #[serde(default)]
+    pub assemblies: Vec<AssemblyDocument>,
+    #[serde(default)]
+    pub active_assembly: Option<String>,
+}
+
+impl ProjectDocument {
+    pub fn new(sources: AstRoot) -> Self {
+        Self {
+            sources,
+            assemblies: Vec::new(),
+            active_assembly: None,
+        }
+    }
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 struct ProjectManifest {
@@ -24,7 +45,8 @@ struct Generator {
     version: String,
 }
 
-pub fn save_project(path: &Path, project: &AstRoot) -> Result<(), String> {
+pub fn save_project(path: &Path, project: &ProjectDocument) -> Result<(), String> {
+    validate_document(project)?;
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     let temporary = tempfile::NamedTempFile::new_in(parent).map_err(io_error)?;
     let options = SimpleFileOptions::default()
@@ -60,7 +82,7 @@ pub fn save_project(path: &Path, project: &AstRoot) -> Result<(), String> {
                 .as_bytes(),
         )
         .map_err(io_error)?;
-    for source in &project.embedded_sources {
+    for source in &project.sources.embedded_sources {
         validate_virtual_path(&source.virtual_path)?;
         archive
             .start_file(format!("sources/{}", source.virtual_path), options)
@@ -76,7 +98,7 @@ pub fn save_project(path: &Path, project: &AstRoot) -> Result<(), String> {
     Ok(())
 }
 
-pub fn load_project(path: &Path) -> Result<AstRoot, String> {
+pub fn load_project(path: &Path) -> Result<ProjectDocument, String> {
     let file = File::open(path).map_err(io_error)?;
     let mut archive = ZipArchive::new(file).map_err(zip_error)?;
     let manifest: ProjectManifest = {
@@ -104,7 +126,48 @@ pub fn load_project(path: &Path) -> Result<AstRoot, String> {
         .map_err(zip_error)?
         .read_to_string(&mut content)
         .map_err(io_error)?;
-    serde_json::from_str(&content).map_err(json_error)
+    let project: ProjectDocument = serde_json::from_str(&content).map_err(json_error)?;
+    validate_document(&project)?;
+    Ok(project)
+}
+
+fn validate_document(project: &ProjectDocument) -> Result<(), String> {
+    let editable_sources = project
+        .sources
+        .embedded_sources
+        .iter()
+        .filter(|source| source.editable)
+        .map(|source| source.virtual_path.as_str())
+        .collect::<HashSet<_>>();
+    let mut assembly_ids = HashSet::new();
+    for assembly in &project.assemblies {
+        if !assembly_ids.insert(assembly.id.as_str()) {
+            return Err(format!("Duplicate assembly ID '{}'", assembly.id));
+        }
+        assembly
+            .validate()
+            .map_err(|error| format!("Invalid assembly '{}': {error}", assembly.name))?;
+        for part in &assembly.parts {
+            if !editable_sources.contains(part.source.virtual_path()) {
+                return Err(format!(
+                    "Assembly '{}' part '{}' references missing editable source '{}'",
+                    assembly.name,
+                    part.name,
+                    part.source.virtual_path()
+                ));
+            }
+        }
+    }
+    if let Some(active) = &project.active_assembly {
+        if !project
+            .assemblies
+            .iter()
+            .any(|assembly| assembly.id == *active)
+        {
+            return Err(format!("Active assembly '{active}' was not found"));
+        }
+    }
+    Ok(())
 }
 
 fn validate_virtual_path(path: &str) -> Result<(), String> {
@@ -144,26 +207,88 @@ mod tests {
     fn project_package_round_trip_contains_manifest_and_sources() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("fixture.scadtui");
-        let mut project = AstRoot::new_project("main.scad");
-        project.modules.push(openscad_core::ModuleNode::new_leaf(
+        let mut sources = AstRoot::new_project("main.scad");
+        sources.modules.push(openscad_core::ModuleNode::new_leaf(
             "cube_package".to_string(),
             "cube".to_string(),
             Vec::new(),
         ));
-        project.sync_active_source();
+        sources.sync_active_source();
+        let mut project = ProjectDocument::new(sources);
+        let mut assembly = AssemblyDocument::new("fixture");
+        assembly
+            .add_part(
+                openscad_assembly::MeshSourceRef::project_source("main.scad"),
+                "body",
+            )
+            .unwrap();
+        assembly.part_mut("body").unwrap().transform.translation = [1.0, 2.0, 3.0];
+        project.assemblies.push(assembly);
+        project.active_assembly = Some(project.assemblies[0].id.clone());
 
         save_project(&path, &project).unwrap();
         save_project(&path, &project).unwrap();
         let restored = load_project(&path).unwrap();
-        assert_eq!(restored.active_source.as_deref(), Some("main.scad"));
+        assert_eq!(restored.sources.active_source.as_deref(), Some("main.scad"));
         assert!(restored
+            .sources
             .source_code("main.scad")
             .unwrap()
             .contains("cube();"));
+        assert_eq!(restored.assemblies[0].name, "fixture");
+        assert_eq!(
+            restored.assemblies[0]
+                .part("body")
+                .unwrap()
+                .transform
+                .translation,
+            [1.0, 2.0, 3.0]
+        );
+        assert_eq!(
+            restored.active_assembly,
+            Some(restored.assemblies[0].id.clone())
+        );
 
         let mut archive = ZipArchive::new(File::open(path).unwrap()).unwrap();
         assert!(archive.by_name("manifest.json").is_ok());
         assert!(archive.by_name("project.json").is_ok());
         assert!(archive.by_name("sources/main.scad").is_ok());
+    }
+
+    #[test]
+    fn project_validation_rejects_missing_assembly_sources_and_active_ids() {
+        let mut project = ProjectDocument::new(AstRoot::new_project("main.scad"));
+        let mut assembly = AssemblyDocument::new("broken");
+        assembly
+            .add_part(
+                openscad_assembly::MeshSourceRef::project_source("missing.scad"),
+                "missing",
+            )
+            .unwrap();
+        project.assemblies.push(assembly);
+        assert!(validate_document(&project)
+            .unwrap_err()
+            .contains("missing editable source"));
+
+        project.assemblies[0].parts.clear();
+        project.active_assembly = Some("unknown".into());
+        assert!(validate_document(&project)
+            .unwrap_err()
+            .contains("Active assembly 'unknown'"));
+    }
+
+    #[test]
+    fn project_validation_rejects_duplicate_assembly_part_names() {
+        let mut project = ProjectDocument::new(AstRoot::new_project("main.scad"));
+        let mut assembly = AssemblyDocument::new("invalid names");
+        let source = openscad_assembly::MeshSourceRef::project_source("main.scad");
+        assembly.add_part(source.clone(), "arm").unwrap();
+        assembly.add_part(source, "leg").unwrap();
+        assembly.parts[1].name = "arm".into();
+        project.assemblies.push(assembly);
+
+        let error = validate_document(&project).unwrap_err();
+
+        assert!(error.contains("duplicate part name 'arm'"));
     }
 }

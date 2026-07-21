@@ -1,4 +1,7 @@
-use crate::{Camera, Framebuffer, Mesh, PixelSize, RenderOptions, RgbaFrame, Vec2, Vec3, Vec4};
+use crate::{
+    Aabb, Camera, Framebuffer, Mesh, PixelSize, RenderOptions, RenderScene, RgbaFrame, Vec2, Vec3,
+    Vec4,
+};
 
 const AREA_EPSILON: f32 = 1.0e-6;
 const AXIS_DEPTH_BIAS: f32 = 1.0e-4;
@@ -61,42 +64,68 @@ impl CpuRenderer {
         size: PixelSize,
         options: RenderOptions,
     ) -> RgbaFrame {
+        self.render_scene_with_options(&RenderScene::single(mesh.clone()), camera, size, options)
+    }
+
+    pub fn render_scene_with_options(
+        &self,
+        scene: &RenderScene,
+        camera: &Camera,
+        size: PixelSize,
+        options: RenderOptions,
+    ) -> RgbaFrame {
         let mut framebuffer = Framebuffer::new(size, self.settings.background);
         let view_projection = camera.view_projection(size.aspect_ratio());
         let light_direction = world_light_direction(self.settings, camera);
 
-        for (triangle, normal) in mesh.triangles.iter().zip(&mesh.triangle_normals) {
-            let clip_triangle =
-                triangle.map(|index| view_projection * mesh.positions[index as usize].extend(1.0));
-            let polygon = clip_polygon(clip_triangle.to_vec());
-            if polygon.len() < 3 {
-                continue;
-            }
-            let color = shade(self.settings, *normal, light_direction);
-            for offset in 1..polygon.len() - 1 {
-                self.rasterize_triangle(
-                    &mut framebuffer,
-                    [polygon[0], polygon[offset], polygon[offset + 1]],
-                    color,
+        for instance in scene.instances.iter().filter(|instance| instance.visible) {
+            let mesh = &scene.meshes[instance.mesh_index];
+            let model = instance.transform;
+            let model_view_projection = view_projection * model;
+            let base_color = instance.tint.unwrap_or(self.settings.base_color);
+            for triangle in &mesh.triangles {
+                let local = triangle.map(|index| mesh.positions[index as usize]);
+                let world = local.map(|position| model.transform_point3(position));
+                let normal = (world[1] - world[0]).cross(world[2] - world[0]);
+                if normal.length_squared() <= f32::EPSILON {
+                    continue;
+                }
+                let clip_triangle =
+                    local.map(|position| model_view_projection * position.extend(1.0));
+                let polygon = clip_polygon(clip_triangle.to_vec());
+                if polygon.len() < 3 {
+                    continue;
+                }
+                let color = shade_with_color(
+                    self.settings,
+                    normal.normalize(),
+                    light_direction,
+                    base_color,
                 );
+                for offset in 1..polygon.len() - 1 {
+                    self.rasterize_triangle(
+                        &mut framebuffer,
+                        [polygon[0], polygon[offset], polygon[offset + 1]],
+                        color,
+                    );
+                }
             }
         }
 
         if options.axes {
-            self.rasterize_axes(&mut framebuffer, mesh, view_projection);
+            self.rasterize_axes(&mut framebuffer, scene.bounds, view_projection);
         }
 
         framebuffer.into_color()
     }
 
-    fn rasterize_axes(&self, framebuffer: &mut Framebuffer, mesh: &Mesh, transform: glam::Mat4) {
-        let length = mesh
-            .bounds
+    fn rasterize_axes(&self, framebuffer: &mut Framebuffer, bounds: Aabb, transform: glam::Mat4) {
+        let length = bounds
             .min
             .abs()
-            .max(mesh.bounds.max.abs())
+            .max(bounds.max.abs())
             .max_element()
-            .max(mesh.bounds.radius())
+            .max(bounds.radius())
             .max(1.0)
             * AXIS_LENGTH_MARGIN;
         for (index, direction) in [Vec3::X, Vec3::Y, Vec3::Z].into_iter().enumerate() {
@@ -230,12 +259,12 @@ impl Default for CpuRenderer {
 impl crate::FrameRenderer for CpuRenderer {
     fn render_frame(
         &self,
-        mesh: &Mesh,
+        scene: &RenderScene,
         camera: &Camera,
         size: PixelSize,
         options: RenderOptions,
     ) -> crate::Result<RgbaFrame> {
-        Ok(self.render_with_options(mesh, camera, size, options))
+        Ok(self.render_scene_with_options(scene, camera, size, options))
     }
 }
 
@@ -268,17 +297,27 @@ fn world_light_direction(settings: RenderSettings, camera: &Camera) -> Vec3 {
         .normalize_or_zero()
 }
 
+#[cfg(test)]
 fn shade(settings: RenderSettings, normal: Vec3, light_direction: Vec3) -> [u8; 4] {
+    shade_with_color(settings, normal, light_direction, settings.base_color)
+}
+
+fn shade_with_color(
+    settings: RenderSettings,
+    normal: Vec3,
+    light_direction: Vec3,
+    base_color: [u8; 4],
+) -> [u8; 4] {
     // Match OpenSCAD's pair of opposed directional lights. The contribution
     // max(N·L, 0) + max(N·-L, 0) simplifies to abs(N·L), giving every
     // orientation a camera-relative fill light while preserving hard CAD edges.
     let intensity =
         (settings.ambient + settings.diffuse * normal.dot(light_direction).abs()).clamp(0.0, 1.0);
     [
-        (settings.base_color[0] as f32 * intensity).round() as u8,
-        (settings.base_color[1] as f32 * intensity).round() as u8,
-        (settings.base_color[2] as f32 * intensity).round() as u8,
-        settings.base_color[3],
+        (base_color[0] as f32 * intensity).round() as u8,
+        (base_color[1] as f32 * intensity).round() as u8,
+        (base_color[2] as f32 * intensity).round() as u8,
+        base_color[3],
     ]
 }
 
@@ -345,8 +384,10 @@ fn clip_line(mut line: [Vec4; 2]) -> Option<[Vec4; 2]> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
-    use crate::{Aabb, Projection, StandardView};
+    use crate::{Aabb, Mat4, Projection, RenderInstance, RenderScene, StandardView};
 
     fn top_camera(mesh: &Mesh) -> Camera {
         let mut camera = Camera {
@@ -384,6 +425,59 @@ mod tests {
             .count();
         assert!(changed > 500);
         assert!(changed < 2500);
+    }
+
+    #[test]
+    fn rasterizes_multiple_transformed_instances_without_flattening_meshes() {
+        let mesh = Arc::new(
+            Mesh::new(
+                vec![
+                    Vec3::new(-0.4, -0.8, 0.0),
+                    Vec3::new(0.4, -0.8, 0.0),
+                    Vec3::new(0.0, 0.8, 0.0),
+                ],
+                vec![[0, 1, 2]],
+            )
+            .unwrap(),
+        );
+        let scene = RenderScene::new(
+            vec![mesh],
+            vec![
+                RenderInstance::new(0, Mat4::from_translation(Vec3::new(-1.0, 0.0, 0.0))),
+                RenderInstance::new(0, Mat4::from_translation(Vec3::new(1.0, 0.0, 0.0))),
+            ],
+        )
+        .unwrap();
+        let size = PixelSize::new(96, 64).unwrap();
+        let mut camera = Camera {
+            projection: Projection::Orthographic { vertical_size: 3.0 },
+            ..Camera::default()
+        };
+        camera.set_standard_view(StandardView::Top, scene.bounds, size.aspect_ratio());
+        let renderer = CpuRenderer::new(RenderSettings {
+            backface_culling: false,
+            ..RenderSettings::default()
+        });
+
+        let frame = renderer.render_scene_with_options(
+            &scene,
+            &camera,
+            size,
+            RenderOptions { axes: false },
+        );
+        let background = renderer.settings.background;
+        let changed_in_half = |start, end| {
+            (0..size.height).any(|y| {
+                (start..end).any(|x| {
+                    let offset = (y as usize * size.width as usize + x as usize) * 4;
+                    frame.pixels()[offset..offset + 4] != background
+                })
+            })
+        };
+        assert!(changed_in_half(0, size.width / 2));
+        assert!(changed_in_half(size.width / 2, size.width));
+        assert_eq!(scene.meshes.len(), 1);
+        assert_eq!(scene.triangle_count(), 2);
     }
 
     #[test]

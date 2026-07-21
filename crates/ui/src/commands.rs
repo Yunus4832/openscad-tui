@@ -3,15 +3,17 @@
 use openscad_core::{Argument, ArgumentSelector, AstError, Expr, ModuleNode};
 use openscad_library::ModuleDef;
 use openscad_terminal::DisplayProtocol;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use thiserror::Error;
 
 use crate::app::{App, InputMode, PendingModuleAction, PreviewCloseAction, Screen};
 use crate::command_registry::CommandType;
-use crate::project_file::{load_project, save_project, PROJECT_EXTENSION};
+use crate::project_file::{load_project, save_project, ProjectDocument, PROJECT_EXTENSION};
 use crate::project_import::{attach_editable_scad, attach_scad_library};
 
 const MAX_RECURSION_DEPTH: usize = 1000;
@@ -80,6 +82,149 @@ fn active_source_project(
     Ok((source, project))
 }
 
+fn source_project(
+    app: &mut App,
+    target: &str,
+) -> CommandResult<(String, openscad_render::OpenScadProject, u64)> {
+    app.ast_mut().sync_active_source();
+    let source = app
+        .ast
+        .source_code(target)
+        .ok_or_else(|| CommandError::Custom(format!("Project source '{target}' was not found")))?;
+    let source = rewrite_absolute_source_references(&source, target, &app.ast.source_dependencies);
+    let files = app
+        .ast
+        .embedded_sources
+        .iter()
+        .map(|project_source| openscad_render::OpenScadProjectFile {
+            path: PathBuf::from(&project_source.virtual_path),
+            content: rewrite_absolute_source_references(
+                &project_source.generated_content(),
+                &project_source.virtual_path,
+                &app.ast.source_dependencies,
+            ),
+        })
+        .collect::<Vec<_>>();
+    let mut hasher = DefaultHasher::new();
+    target.hash(&mut hasher);
+    source.hash(&mut hasher);
+    for file in &files {
+        file.path.hash(&mut hasher);
+        file.content.hash(&mut hasher);
+    }
+    Ok((
+        source,
+        openscad_render::OpenScadProject {
+            entry_path: PathBuf::from(target),
+            files,
+        },
+        hasher.finish(),
+    ))
+}
+
+fn compile_assembly(
+    app: &mut App,
+) -> CommandResult<(openscad_assembly::ResolvedAssembly, Duration)> {
+    let assembly = active_assembly(app)?.clone();
+    let started = Instant::now();
+    let sources = assembly
+        .parts
+        .iter()
+        .map(|part| part.source.clone())
+        .collect::<HashSet<_>>();
+    let mut meshes = HashMap::new();
+    for source_ref in sources {
+        let target = source_ref.virtual_path();
+        let (source, project, fingerprint) = source_project(app, target)?;
+        let mesh = match app.assembly_mesh_cache.get(&source_ref) {
+            Some((cached_fingerprint, mesh)) if *cached_fingerprint == fingerprint => {
+                Arc::clone(mesh)
+            }
+            _ => {
+                let mut generator = openscad_render::OpenScadGenerator::new("openscad")
+                    .with_timeout(Duration::from_secs(120))
+                    .with_project(project);
+                if let Some(directory) = project_working_directory(app) {
+                    generator = generator.with_working_directory(directory);
+                }
+                let generated = generator
+                    .generate(&source)
+                    .map_err(|error| CommandError::Custom(error.to_string()))?;
+                let mesh = Arc::new(generated.mesh);
+                app.assembly_mesh_cache
+                    .insert(source_ref.clone(), (fingerprint, Arc::clone(&mesh)));
+                mesh
+            }
+        };
+        meshes.insert(source_ref, mesh);
+    }
+    let resolved = assembly
+        .resolve(&meshes)
+        .map_err(|error| CommandError::Custom(error.to_string()))?;
+    Ok((resolved, started.elapsed()))
+}
+
+fn project_working_directory(app: &App) -> Option<PathBuf> {
+    app.ast
+        .source_directory
+        .as_deref()
+        .map(expand_tilde)
+        .or_else(|| {
+            app.current_file
+                .as_deref()
+                .map(expand_tilde)
+                .and_then(|path| path.parent().map(Path::to_path_buf))
+        })
+        .or_else(|| std::env::current_dir().ok())
+}
+
+fn active_assembly(app: &App) -> CommandResult<&openscad_assembly::AssemblyDocument> {
+    let active = app.active_assembly.as_deref().ok_or_else(|| {
+        CommandError::Custom("No active assembly; use 'assembly new <name>' first".into())
+    })?;
+    app.assemblies
+        .iter()
+        .find(|assembly| assembly.id == active || assembly.name == active)
+        .ok_or_else(|| CommandError::Custom(format!("Active assembly '{active}' was not found")))
+}
+
+fn active_assembly_mut(app: &mut App) -> CommandResult<&mut openscad_assembly::AssemblyDocument> {
+    let active = app.active_assembly.clone().ok_or_else(|| {
+        CommandError::Custom("No active assembly; use 'assembly new <name>' first".into())
+    })?;
+    app.assemblies
+        .iter_mut()
+        .find(|assembly| assembly.id == active || assembly.name == active)
+        .ok_or_else(|| CommandError::Custom(format!("Active assembly '{active}' was not found")))
+}
+
+fn refresh_cached_assembly_preview(app: &mut App) -> CommandResult<()> {
+    if !matches!(app.screen, Screen::Assembly) || app.assembly_mesh_cache.is_empty() {
+        return Ok(());
+    }
+    let assembly = active_assembly(app)?.clone();
+    let meshes = app
+        .assembly_mesh_cache
+        .iter()
+        .map(|(source, (_, mesh))| (source.clone(), Arc::clone(mesh)))
+        .collect();
+    let resolved = match assembly.resolve(&meshes) {
+        Ok(resolved) => resolved,
+        Err(openscad_assembly::AssemblyError::MissingMesh(_)) => return Ok(()),
+        Err(openscad_assembly::AssemblyError::EmptyAssembly) => {
+            app.assembly_preview.clear();
+            return Ok(());
+        }
+        Err(error) => return Err(CommandError::Custom(error.to_string())),
+    };
+    let scene = resolved
+        .render_scene(app.selected_assembly_part.as_deref())
+        .map_err(|error| CommandError::Custom(error.to_string()))?;
+    app.assembly_preview
+        .update_scene(scene, Duration::ZERO)
+        .map_err(CommandError::Custom)
+}
+
 pub fn cmd_buffer(app: &mut App, value: Option<&str>) -> CommandResult<()> {
     let editable = app
         .ast
@@ -139,7 +284,7 @@ pub fn cmd_buffer(app: &mut App, value: Option<&str>) -> CommandResult<()> {
     app.redo_stack.clear();
     app.tree_state.borrow_mut().select(Vec::new());
     app.init_tree_selection();
-    app.model_preview.mark_stale();
+    app.invalidate_source_previews();
     app.set_info(&format!("Editing project source '{target}'"));
     Ok(())
 }
@@ -235,6 +380,7 @@ pub fn cmd_preview(app: &mut App, mode: &str) -> CommandResult<()> {
         "toggle" => match app.screen {
             Screen::Editor => return cmd_preview(app, "model"),
             Screen::ModelPreview => return cmd_preview(app, "close"),
+            Screen::Assembly => app.enter_editor_screen(),
         },
         _ => {
             return Err(CommandError::InvalidCommand(
@@ -243,6 +389,20 @@ pub fn cmd_preview(app: &mut App, mode: &str) -> CommandResult<()> {
         }
     };
     Ok(())
+}
+
+fn active_preview(app: &App) -> &crate::preview::ModelPreview {
+    match app.screen {
+        Screen::Assembly => &app.assembly_preview,
+        Screen::Editor | Screen::ModelPreview => &app.model_preview,
+    }
+}
+
+fn active_preview_mut(app: &mut App) -> &mut crate::preview::ModelPreview {
+    match app.screen {
+        Screen::Assembly => &mut app.assembly_preview,
+        Screen::Editor | Screen::ModelPreview => &mut app.model_preview,
+    }
 }
 
 pub fn cmd_camera(app: &mut App, args: &[&str]) -> CommandResult<()> {
@@ -256,14 +416,14 @@ pub fn cmd_camera(app: &mut App, args: &[&str]) -> CommandResult<()> {
     };
     let parse = |value: &str| value.parse::<f32>().map_err(|_| invalid());
     let result = match args {
-        ["projection", "perspective"] => app.model_preview.set_projection(false),
-        ["projection", "orthographic"] => app.model_preview.set_projection(true),
+        ["projection", "perspective"] => active_preview_mut(app).set_projection(false),
+        ["projection", "orthographic"] => active_preview_mut(app).set_projection(true),
         ["projection", "toggle"] => {
             let use_orthographic = matches!(
-                app.model_preview.camera.projection,
+                active_preview(app).camera.projection,
                 Projection::Perspective { .. }
             );
-            app.model_preview.set_projection(use_orthographic)
+            active_preview_mut(app).set_projection(use_orthographic)
         }
         ["view", name] => {
             let view = match *name {
@@ -276,22 +436,22 @@ pub fn cmd_camera(app: &mut App, args: &[&str]) -> CommandResult<()> {
                 "iso" | "isometric" => StandardView::Isometric,
                 _ => return Err(invalid()),
             };
-            app.model_preview.set_view(view)
+            active_preview_mut(app).set_view(view)
         }
-        ["orbit", yaw, pitch] => app.model_preview.orbit(parse(yaw)?, parse(pitch)?),
+        ["orbit", yaw, pitch] => active_preview_mut(app).orbit(parse(yaw)?, parse(pitch)?),
         ["pan", horizontal, vertical] => {
-            app.model_preview.pan(parse(horizontal)?, parse(vertical)?)
+            active_preview_mut(app).pan(parse(horizontal)?, parse(vertical)?)
         }
-        ["zoom", factor] => app.model_preview.zoom(parse(factor)?),
-        ["fit"] => app.model_preview.fit(),
+        ["zoom", factor] => active_preview_mut(app).zoom(parse(factor)?),
+        ["fit"] => active_preview_mut(app).fit(),
         ["auto-rotate", value] => {
             let enabled = match *value {
                 "on" => true,
                 "off" => false,
-                "toggle" => !app.model_preview.auto_rotate,
+                "toggle" => !active_preview(app).auto_rotate,
                 _ => return Err(invalid()),
             };
-            app.model_preview.set_auto_rotate(enabled);
+            active_preview_mut(app).set_auto_rotate(enabled);
             Ok(())
         }
         _ => return Err(invalid()),
@@ -301,10 +461,10 @@ pub fn cmd_camera(app: &mut App, args: &[&str]) -> CommandResult<()> {
 
 pub fn cmd_protocol(app: &mut App, value: &str) -> CommandResult<()> {
     match value.to_ascii_lowercase().as_str() {
-        "auto" => app.model_preview.reset_protocol_type(),
+        "auto" => active_preview_mut(app).reset_protocol_type(),
         "next" => {
-            let next = app.model_preview.protocol_type().next();
-            app.model_preview.set_protocol_type(next);
+            let next = active_preview(app).protocol_type().next();
+            active_preview_mut(app).set_protocol_type(next);
         }
         value => {
             let protocol = value.parse::<DisplayProtocol>().map_err(|_| {
@@ -313,13 +473,13 @@ pub fn cmd_protocol(app: &mut App, value: &str) -> CommandResult<()> {
                     DisplayProtocol::NAMES.join("|")
                 ))
             })?;
-            app.model_preview.set_protocol_type(protocol);
+            active_preview_mut(app).set_protocol_type(protocol);
         }
     }
     app.terminal_clear_requested = true;
     app.set_info(&format!(
         "Terminal preview protocol: {}",
-        app.model_preview.protocol_type()
+        active_preview(app).protocol_type()
     ));
     Ok(())
 }
@@ -328,14 +488,14 @@ pub fn cmd_axes(app: &mut App, value: &str) -> CommandResult<()> {
     let visible = match value {
         "on" => true,
         "off" => false,
-        "toggle" => !app.model_preview.axes_visible,
+        "toggle" => !active_preview(app).axes_visible,
         _ => {
             return Err(CommandError::InvalidCommand(
                 "Usage: axes on|off|toggle".to_string(),
             ))
         }
     };
-    app.model_preview.set_axes_visible(visible);
+    active_preview_mut(app).set_axes_visible(visible);
     app.set_info(if visible {
         "World axes enabled"
     } else {
@@ -379,9 +539,352 @@ pub fn cmd_visibility(app: &mut App, value: &str) -> CommandResult<()> {
     Ok(())
 }
 
+pub fn cmd_assembly(app: &mut App, args: &[&str]) -> CommandResult<()> {
+    let usage = || {
+        CommandError::InvalidCommand(
+            "Usage: assembly new [name] | open [name] | list | add <project-source> [name] | select <part|next|prev> | copy [part] | paste [parent|root] | remove [part] | parent [part] <parent|root> | translate|rotate|scale|pivot [part] <x> <y> <z> | visibility [part] <show|hide|toggle> | render | export <file.dae> | close".into(),
+        )
+    };
+    match args {
+        ["new"] | ["new", _] => {
+            let name = args
+                .get(1)
+                .copied()
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("assembly-{}", app.assemblies.len() + 1));
+            let mut document = openscad_assembly::AssemblyDocument::new(name);
+            let base = document.id.clone();
+            let mut suffix = 2;
+            while app
+                .assemblies
+                .iter()
+                .any(|assembly| assembly.id == document.id)
+            {
+                document.id = format!("{base}_{suffix}");
+                suffix += 1;
+            }
+            app.active_assembly = Some(document.id.clone());
+            app.assemblies.push(document);
+            app.selected_assembly_part = None;
+            app.assembly_scroll_offset = 0;
+            app.assembly_preview.clear();
+            app.saved = false;
+            app.enter_assembly_screen();
+            app.set_info("Created assembly");
+        }
+        ["open"] if app.active_assembly.is_some() => app.enter_assembly_screen(),
+        ["open", name] => {
+            let document = app
+                .assemblies
+                .iter()
+                .find(|assembly| assembly.id == *name || assembly.name == *name)
+                .ok_or_else(|| CommandError::Custom(format!("Assembly '{name}' was not found")))?;
+            app.active_assembly = Some(document.id.clone());
+            app.selected_assembly_part = document.parts.first().map(|part| part.id.clone());
+            app.assembly_scroll_offset = 0;
+            app.assembly_preview.clear();
+            app.enter_assembly_screen();
+            refresh_cached_assembly_preview(app)?;
+        }
+        ["list"] => {
+            let active = app.active_assembly.as_deref();
+            let summary = app
+                .assemblies
+                .iter()
+                .map(|assembly| {
+                    format!(
+                        "{}{} ({} parts)",
+                        if active == Some(assembly.id.as_str()) {
+                            "*"
+                        } else {
+                            ""
+                        },
+                        assembly.name,
+                        assembly.parts.len()
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            app.set_info(if summary.is_empty() {
+                "No assemblies"
+            } else {
+                &summary
+            });
+        }
+        ["add", source] | ["add", source, _] => {
+            let embedded = app
+                .ast
+                .embedded_sources
+                .iter()
+                .find(|candidate| candidate.virtual_path == *source && candidate.editable)
+                .ok_or_else(|| {
+                    CommandError::Custom(format!(
+                        "Editable project source '{source}' was not found"
+                    ))
+                })?;
+            let default_name = Path::new(&embedded.virtual_path)
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .unwrap_or("part")
+                .to_string();
+            let name = args.get(2).copied().unwrap_or(&default_name);
+            let id = active_assembly_mut(app)?
+                .add_part(
+                    openscad_assembly::MeshSourceRef::project_source(*source),
+                    name,
+                )
+                .map_err(|error| CommandError::Custom(error.to_string()))?
+                .id
+                .clone();
+            app.selected_assembly_part = Some(id);
+            app.saved = false;
+            refresh_cached_assembly_preview(app)?;
+        }
+        ["select", target] => {
+            let assembly = active_assembly(app)?;
+            if assembly.parts.is_empty() {
+                return Err(CommandError::Custom(
+                    "The active assembly has no parts".into(),
+                ));
+            }
+            let rows = assembly.hierarchy_rows();
+            let selected_index = app.selected_assembly_part.as_deref().and_then(|id| {
+                rows.iter()
+                    .position(|(index, _)| assembly.parts[*index].id == id)
+            });
+            let target_id = match *target {
+                "next" => {
+                    let row = (selected_index.unwrap_or(rows.len() - 1) + 1) % rows.len();
+                    assembly.parts[rows[row].0].id.clone()
+                }
+                "prev" => {
+                    let row = selected_index
+                        .unwrap_or(0)
+                        .checked_sub(1)
+                        .unwrap_or(rows.len() - 1);
+                    assembly.parts[rows[row].0].id.clone()
+                }
+                value => assembly
+                    .part(value)
+                    .ok_or_else(|| {
+                        CommandError::Custom(format!("Assembly part '{value}' was not found"))
+                    })?
+                    .id
+                    .clone(),
+            };
+            app.selected_assembly_part = Some(target_id);
+            refresh_cached_assembly_preview(app)?;
+        }
+        ["copy"] | ["copy", _] => {
+            let target = args
+                .get(1)
+                .copied()
+                .or(app.selected_assembly_part.as_deref())
+                .ok_or_else(|| CommandError::Custom("No assembly part is selected".into()))?;
+            let part = active_assembly(app)?
+                .part(target)
+                .ok_or_else(|| {
+                    CommandError::Custom(format!("Assembly part '{target}' was not found"))
+                })?
+                .clone();
+            let name = part.name.clone();
+            app.assembly_clipboard = Some(part);
+            app.set_info(&format!("Copied assembly part '{name}'"));
+        }
+        ["paste"] | ["paste", _] => {
+            let copied = app
+                .assembly_clipboard
+                .clone()
+                .ok_or_else(|| CommandError::Custom("Assembly clipboard is empty".into()))?;
+            let requested_parent = args.get(1).copied();
+            let parent = match requested_parent {
+                Some("root" | "none") => None,
+                Some(value) => Some(
+                    active_assembly(app)?
+                        .part(value)
+                        .ok_or_else(|| {
+                            CommandError::Custom(format!("Assembly part '{value}' was not found"))
+                        })?
+                        .id
+                        .clone(),
+                ),
+                None => copied.parent.as_ref().and_then(|parent| {
+                    active_assembly(app)
+                        .ok()
+                        .and_then(|assembly| assembly.part(parent))
+                        .map(|part| part.id.clone())
+                }),
+            };
+            let pasted_id = active_assembly_mut(app)?
+                .add_part(copied.source.clone(), copied.name.clone())
+                .map_err(|error| CommandError::Custom(error.to_string()))?
+                .id
+                .clone();
+            {
+                let pasted = active_assembly_mut(app)?
+                    .part_mut(&pasted_id)
+                    .expect("part was just added");
+                pasted.transform = copied.transform;
+                pasted.visible = copied.visible;
+            }
+            if let Some(parent) = parent.as_deref() {
+                active_assembly_mut(app)?
+                    .set_parent(&pasted_id, Some(parent))
+                    .map_err(|error| CommandError::Custom(error.to_string()))?;
+            }
+            let pasted_name = active_assembly(app)?
+                .part(&pasted_id)
+                .expect("part was just added")
+                .name
+                .clone();
+            app.selected_assembly_part = Some(pasted_id);
+            app.saved = false;
+            refresh_cached_assembly_preview(app)?;
+            app.set_info(&format!("Pasted assembly part '{pasted_name}'"));
+        }
+        ["remove"] | ["remove", _] => {
+            let target = args
+                .get(1)
+                .copied()
+                .or(app.selected_assembly_part.as_deref())
+                .ok_or_else(|| CommandError::Custom("No assembly part is selected".into()))?
+                .to_string();
+            active_assembly_mut(app)?
+                .remove_part(&target)
+                .map_err(|error| CommandError::Custom(error.to_string()))?;
+            app.selected_assembly_part = active_assembly(app)?
+                .parts
+                .first()
+                .map(|part| part.id.clone());
+            app.saved = false;
+            refresh_cached_assembly_preview(app)?;
+        }
+        ["parent", parent] => {
+            let part = selected_assembly_part_id(app)?;
+            let parent = (!matches!(*parent, "root" | "none")).then_some(*parent);
+            active_assembly_mut(app)?
+                .set_parent(&part, parent)
+                .map_err(|error| CommandError::Custom(error.to_string()))?;
+            app.saved = false;
+            refresh_cached_assembly_preview(app)?;
+        }
+        ["parent", part, parent] => {
+            let parent = (!matches!(*parent, "root" | "none")).then_some(*parent);
+            active_assembly_mut(app)?
+                .set_parent(part, parent)
+                .map_err(|error| CommandError::Custom(error.to_string()))?;
+            app.saved = false;
+            refresh_cached_assembly_preview(app)?;
+        }
+        [operation @ ("translate" | "rotate" | "scale" | "pivot"), x, y, z] => {
+            let part = selected_assembly_part_id(app)?;
+            let values = [
+                parse_f32(x, &usage)?,
+                parse_f32(y, &usage)?,
+                parse_f32(z, &usage)?,
+            ];
+            set_assembly_transform(app, operation, &part, values)?;
+        }
+        [operation @ ("translate" | "rotate" | "scale" | "pivot"), part, x, y, z] => {
+            let values = [
+                parse_f32(x, &usage)?,
+                parse_f32(y, &usage)?,
+                parse_f32(z, &usage)?,
+            ];
+            set_assembly_transform(app, operation, part, values)?;
+        }
+        ["visibility", action @ ("show" | "hide" | "toggle")] => {
+            let part = selected_assembly_part_id(app)?;
+            set_assembly_visibility(app, &part, action)?;
+        }
+        ["visibility", part, action @ ("show" | "hide" | "toggle")] => {
+            set_assembly_visibility(app, part, action)?;
+        }
+        ["render"] => {
+            let (resolved, elapsed) = compile_assembly(app)?;
+            let scene = resolved
+                .render_scene(app.selected_assembly_part.as_deref())
+                .map_err(|error| CommandError::Custom(error.to_string()))?;
+            app.assembly_preview
+                .render_scene(scene, elapsed)
+                .map_err(CommandError::Custom)?;
+            app.enter_assembly_screen();
+        }
+        ["export", destination] => {
+            let path = ensure_extension(resolve_export_path(app, destination)?, "dae");
+            let (resolved, elapsed) = compile_assembly(app)?;
+            openscad_assembly::write_dae(&path, &resolved)
+                .map_err(|error| CommandError::Custom(error.to_string()))?;
+            app.set_info(&format!(
+                "Exported assembly to '{}' in {:.2}s",
+                path.display(),
+                elapsed.as_secs_f64()
+            ));
+        }
+        ["close"] => app.enter_editor_screen(),
+        _ => return Err(usage()),
+    }
+    Ok(())
+}
+
+fn selected_assembly_part_id(app: &App) -> CommandResult<String> {
+    let part = app
+        .selected_assembly_part
+        .as_deref()
+        .ok_or_else(|| CommandError::Custom("No assembly part is selected".into()))?;
+    active_assembly(app)?
+        .part(part)
+        .map(|part| part.id.clone())
+        .ok_or_else(|| CommandError::Custom(format!("Assembly part '{part}' was not found")))
+}
+
+fn set_assembly_transform(
+    app: &mut App,
+    operation: &str,
+    part: &str,
+    values: [f32; 3],
+) -> CommandResult<()> {
+    let document = active_assembly_mut(app)?;
+    let target = document
+        .part_mut(part)
+        .ok_or_else(|| CommandError::Custom(format!("Assembly part '{part}' was not found")))?;
+    let previous = target.transform;
+    match operation {
+        "translate" => target.transform.translation = values,
+        "rotate" => target.transform.rotation_degrees = values,
+        "scale" => target.transform.scale = values,
+        "pivot" => target.transform.pivot = values,
+        _ => unreachable!(),
+    }
+    if let Err(error) = target.transform.validate() {
+        target.transform = previous;
+        return Err(CommandError::Custom(error.to_string()));
+    }
+    app.saved = false;
+    refresh_cached_assembly_preview(app)
+}
+
+fn set_assembly_visibility(app: &mut App, part: &str, action: &str) -> CommandResult<()> {
+    let document = active_assembly_mut(app)?;
+    let target = document
+        .part_mut(part)
+        .ok_or_else(|| CommandError::Custom(format!("Assembly part '{part}' was not found")))?;
+    target.visible = match action {
+        "show" => true,
+        "hide" => false,
+        "toggle" => !target.visible,
+        _ => unreachable!(),
+    };
+    app.saved = false;
+    refresh_cached_assembly_preview(app)
+}
+
+fn parse_f32(value: &str, invalid: &impl Fn() -> CommandError) -> CommandResult<f32> {
+    value.parse().map_err(|_| invalid())
+}
+
 pub fn cmd_diagnostics(app: &mut App, destination: Option<&str>) -> CommandResult<()> {
-    let details = app
-        .model_preview
+    let details = active_preview(app)
         .diagnostics()
         .ok_or_else(|| CommandError::Custom("No render or display diagnostic is available".into()))?
         .to_string();
@@ -1325,7 +1828,12 @@ pub fn cmd_write_force(app: &mut App, filename: &str) -> CommandResult<()> {
     };
 
     let filepath = normalized_project_path(expanded_filepath);
-    save_project(&filepath, &app.ast).map_err(|error| {
+    let document = ProjectDocument {
+        sources: (*app.ast).clone(),
+        assemblies: app.assemblies.clone(),
+        active_assembly: app.active_assembly.clone(),
+    };
+    save_project(&filepath, &document).map_err(|error| {
         CommandError::Custom(format!(
             "Failed to write project '{}': {error}",
             filepath.display()
@@ -1371,7 +1879,7 @@ pub fn cmd_load_force(app: &mut App, filename: &str) -> CommandResult<()> {
             "open requires a .scadtui project; use edit for .scad sources".to_string(),
         ));
     }
-    let ast = load_project(&expanded_filename).map_err(|error| {
+    let project = load_project(&expanded_filename).map_err(|error| {
         CommandError::Custom(format!(
             "Failed to open project '{}': {error}",
             expanded_filename.display()
@@ -1379,8 +1887,14 @@ pub fn cmd_load_force(app: &mut App, filename: &str) -> CommandResult<()> {
     })?;
 
     // Replace AST
-    app.ast = Arc::new(ast);
-    app.model_preview.mark_stale();
+    app.ast = Arc::new(project.sources);
+    app.assemblies = project.assemblies;
+    app.active_assembly = project.active_assembly;
+    app.selected_assembly_part = None;
+    app.assembly_scroll_offset = 0;
+    app.assembly_clipboard = None;
+    app.invalidate_source_previews();
+    app.assembly_preview.clear();
 
     // First, reload custom modules in library manager
     reload_project_definitions(app);
@@ -1403,6 +1917,11 @@ pub fn cmd_new_project(app: &mut App, filename: Option<&str>, force: bool) -> Co
         ));
     }
     app.ast = Arc::new(openscad_core::AstRoot::new_project("main.scad"));
+    app.assemblies.clear();
+    app.active_assembly = None;
+    app.selected_assembly_part = None;
+    app.assembly_scroll_offset = 0;
+    app.assembly_clipboard = None;
     app.library.reload_custom_modules_from_ast(&[]);
     app.library.reload_custom_functions_from_ast(&[]);
     app.selected_nodes.clear();
@@ -1411,7 +1930,8 @@ pub fn cmd_new_project(app: &mut App, filename: Option<&str>, force: bool) -> Co
     app.tree_state.borrow_mut().select(Vec::new());
     app.current_file = filename.map(str::to_string);
     app.saved = false;
-    app.model_preview.mark_stale();
+    app.invalidate_source_previews();
+    app.assembly_preview.clear();
     app.init_tree_selection();
     app.set_info("Created a new project with 'main.scad'");
     Ok(())
@@ -1443,7 +1963,7 @@ pub fn cmd_new_file(app: &mut App, filename: &str) -> CommandResult<()> {
     app.redo_stack.clear();
     app.tree_state.borrow_mut().select(Vec::new());
     app.init_tree_selection();
-    app.model_preview.mark_stale();
+    app.invalidate_source_previews();
     app.set_info(&format!("Created project source '{virtual_path}'"));
     Ok(())
 }
@@ -1493,7 +2013,7 @@ pub fn cmd_edit_scad(app: &mut App, filename: &str) -> CommandResult<()> {
     app.redo_stack.clear();
     app.tree_state.borrow_mut().select(Vec::new());
     app.saved = false;
-    app.model_preview.mark_stale();
+    app.invalidate_source_previews();
     app.set_info(&format!(
         "Imported '{}' as editable project source '{target}'",
         path.display(),
@@ -1753,7 +2273,7 @@ pub fn cmd_load_library(app: &mut App, filename: &str) -> CommandResult<()> {
         None => attach_scad_library(app.ast_mut(), &path).map_err(CommandError::Custom)?,
     };
     reload_project_definitions(app);
-    app.model_preview.mark_stale();
+    app.invalidate_source_previews();
     app.set_info(&format!(
         "Loaded SCAD library '{target}'; use 'use {}' to activate it",
         Path::new(&target)
@@ -1838,7 +2358,7 @@ fn cmd_activate_source(
     }
     app.ast_mut().source_dependencies.push(dependency);
     reload_project_definitions(app);
-    app.model_preview.mark_stale();
+    app.invalidate_source_previews();
     app.set_info(&format!(
         "Referenced project source '{target}' with {directive}"
     ));
@@ -4035,6 +4555,28 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
     ));
 
     registry.register(CommandDef::new(
+        "assembly",
+        vec!["asm"],
+        cmd_assembly,
+        "Create, transform, preview, and export rigid multi-part assemblies",
+        1,
+        None,
+        "assembly <operation> [arguments]",
+        vec![
+            "assembly new robot",
+            "assembly add body.scad body",
+            "assembly translate body 10 0 0",
+            "assembly copy body",
+            "assembly paste root",
+            "assembly render",
+            "assembly export robot.dae",
+        ],
+        CommandType::Assembly,
+        false,
+        true,
+    ));
+
+    registry.register(CommandDef::new(
         "diagnostics",
         vec!["diag"],
         |app, args| cmd_diagnostics(app, args.first().copied()),
@@ -4054,6 +4596,109 @@ mod tests {
     use super::*;
     #[allow(unused_imports)]
     use App;
+
+    #[test]
+    fn test_assembly_commands_build_and_edit_a_rigid_part_hierarchy() {
+        let mut app = App::new();
+
+        cmd_assembly(&mut app, &["new", "robot"]).unwrap();
+        cmd_assembly(&mut app, &["add", "main.scad", "body"]).unwrap();
+        cmd_assembly(&mut app, &["add", "main.scad", "arm"]).unwrap();
+        cmd_assembly(&mut app, &["parent", "body"]).unwrap();
+        cmd_assembly(&mut app, &["translate", "2", "3", "4"]).unwrap();
+        cmd_assembly(&mut app, &["visibility", "hide"]).unwrap();
+
+        let assembly = active_assembly(&app).unwrap();
+        assert_eq!(assembly.parts.len(), 2);
+        assert_eq!(
+            assembly.part("arm").unwrap().parent.as_deref(),
+            Some("body")
+        );
+        assert_eq!(
+            assembly.part("arm").unwrap().transform.translation,
+            [2.0, 3.0, 4.0]
+        );
+        assert!(!assembly.part("arm").unwrap().visible);
+        assert!(!app.saved);
+        assert_eq!(app.screen, Screen::Assembly);
+        assert!(app.command_registry.find("assembly").is_some());
+        assert!(app.command_registry.find("asm").is_some());
+
+        let error = cmd_assembly(&mut app, &["scale", "arm", "0", "1", "1"])
+            .expect_err("zero scale must be rejected");
+        assert!(error.to_string().contains("non-zero"));
+        assert_eq!(assembly_part(&app, "arm").transform.scale, [1.0; 3]);
+    }
+
+    #[test]
+    fn test_assembly_copy_and_paste_preserve_instance_state_with_a_unique_name() {
+        let mut app = App::new();
+        cmd_assembly(&mut app, &["new", "robot"]).unwrap();
+        cmd_assembly(&mut app, &["add", "main.scad", "body"]).unwrap();
+        cmd_assembly(&mut app, &["add", "main.scad", "arm"]).unwrap();
+        cmd_assembly(&mut app, &["parent", "arm", "body"]).unwrap();
+        cmd_assembly(&mut app, &["translate", "arm", "2", "3", "4"]).unwrap();
+        cmd_assembly(&mut app, &["visibility", "arm", "hide"]).unwrap();
+
+        cmd_assembly(&mut app, &["copy", "arm"]).unwrap();
+        cmd_assembly(&mut app, &["paste"]).unwrap();
+
+        let pasted = assembly_part(&app, "arm2");
+        assert_eq!(pasted.id, "arm2");
+        assert_eq!(pasted.parent.as_deref(), Some("body"));
+        assert_eq!(pasted.transform.translation, [2.0, 3.0, 4.0]);
+        assert!(!pasted.visible);
+        assert_eq!(app.selected_assembly_part.as_deref(), Some("arm2"));
+
+        cmd_assembly(&mut app, &["paste", "root"]).unwrap();
+        assert_eq!(assembly_part(&app, "arm3").parent, None);
+    }
+
+    #[test]
+    fn test_assembly_export_compiles_multiple_sources_and_reuses_mesh_cache() {
+        if std::process::Command::new("openscad")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = App::new();
+        app.ast_mut().modules.push(ModuleNode::new_leaf(
+            "body_cube".into(),
+            "cube".into(),
+            Vec::new(),
+        ));
+        cmd_new_file(&mut app, "parts/head.scad").unwrap();
+        app.ast_mut().modules.push(ModuleNode::new_leaf(
+            "head_sphere".into(),
+            "sphere".into(),
+            Vec::new(),
+        ));
+        cmd_assembly(&mut app, &["new", "robot"]).unwrap();
+        cmd_assembly(&mut app, &["add", "main.scad", "body"]).unwrap();
+        cmd_assembly(&mut app, &["add", "parts/head.scad", "head"]).unwrap();
+        let destination = directory.path().join("robot.dae");
+
+        cmd_assembly(&mut app, &["export", destination.to_str().unwrap()]).unwrap();
+
+        let xml = fs::read_to_string(&destination).unwrap();
+        assert_eq!(xml.matches("<geometry id=").count(), 2);
+        assert_eq!(xml.matches("<node id=").count(), 2);
+        let body_source = openscad_assembly::MeshSourceRef::project_source("main.scad");
+        let cached = Arc::clone(&app.assembly_mesh_cache[&body_source].1);
+        cmd_assembly(&mut app, &["translate", "body", "5", "0", "0"]).unwrap();
+        cmd_assembly(&mut app, &["export", destination.to_str().unwrap()]).unwrap();
+        assert!(Arc::ptr_eq(
+            &cached,
+            &app.assembly_mesh_cache[&body_source].1
+        ));
+    }
+
+    fn assembly_part<'a>(app: &'a App, name: &str) -> &'a openscad_assembly::PartInstance {
+        active_assembly(app).unwrap().part(name).unwrap()
+    }
 
     #[test]
     fn test_visibility_hides_shows_and_toggles_selected_modules() {

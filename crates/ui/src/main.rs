@@ -19,7 +19,7 @@ use std::io;
 use std::path::PathBuf;
 
 use openscad_ui::{
-    app::{App, PreviewCloseAction},
+    app::{App, PreviewCloseAction, Screen},
     commands::{cmd_edit_scad, cmd_load_force, cmd_view},
     input::{handle_key, handle_mouse},
     ui::draw,
@@ -79,6 +79,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     app.configure_image_picker(picker);
     if let Some(protocol_type) = protocol_override {
         app.model_preview.set_protocol_type(protocol_type);
+        app.assembly_preview.set_protocol_type(protocol_type);
     }
     let res = run_app(&mut terminal, &mut app);
 
@@ -133,7 +134,12 @@ fn parse_image_protocol_override(value: &str) -> Result<Option<DisplayProtocol>,
 fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> io::Result<()> {
     loop {
         app.poll_render_events();
-        app.model_preview.tick(std::time::Instant::now());
+        match app.screen {
+            Screen::Assembly => app.assembly_preview.tick(std::time::Instant::now()),
+            Screen::Editor | Screen::ModelPreview => {
+                app.model_preview.tick(std::time::Instant::now())
+            }
+        }
         if app.take_terminal_clear_request() {
             terminal.clear()?;
         }
@@ -141,13 +147,22 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> io::Result<
         terminal.draw(|f| {
             draw(f, app);
         })?;
-        app.model_preview.record_ui_draw(draw_started.elapsed());
+        match app.screen {
+            Screen::Assembly => app.assembly_preview.record_ui_draw(draw_started.elapsed()),
+            Screen::Editor | Screen::ModelPreview => {
+                app.model_preview.record_ui_draw(draw_started.elapsed())
+            }
+        }
 
         if app.should_quit {
             return Ok(());
         }
 
-        let poll_interval = if app.model_preview.auto_rotate || app.mouse_drag.is_some() {
+        let auto_rotate = match app.screen {
+            Screen::Assembly => app.assembly_preview.auto_rotate,
+            Screen::Editor | Screen::ModelPreview => app.model_preview.auto_rotate,
+        };
+        let poll_interval = if auto_rotate || app.mouse_drag.is_some() {
             std::time::Duration::from_millis(33)
         } else {
             std::time::Duration::from_millis(100)

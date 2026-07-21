@@ -8,7 +8,8 @@ use std::{fs::OpenOptions, io::Write};
 
 use openscad_render::{
     Aabb, Camera, CpuRenderer, MeshInput, MeshPipeline, OpenScadGenerator, OpenScadProject,
-    PixelSize, Projection, RenderEvent, RenderOptions, RenderService, StandardView,
+    PixelSize, Projection, RenderEvent, RenderOptions, RenderScene, RenderService, SceneGeneration,
+    StandardView,
 };
 use openscad_terminal::{DisplayProtocol, PresentationContext, TerminalImage, TerminalPresenter};
 use ratatui::layout::Rect;
@@ -157,6 +158,19 @@ impl ModelPreview {
         self.presenter.reencode_cached();
     }
 
+    pub fn clear(&mut self) {
+        self.mesh_revision = self.mesh_revision.wrapping_add(1);
+        self.camera_revision = self.camera_revision.wrapping_add(1);
+        self.service = None;
+        self.bounds = None;
+        self.fitted_revision = None;
+        self.presenter.clear();
+        self.status = ModelPreviewStatus::Empty;
+        self.metrics = RenderMetrics::default();
+        self.last_error_details = None;
+        self.presentation_error = None;
+    }
+
     pub fn set_area(&mut self, area: Rect) {
         let cells = Rect::new(
             0,
@@ -204,6 +218,74 @@ impl ModelPreview {
             MeshInput::File(expand_tilde(path)),
             OpenScadGenerator::new("openscad"),
         )
+    }
+
+    pub fn render_scene(
+        &mut self,
+        scene: RenderScene,
+        generation_time: Duration,
+    ) -> Result<(), String> {
+        self.mesh_revision = self.mesh_revision.wrapping_add(1);
+        self.camera_revision = self.camera_revision.wrapping_add(1);
+        self.bounds = None;
+        self.fitted_revision = None;
+        self.presenter.clear();
+        self.status = ModelPreviewStatus::Loading;
+        self.last_error_details = None;
+
+        // Scene rendering bypasses the loader, but the worker keeps one loader so the same
+        // service can continue serving camera-only rasterization requests.
+        let pipeline = MeshPipeline::new(OpenScadGenerator::new("openscad"));
+        let service = RenderService::new(Box::new(pipeline), Box::new(CpuRenderer::default()));
+        service
+            .set_scene(
+                self.mesh_revision,
+                self.camera_revision,
+                SceneGeneration {
+                    scene,
+                    generation_time,
+                },
+                self.camera,
+                self.viewport,
+                self.render_options(),
+            )
+            .map_err(|error| error.to_string())?;
+        self.service = Some(service);
+        Ok(())
+    }
+
+    pub fn update_scene(
+        &mut self,
+        scene: RenderScene,
+        generation_time: Duration,
+    ) -> Result<(), String> {
+        if self.service.is_none() {
+            return self.render_scene(scene, generation_time);
+        }
+        self.mesh_revision = self.mesh_revision.wrapping_add(1);
+        self.camera_revision = self.camera_revision.wrapping_add(1);
+        self.bounds = Some(scene.bounds);
+        self.camera.update_clip_planes(scene.bounds);
+        // Instance-only changes preserve the user's camera instead of fitting on every command.
+        self.fitted_revision = Some(self.mesh_revision);
+        self.status = ModelPreviewStatus::Rasterizing;
+        self.last_error_details = None;
+        let options = self.render_options();
+        self.service
+            .as_ref()
+            .expect("service checked above")
+            .set_scene(
+                self.mesh_revision,
+                self.camera_revision,
+                SceneGeneration {
+                    scene,
+                    generation_time,
+                },
+                self.camera,
+                self.viewport,
+                options,
+            )
+            .map_err(|error| error.to_string())
     }
 
     fn load(&mut self, input: MeshInput, generator: OpenScadGenerator) -> Result<(), String> {
