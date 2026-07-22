@@ -244,7 +244,7 @@ pub fn cmd_buffer(app: &mut App, value: Option<&str>) -> CommandResult<()> {
             .iter()
             .map(|path| {
                 let active_marker = if active == Some(path.as_str()) {
-                    "*"
+                    "@"
                 } else {
                     ""
                 };
@@ -252,7 +252,7 @@ pub fn cmd_buffer(app: &mut App, value: Option<&str>) -> CommandResult<()> {
             })
             .collect::<Vec<_>>()
             .join(" ");
-        app.set_info(&format!("Buffers (* active): {summary}"));
+        app.set_info(&format!("Buffers (@ current): {summary}"));
         return Ok(());
     };
 
@@ -550,9 +550,30 @@ fn dispatch_assembly(app: &mut App, operation: &'static str, args: &[&str]) -> C
 pub fn cmd_assembly(app: &mut App, args: &[&str]) -> CommandResult<()> {
     let usage = || {
         CommandError::InvalidCommand(
-            "Usage: assembly new [name] | open [name] | list | add <project-source> [name] | select <part|next|prev> | copy [part] | paste [parent|root] | remove [part] | parent [part] <parent|root> | translate|rotate|scale|pivot [part] <x> <y> <z> | visibility [part] <show|hide|toggle> | render | export <file.dae> | close".into(),
+            "Usage: assembly new [name] | open [name] | list | add <project-source> [name] | select <part|next|prev|toggle|clear> | copy [part] | paste [parent|root] | remove [part] | parent [part] <parent|root> | translate|rotate|scale|pivot [part] <x> <y> <z> | visibility [part] <show|hide|toggle> | undo | redo | render | export <file.dae> | close".into(),
         )
     };
+    let history = args
+        .first()
+        .is_some_and(|operation| {
+            matches!(
+                *operation,
+                "new"
+                    | "add"
+                    | "paste"
+                    | "remove"
+                    | "parent"
+                    | "translate"
+                    | "rotate"
+                    | "scale"
+                    | "pivot"
+                    | "visibility"
+            )
+        })
+        .then(|| app.assembly_history_state());
+    if let Some(history) = history {
+        app.record_assembly_undo(history);
+    }
     match args {
         ["new"] | ["new", _] => {
             let name = args
@@ -574,6 +595,7 @@ pub fn cmd_assembly(app: &mut App, args: &[&str]) -> CommandResult<()> {
             app.active_assembly = Some(document.id.clone());
             app.assemblies.push(document);
             app.selected_assembly_part = None;
+            app.selected_assembly_parts.clear();
             app.assembly_scroll_offset = 0;
             app.assembly_preview.clear();
             app.saved = false;
@@ -589,6 +611,7 @@ pub fn cmd_assembly(app: &mut App, args: &[&str]) -> CommandResult<()> {
                 .ok_or_else(|| CommandError::Custom(format!("Assembly '{name}' was not found")))?;
             app.active_assembly = Some(document.id.clone());
             app.selected_assembly_part = document.parts.first().map(|part| part.id.clone());
+            app.selected_assembly_parts.clear();
             app.assembly_scroll_offset = 0;
             app.assembly_preview.clear();
             app.enter_assembly_screen();
@@ -647,6 +670,22 @@ pub fn cmd_assembly(app: &mut App, args: &[&str]) -> CommandResult<()> {
             app.selected_assembly_part = Some(id);
             app.saved = false;
             refresh_cached_assembly_preview(app)?;
+        }
+        ["select", "clear"] => {
+            app.selected_assembly_parts.clear();
+            app.set_info("Cleared assembly part selection");
+        }
+        ["select", "toggle"] => {
+            let target = selected_assembly_part_id(app)?;
+            if app.selected_assembly_parts.contains(&target) {
+                app.selected_assembly_parts.retain(|part| part != &target);
+            } else {
+                app.selected_assembly_parts.push(target);
+            }
+            app.set_info(&format!(
+                "Selected {} assembly part(s)",
+                app.selected_assembly_parts.len()
+            ));
         }
         ["select", target] => {
             let assembly = active_assembly(app)?;
@@ -751,15 +790,19 @@ pub fn cmd_assembly(app: &mut App, args: &[&str]) -> CommandResult<()> {
             app.set_info(&format!("Pasted assembly part '{pasted_name}'"));
         }
         ["remove"] | ["remove", _] => {
-            let target = args
-                .get(1)
-                .copied()
-                .or(app.selected_assembly_part.as_deref())
-                .ok_or_else(|| CommandError::Custom("No assembly part is selected".into()))?
-                .to_string();
-            active_assembly_mut(app)?
-                .remove_part(&target)
-                .map_err(|error| CommandError::Custom(error.to_string()))?;
+            let targets = match args.get(1).copied() {
+                Some(target) => vec![target.to_string()],
+                None => selected_or_current_assembly_parts(app)?,
+            };
+            let mut updated = active_assembly(app)?.clone();
+            for target in &targets {
+                updated
+                    .remove_part(target)
+                    .map_err(|error| CommandError::Custom(error.to_string()))?;
+            }
+            *active_assembly_mut(app)? = updated;
+            app.selected_assembly_parts
+                .retain(|part| !targets.contains(part));
             app.selected_assembly_part = active_assembly(app)?
                 .parts
                 .first()
@@ -785,13 +828,13 @@ pub fn cmd_assembly(app: &mut App, args: &[&str]) -> CommandResult<()> {
             refresh_cached_assembly_preview(app)?;
         }
         [operation @ ("translate" | "rotate" | "scale" | "pivot"), x, y, z] => {
-            let part = selected_assembly_part_id(app)?;
             let values = [
                 parse_f32(x, &usage)?,
                 parse_f32(y, &usage)?,
                 parse_f32(z, &usage)?,
             ];
-            set_assembly_transform(app, operation, &part, values)?;
+            let parts = selected_or_current_assembly_parts(app)?;
+            set_assembly_transforms(app, operation, &parts, values)?;
         }
         [operation @ ("translate" | "rotate" | "scale" | "pivot"), part, x, y, z] => {
             let values = [
@@ -802,11 +845,25 @@ pub fn cmd_assembly(app: &mut App, args: &[&str]) -> CommandResult<()> {
             set_assembly_transform(app, operation, part, values)?;
         }
         ["visibility", action @ ("show" | "hide" | "toggle")] => {
-            let part = selected_assembly_part_id(app)?;
-            set_assembly_visibility(app, &part, action)?;
+            let parts = selected_or_current_assembly_parts(app)?;
+            set_assembly_visibilities(app, &parts, action)?;
         }
         ["visibility", part, action @ ("show" | "hide" | "toggle")] => {
             set_assembly_visibility(app, part, action)?;
+        }
+        ["undo"] => {
+            if !app.undo_assembly() {
+                return Err(CommandError::Custom("Nothing to undo in assembly".into()));
+            }
+            refresh_cached_assembly_preview(app)?;
+            app.set_info("Undid assembly operation");
+        }
+        ["redo"] => {
+            if !app.redo_assembly() {
+                return Err(CommandError::Custom("Nothing to redo in assembly".into()));
+            }
+            refresh_cached_assembly_preview(app)?;
+            app.set_info("Redid assembly operation");
         }
         ["render"] => {
             let (resolved, elapsed) = compile_assembly(app)?;
@@ -846,43 +903,78 @@ fn selected_assembly_part_id(app: &App) -> CommandResult<String> {
         .ok_or_else(|| CommandError::Custom(format!("Assembly part '{part}' was not found")))
 }
 
+fn selected_or_current_assembly_parts(app: &App) -> CommandResult<Vec<String>> {
+    let assembly = active_assembly(app)?;
+    let targets = if app.selected_assembly_parts.is_empty() {
+        vec![selected_assembly_part_id(app)?]
+    } else {
+        app.selected_assembly_parts.clone()
+    };
+    for target in &targets {
+        if assembly.part(target).is_none() {
+            return Err(CommandError::Custom(format!(
+                "Assembly part '{target}' was not found"
+            )));
+        }
+    }
+    Ok(targets)
+}
+
 fn set_assembly_transform(
     app: &mut App,
     operation: &str,
     part: &str,
     values: [f32; 3],
 ) -> CommandResult<()> {
-    let document = active_assembly_mut(app)?;
-    let target = document
-        .part_mut(part)
-        .ok_or_else(|| CommandError::Custom(format!("Assembly part '{part}' was not found")))?;
-    let previous = target.transform;
-    match operation {
-        "translate" => target.transform.translation = values,
-        "rotate" => target.transform.rotation_degrees = values,
-        "scale" => target.transform.scale = values,
-        "pivot" => target.transform.pivot = values,
-        _ => unreachable!(),
+    set_assembly_transforms(app, operation, &[part.to_string()], values)
+}
+
+fn set_assembly_transforms(
+    app: &mut App,
+    operation: &str,
+    parts: &[String],
+    values: [f32; 3],
+) -> CommandResult<()> {
+    let mut updated = active_assembly(app)?.clone();
+    for part in parts {
+        let target = updated
+            .part_mut(part)
+            .ok_or_else(|| CommandError::Custom(format!("Assembly part '{part}' was not found")))?;
+        match operation {
+            "translate" => target.transform.translation = values,
+            "rotate" => target.transform.rotation_degrees = values,
+            "scale" => target.transform.scale = values,
+            "pivot" => target.transform.pivot = values,
+            _ => unreachable!(),
+        }
+        target
+            .transform
+            .validate()
+            .map_err(|error| CommandError::Custom(error.to_string()))?;
     }
-    if let Err(error) = target.transform.validate() {
-        target.transform = previous;
-        return Err(CommandError::Custom(error.to_string()));
-    }
+    *active_assembly_mut(app)? = updated;
     app.saved = false;
     refresh_cached_assembly_preview(app)
 }
 
 fn set_assembly_visibility(app: &mut App, part: &str, action: &str) -> CommandResult<()> {
-    let document = active_assembly_mut(app)?;
-    let target = document
-        .part_mut(part)
-        .ok_or_else(|| CommandError::Custom(format!("Assembly part '{part}' was not found")))?;
-    target.visible = match action {
-        "show" => true,
-        "hide" => false,
-        "toggle" => !target.visible,
-        _ => unreachable!(),
-    };
+    set_assembly_visibilities(app, &[part.to_string()], action)
+}
+
+fn set_assembly_visibilities(app: &mut App, parts: &[String], action: &str) -> CommandResult<()> {
+    let mut updated = active_assembly(app)?.clone();
+    for part in parts {
+        let target = updated
+            .part_mut(part)
+            .ok_or_else(|| CommandError::Custom(format!("Assembly part '{part}' was not found")))?;
+        target.visible = match action {
+            "show" => true,
+            "hide" => false,
+            "toggle" => !target.visible,
+            _ => unreachable!(),
+        };
+    }
+    *active_assembly_mut(app)? = updated;
     app.saved = false;
     refresh_cached_assembly_preview(app)
 }
@@ -1920,8 +2012,11 @@ pub fn cmd_load_force(app: &mut App, filename: &str) -> CommandResult<()> {
     app.assemblies = project.assemblies;
     app.active_assembly = project.active_assembly;
     app.selected_assembly_part = None;
+    app.selected_assembly_parts.clear();
     app.assembly_scroll_offset = 0;
     app.assembly_clipboard = None;
+    app.assembly_undo_stack.clear();
+    app.assembly_redo_stack.clear();
     app.source_clipboard = None;
     app.invalidate_source_previews();
     app.assembly_preview.clear();
@@ -1959,8 +2054,11 @@ pub fn cmd_new_project(app: &mut App, name: Option<&str>, force: bool) -> Comman
     app.assemblies.clear();
     app.active_assembly = None;
     app.selected_assembly_part = None;
+    app.selected_assembly_parts.clear();
     app.assembly_scroll_offset = 0;
     app.assembly_clipboard = None;
+    app.assembly_undo_stack.clear();
+    app.assembly_redo_stack.clear();
     app.source_clipboard = None;
     app.library.reload_custom_modules_from_ast(&[]);
     app.library.reload_custom_functions_from_ast(&[]);
@@ -3104,7 +3202,7 @@ fn general_help_doc(app: &App) -> Vec<String> {
         "  w/o/e/L            save / open project / import SCAD / load library".to_string(),
         "  :                  enter command mode".to_string(),
         "  ?                  open this help".to_string(),
-        "  q / Ctrl+C         quit".to_string(),
+        "  q / Ctrl+C         quit; Q force-quits without saving".to_string(),
         "".to_string(),
         "Commands (type `help <command>` for details):".to_string(),
     ];
@@ -5606,15 +5704,20 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
     register_assembly(
         "select",
         |app, args| dispatch_assembly(app, "select", args),
-        "Select an assembly part",
+        "Focus, mark, or clear assembly part selections",
         1,
         Some(1),
-        "assembly select <part|next|prev>",
+        "assembly select <part|next|prev|toggle|clear>",
         vec![ArgumentSpec::new(
             "part",
             true,
             CompletionSource::AssemblyPart {
-                literals: vec!["next".into(), "prev".into()],
+                literals: vec![
+                    "next".into(),
+                    "prev".into(),
+                    "toggle".into(),
+                    "clear".into(),
+                ],
             },
         )],
     );
@@ -5724,7 +5827,7 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
     register_assembly(
         "visibility",
         |app, args| dispatch_assembly(app, "visibility", args),
-        "Show, hide, or toggle an assembly part",
+        "Show, hide, or toggle marked assembly parts, or the focused part",
         1,
         Some(2),
         "assembly visibility [part] <show|hide|toggle>",
@@ -5738,6 +5841,24 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
             ),
             ArgumentSpec::literal("action", false, &["show", "hide", "toggle"]),
         ],
+    );
+    register_assembly(
+        "undo",
+        |app, args| dispatch_assembly(app, "undo", args),
+        "Undo the last assembly operation",
+        0,
+        Some(0),
+        "assembly undo",
+        Vec::new(),
+    );
+    register_assembly(
+        "redo",
+        |app, args| dispatch_assembly(app, "redo", args),
+        "Redo the last undone assembly operation",
+        0,
+        Some(0),
+        "assembly redo",
+        Vec::new(),
     );
     register_assembly(
         "render",
@@ -5847,6 +5968,38 @@ mod tests {
         cmd_assembly(&mut app, &["paste", "root"]).unwrap();
         assert_eq!(assembly_part(&app, "arm3").parent, None);
         assert_eq!(assembly_part(&app, "arm3").name_base, "arm");
+    }
+
+    #[test]
+    fn test_assembly_marked_parts_support_batch_visibility_transform_and_remove() {
+        let mut app = App::new();
+        cmd_assembly(&mut app, &["new", "robot"]).unwrap();
+        cmd_assembly(&mut app, &["add", "main.scad", "body"]).unwrap();
+        cmd_assembly(&mut app, &["select", "toggle"]).unwrap();
+        cmd_assembly(&mut app, &["add", "main.scad", "arm"]).unwrap();
+        cmd_assembly(&mut app, &["select", "toggle"]).unwrap();
+
+        assert_eq!(app.selected_assembly_parts, ["body", "arm"]);
+        cmd_assembly(&mut app, &["visibility", "hide"]).unwrap();
+        cmd_assembly(&mut app, &["translate", "1", "2", "3"]).unwrap();
+        assert!(app.assemblies[0].parts.iter().all(|part| !part.visible));
+        assert!(app.assemblies[0]
+            .parts
+            .iter()
+            .all(|part| part.transform.translation == [1.0, 2.0, 3.0]));
+
+        cmd_assembly(&mut app, &["remove"]).unwrap();
+        assert!(app.assemblies[0].parts.is_empty());
+        assert!(app.selected_assembly_parts.is_empty());
+        assert_eq!(app.selected_assembly_part, None);
+
+        cmd_assembly(&mut app, &["undo"]).unwrap();
+        assert_eq!(app.assemblies[0].parts.len(), 2);
+        assert_eq!(app.selected_assembly_parts, ["body", "arm"]);
+        assert_eq!(app.selected_assembly_part.as_deref(), Some("arm"));
+
+        cmd_assembly(&mut app, &["redo"]).unwrap();
+        assert!(app.assemblies[0].parts.is_empty());
     }
 
     #[test]

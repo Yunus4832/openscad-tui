@@ -3334,6 +3334,19 @@ mod tests {
     }
 
     #[test]
+    fn test_uppercase_q_force_quits_with_unsaved_changes() {
+        let mut app = App::new();
+        app.saved = false;
+
+        handle_key(
+            KeyEvent::new(KeyCode::Char('Q'), KeyModifiers::SHIFT),
+            &mut app,
+        );
+
+        assert!(app.should_quit);
+    }
+
+    #[test]
     fn test_toolbar_and_model_keys_share_the_same_commands() {
         use ratatui::{backend::TestBackend, Terminal};
 
@@ -3458,13 +3471,23 @@ mod tests {
             KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
             &mut app,
         );
-        assert!(app.assembly_preview.auto_rotate);
+        assert!(!app.assembly_preview.auto_rotate);
+        assert!(!app.assemblies[0].part("arm").unwrap().visible);
+        handle_key(
+            KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE),
+            &mut app,
+        );
+        assert_eq!(app.selected_assembly_parts, ["arm"]);
+        handle_key(
+            KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
+            &mut app,
+        );
         assert!(app.assemblies[0].part("arm").unwrap().visible);
         handle_key(
             KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE),
             &mut app,
         );
-        assert!(!app.assemblies[0].part("arm").unwrap().visible);
+        assert!(app.selected_assembly_parts.is_empty());
         handle_key(
             KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE),
             &mut app,
@@ -3474,7 +3497,7 @@ mod tests {
             &mut app,
         );
         assert_eq!(app.selected_assembly_part.as_deref(), Some("arm2"));
-        assert!(!app.assemblies[0].part("arm2").unwrap().visible);
+        assert!(app.assemblies[0].part("arm2").unwrap().visible);
         handle_key(
             KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE),
             &mut app,
@@ -3518,6 +3541,15 @@ mod tests {
             .0
             .iter()
             .any(|candidate| candidate.content == "toggle"));
+        let select = generate_completions("assembly select ", &app);
+        assert!(select
+            .0
+            .iter()
+            .any(|candidate| candidate.content == "toggle"));
+        assert!(select
+            .0
+            .iter()
+            .any(|candidate| candidate.content == "clear"));
         let parent = generate_completions("assembly parent ", &app);
         assert!(parent.0.iter().any(|candidate| candidate.content == "root"));
         let copy = generate_completions("assembly copy ", &app);

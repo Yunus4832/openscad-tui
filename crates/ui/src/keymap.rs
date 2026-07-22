@@ -33,6 +33,7 @@ pub struct ToolbarButton {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Scope {
+    Global,
     EditorAny,
     ProjectSources,
     ProjectSource,
@@ -78,7 +79,6 @@ enum ButtonLabel {
     Projection,
     Axes,
     AutoRotate,
-    AssemblyVisibility,
 }
 
 #[derive(Clone, Copy)]
@@ -121,6 +121,7 @@ const fn toolbar_binding(scope: Scope, key: Key, action: Action, label: ButtonLa
 }
 
 const BINDINGS: &[Binding] = &[
+    binding(Scope::Global, Key::Char('Q'), Action::Execute("quit!")),
     binding(Scope::ProjectSource, Key::Enter, Action::OpenSelection),
     binding(Scope::ProjectSource, Key::Char('r'), Action::RenameSource),
     binding(Scope::ProjectSource, Key::Char('y'), Action::CopySource),
@@ -280,29 +281,41 @@ const BINDINGS: &[Binding] = &[
         Key::Char('k'),
         Action::Execute("assembly select prev"),
     ),
+    binding(
+        Scope::AssemblyScreen,
+        Key::Char('u'),
+        Action::Execute("assembly undo"),
+    ),
+    control_binding(
+        Scope::AssemblyScreen,
+        Key::Char('r'),
+        Action::Execute("assembly redo"),
+    ),
     toolbar_binding(
         Scope::AssemblyScreen,
         Key::Char('R'),
         Action::Execute("assembly render"),
         ButtonLabel::Fixed("Render"),
     ),
-    toolbar_binding(
+    binding(
         Scope::AssemblyScreen,
         Key::Char('v'),
-        Action::AssemblyVisibility,
-        ButtonLabel::AssemblyVisibility,
+        Action::Execute("assembly select toggle"),
     ),
-    toolbar_binding(
+    binding(
+        Scope::AssemblyScreen,
+        Key::Char(' '),
+        Action::AssemblyVisibility,
+    ),
+    binding(
         Scope::AssemblyScreen,
         Key::Char('y'),
         Action::Execute("assembly copy"),
-        ButtonLabel::Fixed("Copy"),
     ),
-    toolbar_binding(
+    binding(
         Scope::AssemblyScreen,
         Key::Char('p'),
         Action::Execute("assembly paste"),
-        ButtonLabel::Fixed("Paste"),
     ),
     binding(
         Scope::AssemblyScreen,
@@ -380,12 +393,6 @@ const BINDINGS: &[Binding] = &[
     ),
     toolbar_binding(
         Scope::Camera,
-        Key::Char(' '),
-        Action::Execute("camera auto-rotate toggle"),
-        ButtonLabel::AutoRotate,
-    ),
-    toolbar_binding(
-        Scope::Camera,
         Key::Char('1'),
         Action::Execute("camera view front"),
         ButtonLabel::Fixed("Front"),
@@ -421,6 +428,12 @@ const BINDINGS: &[Binding] = &[
         Key::Char('7'),
         Action::Execute("camera view iso"),
         ButtonLabel::Fixed("Iso"),
+    ),
+    toolbar_binding(
+        Scope::Camera,
+        Key::Char(' '),
+        Action::Execute("camera auto-rotate toggle"),
+        ButtonLabel::AutoRotate,
     ),
     binding(Scope::Camera, Key::Char('?'), Action::Execute("help")),
 ];
@@ -487,7 +500,8 @@ fn resolve_for_scope(
 }
 
 fn scope_matches(binding: Scope, active: Scope) -> bool {
-    binding == active
+    binding == Scope::Global
+        || binding == active
         || (binding == Scope::EditorAny
             && matches!(
                 active,
@@ -568,10 +582,19 @@ fn materialize(action: Action, context: Option<&EditorContext>, app: &App) -> Op
                 "pivot" => part.transform.pivot,
                 _ => return None,
             };
-            Some(KeyAction::BeginCommand(format!(
-                "assembly {operation} {} {} {} {}",
-                part.id, values[0], values[1], values[2]
-            )))
+            Some(KeyAction::BeginCommand(
+                if app.selected_assembly_parts.is_empty() {
+                    format!(
+                        "assembly {operation} {} {} {} {}",
+                        part.id, values[0], values[1], values[2]
+                    )
+                } else {
+                    format!(
+                        "assembly {operation} {} {} {}",
+                        values[0], values[1], values[2]
+                    )
+                },
+            ))
         }
         Action::AssemblyParent => {
             let Some(part) = selected_assembly_part(app) else {
@@ -583,11 +606,7 @@ fn materialize(action: Action, context: Option<&EditorContext>, app: &App) -> Op
                 part.parent.as_deref().unwrap_or("root")
             )))
         }
-        Action::AssemblyVisibility => command(if selected_assembly_part(app).is_some() {
-            "assembly visibility toggle".to_string()
-        } else {
-            "assembly select next".to_string()
-        }),
+        Action::AssemblyVisibility => command("assembly visibility toggle".to_string()),
     }
 }
 
@@ -603,15 +622,25 @@ pub fn toolbar_buttons(app: &App) -> Vec<ToolbarButton> {
             binding.button.is_some()
                 && scope_matches(binding.scope, active_scope)
                 && (app.screen == Screen::ModelPreview
-                    || binding.scope == Scope::AssemblyScreen
-                    || matches!(binding.button, Some(ButtonLabel::AutoRotate)))
+                    || matches!(binding.scope, Scope::AssemblyScreen | Scope::Camera))
         })
         .filter_map(|binding| {
             let KeyAction::Execute(command) = materialize(binding.action, None, app)? else {
                 return None;
             };
+            let shortcut = key_label(binding.key);
+            let key_action = resolve_for_scope(
+                KeyEvent::new(key_code(binding.key), KeyModifiers::NONE),
+                app,
+                active_scope,
+                None,
+            );
             Some(ToolbarButton {
-                shortcut: key_label(binding.key).to_string(),
+                shortcut: if key_action == Some(KeyAction::Execute(command.clone())) {
+                    shortcut.to_string()
+                } else {
+                    String::new()
+                },
                 label: button_label(binding.button?, app),
                 command,
             })
@@ -622,11 +651,9 @@ pub fn toolbar_buttons(app: &App) -> Vec<ToolbarButton> {
 pub fn screen_shortcut_help(app: &App) -> &'static str {
     match app.screen {
         Screen::Assembly => {
-            "j/k Select  a Add  t/r/s Transform  o Pivot  g Parent  v Hide  y/p Copy/Paste  Space Auto"
+            "j/k Focus  v Select  Space Visibility  u/C-r Undo  t/r/s Transform  : Command"
         }
-        Screen::ModelPreview => {
-            "h/j/k/l Orbit  Arrows Pan  +/- Zoom  x Axes  1..7 Views  Esc/q Close  : Command"
-        }
+        Screen::ModelPreview => "h/j/k/l Orbit  Arrows Pan  +/- Zoom  R Render  : Command",
         Screen::Editor => "",
     }
 }
@@ -645,6 +672,18 @@ fn key_label(key: Key) -> &'static str {
         Key::Char('5') => "5",
         Key::Char('7') => "7",
         _ => "",
+    }
+}
+
+fn key_code(key: Key) -> KeyCode {
+    match key {
+        Key::Char(character) => KeyCode::Char(character),
+        Key::Up => KeyCode::Up,
+        Key::Down => KeyCode::Down,
+        Key::Left => KeyCode::Left,
+        Key::Right => KeyCode::Right,
+        Key::Enter => KeyCode::Enter,
+        Key::Escape => KeyCode::Esc,
     }
 }
 
@@ -670,13 +709,6 @@ fn button_label(label: ButtonLabel, app: &App) -> String {
         }
         .to_string(),
         ButtonLabel::AutoRotate => if preview.auto_rotate { "Stop" } else { "Auto" }.to_string(),
-        ButtonLabel::AssemblyVisibility => {
-            match selected_assembly_part(app).map(|part| part.visible) {
-                Some(true) => "Hide".to_string(),
-                Some(false) => "Show".to_string(),
-                None => "Select".to_string(),
-            }
-        }
     }
 }
 
@@ -744,6 +776,18 @@ mod tests {
     }
 
     #[test]
+    fn uppercase_q_force_quits_from_every_screen() {
+        let mut app = App::new();
+        for screen in [Screen::Editor, Screen::ModelPreview, Screen::Assembly] {
+            app.screen = screen;
+            assert_eq!(
+                resolve_key_action(KeyEvent::new(KeyCode::Char('Q'), KeyModifiers::SHIFT), &app),
+                Some(KeyAction::Execute("quit!".to_string()))
+            );
+        }
+    }
+
+    #[test]
     fn module_context_keeps_the_rotate_binding() {
         let mut app = App::new();
         app.ast_mut()
@@ -781,7 +825,7 @@ mod tests {
     }
 
     #[test]
-    fn assembly_p_remains_paste_and_has_no_false_projection_shortcut() {
+    fn assembly_p_remains_paste_while_projection_is_a_button_only_control() {
         let mut app = App::new();
         app.screen = Screen::Assembly;
 
@@ -789,8 +833,58 @@ mod tests {
             resolve_key_action(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE), &app),
             Some(KeyAction::Execute("assembly paste".to_string()))
         );
-        assert!(!toolbar_buttons(&app)
+        assert_eq!(
+            resolve_key_action(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE), &app),
+            Some(KeyAction::Execute("assembly select toggle".to_string()))
+        );
+        assert_eq!(
+            resolve_key_action(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE), &app),
+            Some(KeyAction::Execute("assembly visibility toggle".to_string()))
+        );
+        assert_eq!(
+            resolve_key_action(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE), &app),
+            Some(KeyAction::Execute("assembly undo".to_string()))
+        );
+        assert_eq!(
+            resolve_key_action(
+                KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL),
+                &app
+            ),
+            Some(KeyAction::Execute("assembly redo".to_string()))
+        );
+        let buttons = toolbar_buttons(&app);
+        let projection = buttons
             .iter()
-            .any(|button| button.command == "camera projection toggle"));
+            .find(|button| button.command == "camera projection toggle")
+            .expect("assembly toolbar should expose projection");
+        assert!(projection.shortcut.is_empty());
+        let auto_rotate = buttons
+            .iter()
+            .find(|button| button.command == "camera auto-rotate toggle")
+            .expect("assembly toolbar should expose automatic rotation");
+        assert!(auto_rotate.shortcut.is_empty());
+        assert!(!buttons.iter().any(|button| matches!(
+            button.command.as_str(),
+            "assembly visibility toggle" | "assembly copy" | "assembly paste"
+        )));
+    }
+
+    #[test]
+    fn assembly_camera_button_labels_follow_preview_state() {
+        let mut app = App::new();
+        app.screen = Screen::Assembly;
+        app.assembly_preview.camera.projection = openscad_render::Projection::Orthographic {
+            vertical_size: 10.0,
+        };
+        app.assembly_preview.axes_visible = false;
+        app.assembly_preview.auto_rotate = true;
+
+        let labels = toolbar_buttons(&app)
+            .into_iter()
+            .map(|button| button.label)
+            .collect::<Vec<_>>();
+        assert!(labels.iter().any(|label| label == "Persp"));
+        assert!(labels.iter().any(|label| label == "Axes+"));
+        assert!(labels.iter().any(|label| label == "Stop"));
     }
 }

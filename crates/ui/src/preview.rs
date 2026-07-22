@@ -1,10 +1,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicU32, Ordering},
-    Arc, Mutex, OnceLock,
+    Arc,
 };
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use std::{fs::OpenOptions, io::Write};
+use std::time::{Duration, Instant};
 
 use openscad_render::{
     Aabb, Camera, CpuRenderer, MeshInput, MeshPipeline, OpenScadGenerator, OpenScadProject,
@@ -102,7 +101,6 @@ impl ModelPreview {
     }
 
     pub fn set_picker(&mut self, picker: Picker) {
-        render_trace(|| format!("picker-set protocol={:?}", picker.protocol_type()));
         self.auto_protocol = display_protocol(picker.protocol_type());
         self.presenter.set_font_size(picker.font_size());
         self.presenter.set_tmux(picker_is_tmux());
@@ -338,17 +336,6 @@ impl ModelPreview {
                 }
                 RenderEvent::Ready(rendered) if rendered.mesh_revision == self.mesh_revision => {
                     let is_latest = rendered.camera_revision == self.camera_revision;
-                    render_trace(|| {
-                        format!(
-                            "raster-ready mesh_rev={} camera_rev={} expected_rev={} latest={} yaw={:.6} pixels={:016x}",
-                            rendered.mesh_revision,
-                            rendered.camera_revision,
-                            self.camera_revision,
-                            is_latest,
-                            self.camera.yaw,
-                            byte_checksum(rendered.frame.pixels())
-                        )
-                    });
                     self.metrics.generation_time = rendered.generation_time;
                     self.metrics.raster_time = rendered.raster_time;
                     self.metrics.frame_size = Some(rendered.frame.size());
@@ -414,25 +401,11 @@ impl ModelPreview {
                 .orbit(animation_elapsed.as_secs_f32() * 0.6, 0.0);
             self.camera
                 .update_clip_planes(self.bounds.expect("bounds checked above"));
-            render_trace(|| {
-                format!(
-                    "auto-tick elapsed_ms={:.2} yaw={:.6} next_camera_rev={}",
-                    animation_elapsed.as_secs_f64() * 1000.0,
-                    self.camera.yaw,
-                    self.camera_revision.wrapping_add(1)
-                )
-            });
             self.request_rasterize();
         }
     }
 
     pub fn set_auto_rotate(&mut self, enabled: bool) {
-        render_trace(|| {
-            format!(
-                "auto-set enabled={} yaw={:.6} camera_rev={} status={:?}",
-                enabled, self.camera.yaw, self.camera_revision, self.status
-            )
-        });
         self.auto_rotate = enabled;
         self.last_animation_tick = Instant::now();
     }
@@ -448,12 +421,6 @@ impl ModelPreview {
     }
 
     pub fn stop_auto_rotate(&mut self) {
-        render_trace(|| {
-            format!(
-                "auto-stop yaw={:.6} camera_rev={}",
-                self.camera.yaw, self.camera_revision
-            )
-        });
         self.auto_rotate = false;
         self.last_animation_tick = Instant::now();
     }
@@ -576,45 +543,6 @@ fn display_protocol(protocol: ProtocolType) -> DisplayProtocol {
 fn next_kitty_image_id() -> u32 {
     static NEXT_ID: AtomicU32 = AtomicU32::new(1);
     std::process::id().rotate_left(16) ^ NEXT_ID.fetch_add(1, Ordering::Relaxed)
-}
-
-fn byte_checksum(bytes: &[u8]) -> u64 {
-    let step = (bytes.len() / 2048).max(1);
-    bytes
-        .iter()
-        .step_by(step)
-        .fold(0xcbf29ce484222325_u64, |hash, byte| {
-            (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
-        })
-}
-
-fn render_trace(message: impl FnOnce() -> String) {
-    static TRACE_FILE: OnceLock<Option<Mutex<std::fs::File>>> = OnceLock::new();
-    let Some(file) = TRACE_FILE
-        .get_or_init(|| {
-            let path = std::env::var_os("OPENSCAD_TUI_RENDER_TRACE")?;
-            OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(path)
-                .ok()
-                .map(Mutex::new)
-        })
-        .as_ref()
-    else {
-        return;
-    };
-    let message = message();
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis();
-    let thread = std::thread::current();
-    let thread_name = thread.name().unwrap_or("unnamed");
-    if let Ok(mut file) = file.lock() {
-        let _ = writeln!(file, "{timestamp} [{thread_name}] {}", message);
-        let _ = file.flush();
-    }
 }
 
 fn expand_tilde(path: PathBuf) -> PathBuf {

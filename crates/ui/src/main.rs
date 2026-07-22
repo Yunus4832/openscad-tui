@@ -99,7 +99,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     if let Err(err) = res {
-        println!("{:?}", err);
+        eprintln!("{err}");
     }
 
     Ok(())

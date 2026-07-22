@@ -3,18 +3,15 @@
 use crate::app::{App, CameraButtonRegion, Screen};
 use crate::preview::ModelPreviewStatus;
 use ratatui::{
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Constraint, Direction, Layout, Position, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph},
     Frame,
 };
 use tui_tree_widget::{Tree, TreeItem};
-use unicode_width::UnicodeWidthChar;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-const MODEL_PROTOCOL_WIDTH: usize = 10;
-const MODEL_STATUS_WIDTH: usize = 18;
-const MODEL_FRAME_SIZE_WIDTH: usize = 9;
 const MODEL_TIME_WIDTH: usize = 4;
 const MODEL_FPS_WIDTH: usize = 4;
 const MODEL_SIZE_KB_WIDTH: usize = 5;
@@ -75,7 +72,17 @@ fn draw_assembly_parts(f: &mut Frame, app: &mut App, area: Rect) {
             .find(|assembly| assembly.id == id || assembly.name == id)
     });
     let title = active
-        .map(|assembly| format!(" Assembly: {} ", assembly.name))
+        .map(|assembly| {
+            if app.selected_assembly_parts.is_empty() {
+                format!(" Assembly: {} ", assembly.name)
+            } else {
+                format!(
+                    " Assembly: {} ({} selected) ",
+                    assembly.name,
+                    app.selected_assembly_parts.len()
+                )
+            }
+        })
         .unwrap_or_else(|| " Assembly ".to_string());
     let rows = active.map(|assembly| assembly.hierarchy_rows());
     let visible_height = area.height.saturating_sub(2) as usize;
@@ -107,16 +114,20 @@ fn draw_assembly_parts(f: &mut Frame, app: &mut App, area: Rect) {
                 .take(visible_height)
                 .map(|(index, depth)| {
                     let part = &assembly.parts[*index];
-                    let selected = app.selected_assembly_part.as_deref() == Some(&part.id);
-                    let marker = if selected { ">" } else { " " };
-                    let visibility = if part.visible { "●" } else { "○" };
+                    let focused = app.selected_assembly_part.as_deref() == Some(&part.id);
+                    let marked = app.selected_assembly_parts.contains(&part.id);
+                    let visibility = if part.visible { " " } else { " *" };
+                    let mut content = format!("{}{visibility}{}", "  ".repeat(*depth), part.name);
+                    let row_width = area.width.saturating_sub(2) as usize;
+                    content.push_str(&" ".repeat(
+                        row_width.saturating_sub(UnicodeWidthStr::width(content.as_str())),
+                    ));
                     Line::styled(
-                        format!("{marker}{} {visibility} {}", "  ".repeat(*depth), part.name),
-                        if selected {
-                            Style::default()
-                                .fg(Color::Black)
-                                .bg(Color::Cyan)
-                                .add_modifier(Modifier::BOLD)
+                        content,
+                        if focused {
+                            Style::default().fg(Color::White).bg(Color::DarkGray)
+                        } else if marked {
+                            Style::default().fg(Color::White).bg(Color::Blue)
                         } else {
                             Style::default().fg(Color::White)
                         },
@@ -168,7 +179,7 @@ fn draw_assembly_details(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(
         Paragraph::new(lines).block(
             Block::default()
-                .title(" Selected Part ")
+                .title(" Focused Part ")
                 .borders(Borders::ALL)
                 .style(Style::default().fg(Color::Cyan)),
         ),
@@ -312,16 +323,45 @@ fn draw_tree(f: &mut Frame, app: &App, area: Rect) {
         Ok(tree) => {
             let tree_widget = tree
                 .block(block)
-                .highlight_style(
-                    Style::default()
-                        .bg(Color::DarkGray)
-                        .add_modifier(Modifier::BOLD),
-                )
+                .highlight_style(Style::default().bg(Color::DarkGray))
                 .node_open_symbol("~ ")
-                .node_closed_symbol("> ");
+                .node_closed_symbol("> ")
+                .node_no_children_symbol("  ");
 
             // Render stateful tree using RefCell's borrow_mut
             f.render_stateful_widget(tree_widget, area, &mut app.tree_state.borrow_mut());
+
+            // TreeItem text begins after the hierarchy prefix. Paint marked rows after the
+            // widget so multi-selection covers indentation and trailing space as well.
+            let inner = Rect::new(
+                area.x.saturating_add(1),
+                area.y.saturating_add(1),
+                area.width.saturating_sub(2),
+                area.height.saturating_sub(2),
+            );
+            let tree_state = app.tree_state.borrow();
+            let rendered_row_count = tree_state
+                .flatten(&tree_items)
+                .len()
+                .saturating_sub(tree_state.get_offset())
+                .min(inner.height as usize);
+            let rendered_bottom = inner
+                .y
+                .saturating_add(u16::try_from(rendered_row_count).unwrap_or(inner.height));
+            for y in inner.y..rendered_bottom {
+                let Some(path) = tree_state.rendered_at(Position::new(inner.x, y)) else {
+                    continue;
+                };
+                let marked = path
+                    .last()
+                    .is_some_and(|id| app.selected_nodes.contains(id));
+                if marked && path != tree_state.selected() {
+                    f.buffer_mut().set_style(
+                        Rect::new(inner.x, y, inner.width, 1),
+                        Style::default().bg(Color::Blue),
+                    );
+                }
+            }
         }
         Err(_) => {
             let para = Paragraph::new("Failed to render tree")
@@ -335,7 +375,6 @@ fn draw_tree(f: &mut Frame, app: &App, area: Rect) {
 /// Build TreeItems from entire AST (all sections)
 fn build_ast_tree_items(app: &App) -> Vec<TreeItem<'static, String>> {
     let ast = &app.ast;
-    let selected = &app.selected_nodes;
     let mut items = Vec::new();
 
     if ast.embedded_sources.iter().any(|source| source.editable) {
@@ -370,7 +409,7 @@ fn build_ast_tree_items(app: &App) -> Vec<TreeItem<'static, String>> {
                     },
                 };
                 let active = ast.active_source.as_deref() == Some(&source.virtual_path);
-                let marker = if active { "* " } else { "  " };
+                let marker = if active { "@ " } else { "  " };
                 TreeItem::new(
                     format!("__project_source_{index}"),
                     format!("{marker}[{role}] {}", source.virtual_path),
@@ -397,7 +436,7 @@ fn build_ast_tree_items(app: &App) -> Vec<TreeItem<'static, String>> {
             .enumerate()
             .map(|(index, assembly)| {
                 let marker = if active == Some(assembly.id.as_str()) {
-                    "* "
+                    "@ "
                 } else {
                     "  "
                 };
@@ -520,7 +559,7 @@ fn build_ast_tree_items(app: &App) -> Vec<TreeItem<'static, String>> {
                     .join(", ");
                 let display = format!("module {}({})", mod_def.name, params);
                 // Build children from module definition body
-                let body_children = build_tree_items(&mod_def.body, selected);
+                let body_children = build_tree_items(&mod_def.body);
                 TreeItem::new(id, display, body_children).expect("Failed to create TreeItem")
             })
             .collect();
@@ -536,7 +575,7 @@ fn build_ast_tree_items(app: &App) -> Vec<TreeItem<'static, String>> {
 
     // Modules section (module instantiations)
     if !ast.modules.is_empty() {
-        let module_children = build_tree_items(&ast.modules, selected);
+        let module_children = build_tree_items(&ast.modules);
         items.push(
             TreeItem::new(
                 "__modules".to_string(),
@@ -551,35 +590,25 @@ fn build_ast_tree_items(app: &App) -> Vec<TreeItem<'static, String>> {
 }
 
 /// Build TreeItems from AST modules
-fn build_tree_items(
-    modules: &[openscad_core::ModuleNode],
-    selected: &[String],
-) -> Vec<TreeItem<'static, String>> {
-    modules
-        .iter()
-        .map(|module| build_tree_item(module, selected))
-        .collect()
+fn build_tree_items(modules: &[openscad_core::ModuleNode]) -> Vec<TreeItem<'static, String>> {
+    modules.iter().map(build_tree_item).collect()
 }
 
 /// Build a single TreeItem with children
-fn build_tree_item(
-    module: &openscad_core::ModuleNode,
-    selected: &[String],
-) -> TreeItem<'static, String> {
-    let marker = if selected.contains(&module.id) {
-        "*"
+fn build_tree_item(module: &openscad_core::ModuleNode) -> TreeItem<'static, String> {
+    let display = module.get_display_name();
+    let name = if module.modifier.is_some() {
+        display.chars().skip(1).collect::<String>()
     } else {
-        ""
+        display
     };
-
-    let text = format!("{}{}", marker, module.get_display_name());
+    let modifier = module
+        .modifier
+        .map_or_else(String::new, |modifier| modifier.to_string());
+    let text = format!("{modifier}{name}");
     let id = module.id.clone();
 
-    let children: Vec<TreeItem<String>> = module
-        .children
-        .iter()
-        .map(|child| build_tree_item(child, selected))
-        .collect();
+    let children: Vec<TreeItem<String>> = module.children.iter().map(build_tree_item).collect();
 
     TreeItem::new(id, text, children).expect("Failed to create TreeItem")
 }
@@ -758,12 +787,12 @@ fn draw_preview(f: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn draw_model_preview(f: &mut Frame, app: &mut App, area: Rect) {
-    let title = model_preview_title(app);
+    let title = model_preview_title(app, area.width);
     draw_preview_surface(f, &mut app.model_preview, area, title);
 }
 
 fn draw_assembly_preview(f: &mut Frame, app: &mut App, area: Rect) {
-    let title = preview_title(&app.assembly_preview, "Assembly");
+    let title = preview_title(&app.assembly_preview, "Assembly", area.width);
     draw_preview_surface(f, &mut app.assembly_preview, area, title);
 }
 
@@ -809,45 +838,41 @@ fn preview_status(preview: &crate::preview::ModelPreview) -> String {
     }
 }
 
-fn model_preview_title(app: &App) -> String {
-    preview_title(&app.model_preview, "Model")
+fn model_preview_title(app: &App, panel_width: u16) -> String {
+    preview_title(&app.model_preview, "Model", panel_width)
 }
 
-fn preview_title(preview: &crate::preview::ModelPreview, label: &str) -> String {
-    let protocol = fixed_display_width(
-        &format!("{:?}", preview.protocol_type()),
-        MODEL_PROTOCOL_WIDTH,
-    );
-    let status = fixed_display_width(&preview_status(preview), MODEL_STATUS_WIDTH);
+fn preview_title(preview: &crate::preview::ModelPreview, label: &str, panel_width: u16) -> String {
+    let protocol = preview.protocol_type().as_str();
+    let status = compact_preview_status(preview);
     let frame_size = preview
         .metrics
         .frame_size
         .map(|size| format!("{}x{}", size.width, size.height))
         .unwrap_or_else(|| "-".to_string());
-    let frame_size = fixed_display_width(&frame_size, MODEL_FRAME_SIZE_WIDTH);
     let metrics = &preview.metrics;
-    let generation = fixed_metric(
+    let generation = bounded_metric(
         metrics.generation_time.as_secs_f64() * 1000.0,
         MODEL_TIME_WIDTH,
         0,
     );
-    let raster = fixed_metric(
+    let raster = bounded_metric(
         metrics.raster_time.as_secs_f64() * 1000.0,
         MODEL_TIME_WIDTH,
         0,
     );
-    let encode = fixed_metric(
+    let encode = bounded_metric(
         metrics.encode_time.as_secs_f64() * 1000.0,
         MODEL_TIME_WIDTH,
         0,
     );
-    let draw = fixed_metric(
+    let draw = bounded_metric(
         metrics.ui_draw_time.as_secs_f64() * 1000.0,
         MODEL_TIME_WIDTH,
         0,
     );
-    let fps = fixed_metric(metrics.presented_fps.into(), MODEL_FPS_WIDTH, 1);
-    let size_kb = fixed_metric(
+    let fps = bounded_metric(metrics.presented_fps.into(), MODEL_FPS_WIDTH, 0);
+    let size_kb = bounded_metric(
         (metrics.encoded_bytes / 1024) as f64,
         MODEL_SIZE_KB_WIDTH,
         0,
@@ -855,15 +880,53 @@ fn preview_title(preview: &crate::preview::ModelPreview, label: &str) -> String 
     let size_estimate_marker = if metrics.encoded_bytes_estimated {
         "~"
     } else {
-        " "
+        ""
     };
 
-    format!(
-        " {label} [{protocol}] {status} | {frame_size} G:{generation} R:{raster} E:{encode} D:{draw}ms {fps}fps {size_estimate_marker}{size_kb}KB ",
-    )
+    let identity = format!("{label}/{protocol}");
+    let candidates = [
+        format!(
+            " {identity} {status} {frame_size} G{generation} R{raster} E{encode} D{draw} {fps}f {size_estimate_marker}{size_kb}K "
+        ),
+        format!(
+            " {identity} {status} {frame_size} R{raster} E{encode} D{draw} {fps}f "
+        ),
+        format!(" {identity} {status} {fps}f "),
+        format!(" {identity} {status} "),
+        format!(" {identity} "),
+    ];
+    let available = panel_width.saturating_sub(2) as usize;
+    candidates
+        .into_iter()
+        .find(|candidate| UnicodeWidthStr::width(candidate.as_str()) <= available)
+        .unwrap_or_else(|| truncate_display_width(&format!(" {identity} "), available))
 }
 
-fn fixed_display_width(value: &str, width: usize) -> String {
+fn compact_preview_status(preview: &crate::preview::ModelPreview) -> String {
+    if preview.presentation_error().is_some() {
+        return "display!".to_string();
+    }
+    match &preview.status {
+        ModelPreviewStatus::Empty => "idle".to_string(),
+        ModelPreviewStatus::Stale => "stale".to_string(),
+        ModelPreviewStatus::Loading => "load".to_string(),
+        ModelPreviewStatus::Rasterizing => "raster".to_string(),
+        ModelPreviewStatus::Ready { triangles } => compact_triangle_count(*triangles),
+        ModelPreviewStatus::Failed(_) => "failed".to_string(),
+    }
+}
+
+fn compact_triangle_count(triangles: usize) -> String {
+    if triangles >= 1_000_000 {
+        format!("{:.1}Mtri", triangles as f64 / 1_000_000.0)
+    } else if triangles >= 10_000 {
+        format!("{}ktri", triangles / 1_000)
+    } else {
+        format!("{triangles}tri")
+    }
+}
+
+fn truncate_display_width(value: &str, width: usize) -> String {
     let mut result = String::new();
     let mut display_width = 0;
     for character in value.chars() {
@@ -874,11 +937,10 @@ fn fixed_display_width(value: &str, width: usize) -> String {
         result.push(character);
         display_width += character_width;
     }
-    result.extend(std::iter::repeat_n(' ', width - display_width));
     result
 }
 
-fn fixed_metric(value: f64, width: usize, precision: usize) -> String {
+fn bounded_metric(value: f64, width: usize, precision: usize) -> String {
     let formatted = if value.is_finite() {
         format!("{value:.precision$}")
     } else {
@@ -893,7 +955,7 @@ fn fixed_metric(value: f64, width: usize, precision: usize) -> String {
             format!("{}+", "9".repeat(width - 1))
         };
     }
-    format!("{formatted:>width$}")
+    formatted
 }
 
 fn draw_help_modal(f: &mut Frame, app: &App) {
@@ -1046,7 +1108,7 @@ mod tests {
     use crate::app::{App, InputMode};
     use crate::commands::{cmd_assembly, cmd_edit_scad, cmd_load_library};
     use crate::preview::ModelPreviewStatus;
-    use ratatui::{backend::TestBackend, Terminal};
+    use ratatui::{backend::TestBackend, style::Color, Terminal};
     use std::fs;
     use std::time::Duration;
     use unicode_width::UnicodeWidthStr;
@@ -1058,10 +1120,151 @@ mod tests {
     }
 
     #[test]
+    fn test_editor_tree_uses_color_for_selection_and_ascii_visibility_marker() {
+        let mut app = App::new();
+        let mut cube = openscad_core::ModuleNode::new_leaf(
+            "cube_1".to_string(),
+            "cube".to_string(),
+            Vec::new(),
+        );
+        cube.modifier = Some('*');
+        app.ast_mut().modules.push(cube);
+        app.selected_nodes.push("cube_1".to_string());
+        app.tree_state
+            .borrow_mut()
+            .open(vec!["__modules".to_string()]);
+        app.tree_state
+            .borrow_mut()
+            .select(vec!["__project_sources".to_string()]);
+        let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
+
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let screen = (0..buffer.area.height)
+            .flat_map(|y| (0..buffer.area.width).map(move |x| buffer[(x, y)].symbol()))
+            .collect::<String>();
+        assert!(screen.contains("*cube"));
+        assert!(!screen.contains(['✓', '●', '○']));
+        assert!((0..buffer.area.height).any(|y| {
+            (0..buffer.area.width).any(|x| {
+                buffer[(x, y)].symbol() == "c"
+                    && buffer[(x, y)].fg == Color::Cyan
+                    && buffer[(x, y)].bg == Color::Blue
+            })
+        }));
+        let cube_row = (0..buffer.area.height)
+            .find(|y| {
+                (0..app.ui_regions.tree.width)
+                    .map(|x| buffer[(x, *y)].symbol())
+                    .collect::<String>()
+                    .contains("*cube")
+            })
+            .unwrap();
+        let selected_row = (1..app.ui_regions.tree.width - 1)
+            .map(|x| buffer[(x, cube_row)].symbol())
+            .collect::<String>();
+        assert!(selected_row.starts_with("    *cube"), "{selected_row:?}");
+        assert_eq!(buffer[(1, cube_row)].bg, Color::Blue);
+        assert_eq!(
+            buffer[(app.ui_regions.tree.width - 2, cube_row)].bg,
+            Color::Blue
+        );
+        assert!(cube_row + 1 < app.ui_regions.tree.bottom().saturating_sub(1));
+        assert_ne!(buffer[(1, cube_row + 1)].bg, Color::Blue);
+        assert_ne!(
+            buffer[(app.ui_regions.tree.width - 2, cube_row + 1)].bg,
+            Color::Blue
+        );
+        assert_ne!(
+            buffer[(1, app.ui_regions.tree.bottom().saturating_sub(2))].bg,
+            Color::Blue
+        );
+
+        app.tree_state
+            .borrow_mut()
+            .select(vec!["__modules".to_string(), "cube_1".to_string()]);
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let focused_row = (1..app.ui_regions.tree.width - 1)
+            .map(|x| buffer[(x, cube_row)].symbol())
+            .collect::<String>();
+        assert!(focused_row.starts_with("    *cube"));
+        assert_eq!(buffer[(1, cube_row)].bg, Color::DarkGray);
+        assert_eq!(
+            buffer[(app.ui_regions.tree.width - 2, cube_row)].bg,
+            Color::DarkGray
+        );
+    }
+
+    #[test]
+    fn test_editor_tree_uses_expand_flags_and_structural_indentation() {
+        let mut app = App::new();
+        let sphere = openscad_core::ModuleNode::new_leaf(
+            "sphere_1".to_string(),
+            "sphere".to_string(),
+            Vec::new(),
+        );
+        let mut difference = openscad_core::ModuleNode::new_container(
+            "difference_1".to_string(),
+            "difference".to_string(),
+            Vec::new(),
+        );
+        let mut hidden_cube = openscad_core::ModuleNode::new_leaf(
+            "cube_1".to_string(),
+            "cube".to_string(),
+            Vec::new(),
+        );
+        hidden_cube.modifier = Some('*');
+        difference.children.push(hidden_cube);
+        difference
+            .children
+            .push(openscad_core::ModuleNode::new_leaf(
+                "cube_2".to_string(),
+                "cube".to_string(),
+                Vec::new(),
+            ));
+        app.ast_mut().modules = vec![sphere, difference];
+        app.tree_state
+            .borrow_mut()
+            .open(vec!["__modules".to_string()]);
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let tree_width = app.ui_regions.tree.width;
+        let rows = |terminal: &Terminal<TestBackend>| {
+            let buffer = terminal.backend().buffer();
+            (0..buffer.area.height)
+                .map(|y| {
+                    (1..tree_width - 1)
+                        .map(|x| buffer[(x, y)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+        };
+        let collapsed = rows(&terminal);
+        assert!(collapsed.iter().any(|row| row.starts_with("~ [Modules]")));
+        assert!(collapsed.iter().any(|row| row.starts_with("    sphere")));
+        assert!(collapsed
+            .iter()
+            .any(|row| row.starts_with("  > difference")));
+        assert!(!collapsed.iter().any(|row| row.contains("*cube")));
+
+        app.tree_state
+            .borrow_mut()
+            .open(vec!["__modules".to_string(), "difference_1".to_string()]);
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let expanded = rows(&terminal);
+        assert!(expanded.iter().any(|row| row.starts_with("  ~ difference")));
+        assert!(expanded.iter().any(|row| row.starts_with("      *cube")));
+        assert!(expanded.iter().any(|row| row.starts_with("      cube")));
+    }
+
+    #[test]
     fn test_navigation_status_update() {
         let mut app = App::new();
         app.update_navigation_status();
-        assert_eq!(app.message.as_deref(), Some("> [Project Sources]"));
+        assert_eq!(app.message.as_deref(), Some("Current: [Project Sources]"));
     }
 
     #[test]
@@ -1088,6 +1291,42 @@ mod tests {
         assert!(screen.contains("Project Sources"));
         assert!(screen.contains("main.scad"));
         assert!(!screen.contains("hidden_external_library.scad"));
+    }
+
+    #[test]
+    fn test_project_source_status_columns_stay_aligned() {
+        let mut app = App::new();
+        app.ast_mut()
+            .embedded_sources
+            .push(openscad_core::EmbeddedSourceFile::empty(
+                "body.scad".to_string(),
+                openscad_core::EmbeddedSourceRole::Dependency,
+            ));
+        app.tree_state
+            .borrow_mut()
+            .open(vec!["__project_sources".to_string()]);
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let rows = (0..buffer.area.height)
+            .map(|y| {
+                (1..app.ui_regions.tree.width - 1)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            rows.iter()
+                .any(|row| row.starts_with("    @ [entry] main.scad")),
+            "{rows:?}"
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row.starts_with("      [part] body.scad")),
+            "{rows:?}"
+        );
     }
 
     #[test]
@@ -1154,8 +1393,9 @@ mod tests {
         assert!(shortcuts.contains("h/j/k/l Orbit"));
         assert!(shortcuts.contains("Arrows Pan"));
         assert!(shortcuts.contains("+/- Zoom"));
-        assert!(shortcuts.contains("1..7 Views"));
-        assert!(shortcuts.contains("Esc/q Close"));
+        assert!(shortcuts.contains("R Render"));
+        assert!(shortcuts.contains(": Command"));
+        assert!(!shortcuts.contains("1..7 Views"));
         let buttons = row(28);
         assert!(buttons.contains("[Source]"));
         assert!(buttons.contains("[Fit]"));
@@ -1170,6 +1410,11 @@ mod tests {
         let mut app = App::new();
         cmd_assembly(&mut app, &["new", "robot"]).unwrap();
         cmd_assembly(&mut app, &["add", "main.scad", "body"]).unwrap();
+        cmd_assembly(&mut app, &["add", "main.scad", "arm"]).unwrap();
+        cmd_assembly(&mut app, &["parent", "arm", "body"]).unwrap();
+        cmd_assembly(&mut app, &["visibility", "arm", "hide"]).unwrap();
+        app.selected_assembly_part = Some("body".to_string());
+        app.selected_assembly_parts.push("arm".to_string());
         let mut terminal = Terminal::new(TestBackend::new(110, 30)).unwrap();
 
         terminal.draw(|frame| draw(frame, &mut app)).unwrap();
@@ -1185,64 +1430,137 @@ mod tests {
             .ui_regions
             .camera_buttons
             .iter()
-            .any(|button| button.command == "assembly visibility toggle"));
+            .any(|button| button.command == "assembly render"));
+        assert!(app
+            .ui_regions
+            .camera_buttons
+            .iter()
+            .any(|button| button.command == "camera fit"));
+        assert!(app
+            .ui_regions
+            .camera_buttons
+            .iter()
+            .any(|button| button.command == "camera projection toggle"));
+        assert!(app
+            .ui_regions
+            .camera_buttons
+            .iter()
+            .any(|button| button.command == "display axes toggle"));
         assert!(app
             .ui_regions
             .camera_buttons
             .iter()
             .any(|button| button.command == "camera auto-rotate toggle"));
-        assert!(app
-            .ui_regions
-            .camera_buttons
-            .iter()
-            .any(|button| button.command == "assembly copy"));
-        assert!(app
-            .ui_regions
-            .camera_buttons
-            .iter()
-            .any(|button| button.command == "assembly paste"));
+        assert!(!app.ui_regions.camera_buttons.iter().any(|button| matches!(
+            button.command.as_str(),
+            "assembly visibility toggle" | "assembly copy" | "assembly paste"
+        )));
         let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(36, 1)].bg, Color::DarkGray);
         let screen = (0..buffer.area.height)
             .flat_map(|y| (0..buffer.area.width).map(move |x| buffer[(x, y)].symbol()))
             .collect::<String>();
         assert!(screen.contains("Assembly: robot"));
+        assert!(screen.contains("1 selected"));
+        assert!(screen.contains(" body"));
+        assert!(screen.contains("  *arm"));
+        assert!(!screen.contains(['✓', '●', '○']));
+        assert!((0..buffer.area.height).any(|y| {
+            (0..buffer.area.width).any(|x| {
+                buffer[(x, y)].symbol() == "b"
+                    && buffer[(x, y)].fg == Color::White
+                    && buffer[(x, y)].bg == Color::DarkGray
+            })
+        }));
+        let arm_row = (0..buffer.area.height)
+            .find(|y| {
+                (1..app.ui_regions.tree.width - 1)
+                    .map(|x| buffer[(x, *y)].symbol())
+                    .collect::<String>()
+                    .contains("  *arm")
+            })
+            .unwrap();
+        let body_row = (0..buffer.area.height)
+            .map(|y| {
+                (1..app.ui_regions.tree.width - 1)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .find(|row| row.starts_with(" body"))
+            .unwrap_or_else(|| panic!("assembly rows: {screen:?}"));
+        assert!(body_row.starts_with(" body"));
+        let selected_arm_row = (1..app.ui_regions.tree.width - 1)
+            .map(|x| buffer[(x, arm_row)].symbol())
+            .collect::<String>();
+        assert!(selected_arm_row.starts_with("   *arm"));
+        assert_eq!(buffer[(1, arm_row)].bg, Color::Blue);
+        assert_eq!(buffer[(36, arm_row)].bg, Color::Blue);
         assert!(screen.contains("body"));
-        assert!(screen.contains("Selected Part"));
+        assert!(screen.contains("Focused Part"));
         assert!(screen.contains("Source: main.scad"));
         assert!(screen.contains("T: [0.000, 0.000, 0.000]"));
     }
 
     #[test]
-    fn test_model_preview_metric_labels_stay_in_fixed_columns() {
+    fn test_narrow_assembly_toolbar_keeps_high_priority_controls() {
         let mut app = App::new();
-        app.model_preview.status = ModelPreviewStatus::Rasterizing;
+        cmd_assembly(&mut app, &["new", "robot"]).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(48, 20)).unwrap();
+
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+        let commands = app
+            .ui_regions
+            .camera_buttons
+            .iter()
+            .map(|button| button.command.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            commands,
+            [
+                "assembly close",
+                "assembly render",
+                "camera fit",
+                "camera projection toggle",
+                "display axes toggle",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_model_preview_title_adapts_to_panel_width() {
+        let mut app = App::new();
+        app.model_preview.status = ModelPreviewStatus::Ready { triangles: 123_456 };
+        app.model_preview.metrics.frame_size =
+            Some(openscad_render::PixelSize::new(640, 480).unwrap());
         app.model_preview.metrics.generation_time = Duration::from_millis(1);
         app.model_preview.metrics.raster_time = Duration::from_millis(9);
         app.model_preview.metrics.encode_time = Duration::from_millis(99);
         app.model_preview.metrics.ui_draw_time = Duration::from_millis(999);
-        app.model_preview.metrics.presented_fps = 1.0;
-        app.model_preview.metrics.encoded_bytes = 1024;
-        let short_values = model_preview_title(&app);
-
-        app.model_preview.status = ModelPreviewStatus::Ready { triangles: 123_456 };
-        app.model_preview.metrics.generation_time = Duration::from_secs(120);
-        app.model_preview.metrics.raster_time = Duration::from_secs(12);
-        app.model_preview.metrics.encode_time = Duration::from_millis(1_234);
-        app.model_preview.metrics.ui_draw_time = Duration::from_millis(10_000);
-        app.model_preview.metrics.presented_fps = 1200.0;
-        app.model_preview.metrics.encoded_bytes = 128 * 1024 * 1024;
+        app.model_preview.metrics.presented_fps = 30.0;
+        app.model_preview.metrics.encoded_bytes = 128 * 1024;
         app.model_preview.metrics.encoded_bytes_estimated = true;
-        let long_values = model_preview_title(&app);
-
-        for label in [" G:", " R:", " E:", " D:", "fps", "KB"] {
-            let short_index = short_values.find(label).unwrap();
-            let long_index = long_values.find(label).unwrap();
-            assert_eq!(
-                UnicodeWidthStr::width(&short_values[..short_index]),
-                UnicodeWidthStr::width(&long_values[..long_index]),
-                "{label} moved when its preceding value changed"
-            );
+        let wide = model_preview_title(&app, 120);
+        assert!(wide.contains("Model/halfblocks"));
+        assert!(wide.contains("123ktri"));
+        assert!(wide.contains("640x480"));
+        for metric in ["G1", "R9", "E99", "D999", "30f", "~128K"] {
+            assert!(wide.contains(metric), "missing {metric} from {wide:?}");
         }
+
+        let medium = model_preview_title(&app, 60);
+        assert!(UnicodeWidthStr::width(medium.as_str()) <= 58);
+        assert!(medium.contains("Model/halfblocks"));
+        assert!(medium.contains("30f"));
+        assert!(!medium.contains("G1"));
+
+        let narrow = model_preview_title(&app, 32);
+        assert!(UnicodeWidthStr::width(narrow.as_str()) <= 30);
+        assert!(narrow.contains("Model/halfblocks"));
+        assert!(!narrow.contains("640x480"));
+
+        let tiny = model_preview_title(&app, 12);
+        assert!(UnicodeWidthStr::width(tiny.as_str()) <= 10);
     }
 
     #[test]

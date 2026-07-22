@@ -20,6 +20,14 @@ pub struct ProjectSourceClipboard {
     pub cut: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct AssemblyHistoryState {
+    pub assemblies: Vec<openscad_assembly::AssemblyDocument>,
+    pub active_assembly: Option<String>,
+    pub focused_part: Option<String>,
+    pub selected_parts: Vec<String>,
+}
+
 /// Input buffer with cursor position management
 #[derive(Debug, Clone)]
 pub struct InputBuffer {
@@ -363,6 +371,8 @@ pub struct App {
     pub assemblies: Vec<openscad_assembly::AssemblyDocument>,
     pub active_assembly: Option<String>,
     pub selected_assembly_part: Option<String>,
+    /// Marked assembly parts for batch operations; the focused part remains separate.
+    pub selected_assembly_parts: Vec<String>,
     pub assembly_scroll_offset: usize,
     pub assembly_mesh_cache: std::collections::HashMap<
         openscad_assembly::MeshSourceRef,
@@ -370,6 +380,8 @@ pub struct App {
     >,
     /// Application-local clipboard for one rigid assembly part instance.
     pub assembly_clipboard: Option<openscad_assembly::PartInstance>,
+    pub assembly_undo_stack: VecDeque<AssemblyHistoryState>,
+    pub assembly_redo_stack: VecDeque<AssemblyHistoryState>,
     pub library: LibraryManager,
     pub command_registry: CommandRegistry,
     pub screen: Screen,
@@ -442,9 +454,12 @@ impl App {
             assemblies: Vec::new(),
             active_assembly: None,
             selected_assembly_part: None,
+            selected_assembly_parts: Vec::new(),
             assembly_scroll_offset: 0,
             assembly_mesh_cache: std::collections::HashMap::new(),
             assembly_clipboard: None,
+            assembly_undo_stack: VecDeque::with_capacity(100),
+            assembly_redo_stack: VecDeque::with_capacity(100),
             library: LibraryManager::new(),
             command_registry: CommandRegistry::new(),
             screen: Screen::Editor,
@@ -876,6 +891,51 @@ impl App {
         self.redo_stack.clear();
     }
 
+    pub fn assembly_history_state(&self) -> AssemblyHistoryState {
+        AssemblyHistoryState {
+            assemblies: self.assemblies.clone(),
+            active_assembly: self.active_assembly.clone(),
+            focused_part: self.selected_assembly_part.clone(),
+            selected_parts: self.selected_assembly_parts.clone(),
+        }
+    }
+
+    pub fn record_assembly_undo(&mut self, state: AssemblyHistoryState) {
+        if self.assembly_undo_stack.len() >= 100 {
+            self.assembly_undo_stack.pop_front();
+        }
+        self.assembly_undo_stack.push_back(state);
+        self.assembly_redo_stack.clear();
+    }
+
+    fn restore_assembly_history_state(&mut self, state: AssemblyHistoryState) {
+        self.assemblies = state.assemblies;
+        self.active_assembly = state.active_assembly;
+        self.selected_assembly_part = state.focused_part;
+        self.selected_assembly_parts = state.selected_parts;
+        self.saved = false;
+    }
+
+    pub fn undo_assembly(&mut self) -> bool {
+        let Some(previous) = self.assembly_undo_stack.pop_back() else {
+            return false;
+        };
+        let current = self.assembly_history_state();
+        self.assembly_redo_stack.push_back(current);
+        self.restore_assembly_history_state(previous);
+        true
+    }
+
+    pub fn redo_assembly(&mut self) -> bool {
+        let Some(next) = self.assembly_redo_stack.pop_back() else {
+            return false;
+        };
+        let current = self.assembly_history_state();
+        self.assembly_undo_stack.push_back(current);
+        self.restore_assembly_history_state(next);
+        true
+    }
+
     pub fn undo(&mut self) {
         if let Some(prev) = self.undo_stack.pop_back() {
             self.redo_stack.push_back(self.ast.clone());
@@ -949,7 +1009,7 @@ impl App {
                 self.find_module_name(&node_id)
                     .unwrap_or_else(|| node_id.clone())
             };
-            self.set_info(&format!("> {}", display_name));
+            self.set_info(&format!("Current: {}", display_name));
         } else {
             self.clear_message();
         }

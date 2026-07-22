@@ -110,11 +110,17 @@ cargo build --release
 | `:` | 进入命令模式 |
 | `?` | 显示帮助 |
 | `q` / `Ctrl+C` | 退出 |
+| `Q` | 强制退出并丢弃未保存变更；在 Editor、Model 和 Assembly Screen 中均有效 |
 
 命令输入模式支持方向键、Home、End、Backspace、Delete、命令历史，以及 `Tab` 补全。
 存在多个候选时重复按 `Tab` 可切换候选，按 `Enter` 应用当前候选。
 最近 100 条用户命令会跨启动持久化到平台本地数据目录的
 `openscad-tui/history.json`（Linux 通常为 `~/.local/share/openscad-tui/history.json`）。
+
+Editor 与 Assembly 的节点采用同一套紧凑状态语义：深灰整行背景表示当前焦点，蓝色整行背景
+表示多选，两者都不使用字符 flag，也不改变文字颜色。Source 树中的 `>` / `~` 仅表示折叠／
+展开，父子层级每级缩进两格；`*` 紧贴名称表示隐藏，显示状态留空。节点状态只使用普通 ASCII
+字符。
 
 结构编辑命令统一遵循“选中节点优先，否则使用当前节点”。`delete`
 剪切整个模块子树到应用内剪贴板；`remove` 只删除目标节点并将子节点提升到父节点；`replace`
@@ -312,7 +318,7 @@ wq
   完整源码 AST、定义索引和依赖类型一起嵌入项目包。项目目录内的主文件与配件文件可编辑；
   BOSL 等外部库保持只读，但仍会参与补全和渲染。
 - `[Project Sources]` 只展示项目内可编辑的 `entry` 和 `part` 文件，已加载或经
-  `use` / `include` 引入的只读库不会显示在这里。`*` 表示当前编辑缓冲区；在源文件
+  `use` / `include` 引入的只读库不会显示在这里。`@` 表示当前编辑缓冲区；在源文件
   上按 `Enter` 即可切换。
 - `[Assemblies]` 在 Source Screen 中列出项目已有装配体、零件数量和当前装配标记；在装配体
   上按 `Enter` 进入对应 Assembly Screen。
@@ -364,7 +370,7 @@ wq
 - 库：`library load|list|remove`
 - 模型：`model render|preview|view|export|toggle|close`
 - 观察：`camera projection|view|orbit|pan|zoom|fit|auto-rotate`、`display axes|protocol`
-- 装配：`assembly new|open|list|add|select|copy|paste|remove|parent|translate|rotate|scale|pivot|visibility|render|export|close`
+- 装配：`assembly new|open|list|add|select|copy|paste|remove|parent|translate|rotate|scale|pivot|visibility|undo|redo|render|export|close`
 - 系统：`help`、`version`、`diagnostics [file]`、`quit`、`quit!`、`wq`
 
 ## 零件装配与 DAE 导出
@@ -405,12 +411,22 @@ assembly export exports/robot.dae
 机械臂关节时很有用。普通摆放只需要 translate/rotate/scale，可以一直保持 pivot 为零。
 
 Assembly Screen 左侧显示零件层级与当前零件的 source、父级、可见性和 TRS/pivot，右侧
-显示共享多网格场景。`j/k` 选择零件，`v` 切换其可见性，`Space` 与 Model Screen 一致用于
-启停自动旋转，`d` 删除，`x` 切换坐标轴，`R` 重新编译并渲染，`Esc/q/P` 返回 Source。
+显示共享多网格场景。`j/k` 移动当前零件焦点，`v` 对焦点零件进行多选标记，`Space` 显示或
+隐藏已标记零件；没有标记时作用于当前焦点。`d` 删除标记集合或当前零件，`x` 切换坐标轴，
+`R` 重新编译并渲染，`u` / `Ctrl+R` 执行装配撤销/重做，`Esc/q/P` 返回 Source。
+焦点行使用深灰整行背景，多选零件使用蓝色整行背景；两者不改变文字颜色，也不显示额外标记。
+`assembly select toggle|clear` 提供与 `v` 和清空
+多选等价的命令能力；无显式零件参数的 visibility 和变换命令同样遵循“多选优先，否则当前”。
+`assembly undo|redo` 使用独立于源码 AST 的装配历史，覆盖新增、粘贴、删除、父级、变换和
+可见性修改；撤销误删会同时恢复焦点和多选集合。
 `a`、`n`、`e` 分别预填 add、new、export 命令；`t/r/s/o/g` 会把当前零件及其
 translate/rotate/scale/pivot/parent 值带入命令行，直接修改即可。鼠标可选择零件并使用与
 Model Screen 相同的环绕、右键平移和滚轮缩放；`y/p` 复制和粘贴零件。Assembly 中的
-`p` 因此不再切换投影；Assembly 中需要通过 `camera projection toggle` 命令切换投影。
+`p` 因此不再切换投影；可以点击 Ortho/Persp 按钮或执行 `camera projection toggle` 命令。
+底栏优先提供 Source、Render、Fit、投影、坐标轴、Front、Top、Iso 和自动旋转等预览控制；
+Assembly 的自动旋转只通过 Auto/Stop 按钮或 `camera auto-rotate` 命令控制，不占用 `Space`。
+Hide、Copy、Paste 等结构操作保留快捷键与命令，但不再占用按钮空间。顶部只提示选择、变换、
+可见性、渲染和命令入口等核心按键。
 所有快捷键和按钮都通过已注册的 `assembly`、`camera`、`display axes`、`display protocol`
 命令执行。复制实例会继承最初的命名基底，
 例如再次复制 `arm2` 会继续得到 `arm3`，不会生成 `arm22`。
