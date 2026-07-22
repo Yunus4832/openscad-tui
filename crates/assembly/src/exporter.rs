@@ -284,6 +284,20 @@ mod tests {
                     < 1.0e-5
             );
         }
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("round-trip.dae");
+        fs::write(&path, &xml).unwrap();
+        let scene = openscad_render::read_model_file(path).unwrap();
+        let imported = scene.instances[0].transform;
+        for point in [Vec3::ZERO, Vec3::X, Vec3::Y, Vec3::Z] {
+            assert!(
+                imported
+                    .transform_point3(point)
+                    .distance(expected.transform_point3(point))
+                    < 1.0e-5
+            );
+        }
     }
 
     #[test]

@@ -646,6 +646,7 @@ dependencies = [
  "glam",
  "openscad-render",
  "serde",
+ "tempfile",
  "thiserror",
 ]
 
@@ -671,6 +672,7 @@ name = "openscad-render"
 version = "0.0.1"
 dependencies = [
  "glam",
+ "roxmltree",
  "stl_io",
  "tempfile",
  "thiserror",
@@ -690,7 +692,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "openscad-ui"
+name = "openscad-tui"
 version = "0.0.1"
 dependencies = [
  "clap",
@@ -871,6 +873,15 @@ dependencies = [
  "getrandom 0.2.17",
  "libredox",
  "thiserror",
+]
+
+[[package]]
+name = "roxmltree"
+version = "0.21.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f1964b10c76125c36f8afe190065a4bf9a87bf324842c05701330bba9f1cacbb"
+dependencies = [
+ "memchr",
 ]
 
 [[package]]

@@ -35,7 +35,7 @@ const HISTORY_FILE_NAME: &str = "history.json";
     about = "A structured terminal editor for OpenSCAD"
 )]
 struct Cli {
-    /// .scadtui project, .scad source, or .off/.stl model to open
+    /// .scadtui project, .scad source, or .off/.stl/.dae model to open
     file: Option<PathBuf>,
 }
 
@@ -59,7 +59,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             .map(str::to_ascii_lowercase);
         match extension.as_deref() {
             Some("scad") => cmd_edit_scad(&mut app, &filename)?,
-            Some("off" | "stl") => {
+            Some("off" | "stl" | "dae") => {
                 cmd_view(&mut app, &filename)?;
                 app.preview_close_action = PreviewCloseAction::Quit;
             }

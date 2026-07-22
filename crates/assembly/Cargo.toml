@@ -10,3 +10,6 @@ serde.workspace = true
 thiserror.workspace = true
 glam.workspace = true
 openscad-render = { path = "../render" }
+
+[dev-dependencies]
+tempfile.workspace = true

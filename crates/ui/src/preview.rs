@@ -214,10 +214,10 @@ impl ModelPreview {
     }
 
     pub fn view_file(&mut self, path: PathBuf) -> Result<(), String> {
-        self.load(
-            MeshInput::File(expand_tilde(path)),
-            OpenScadGenerator::new("openscad"),
-        )
+        let started = Instant::now();
+        let scene = openscad_render::read_model_file(expand_tilde(path))
+            .map_err(|error| error.to_string())?;
+        self.render_scene(scene, started.elapsed())
     }
 
     pub fn render_scene(

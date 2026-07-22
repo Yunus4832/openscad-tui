@@ -96,6 +96,7 @@ impl Transform {
 pub struct PartInstance {
     pub id: String,
     pub name: String,
+    pub name_base: String,
     pub source: MeshSourceRef,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<String>,
@@ -132,10 +133,12 @@ impl AssemblyDocument {
         source: MeshSourceRef,
         name: impl Into<String>,
     ) -> Result<&PartInstance> {
-        let (name, id) = self.unique_part_identity(name.into());
+        let name_base = name.into();
+        let (name, id) = self.unique_part_identity(name_base.clone());
         self.parts.push(PartInstance {
             id,
             name,
+            name_base,
             source,
             parent: None,
             transform: Transform::default(),
@@ -589,9 +592,17 @@ mod tests {
             assembly
                 .parts
                 .iter()
-                .map(|part| (part.name.as_str(), part.id.as_str()))
+                .map(|part| (
+                    part.name.as_str(),
+                    part.id.as_str(),
+                    part.name_base.as_str()
+                ))
                 .collect::<Vec<_>>(),
-            vec![("arm", "arm"), ("arm2", "arm2"), ("arm3", "arm3")]
+            vec![
+                ("arm", "arm", "arm"),
+                ("arm2", "arm2", "arm"),
+                ("arm3", "arm3", "arm")
+            ]
         );
     }
 

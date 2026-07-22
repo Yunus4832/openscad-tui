@@ -33,7 +33,10 @@ pub enum RenderError {
     #[error("invalid STL data: {0}")]
     InvalidStl(String),
 
-    #[error("unsupported mesh file format for '{path}'; expected .off or .stl")]
+    #[error("invalid COLLADA data: {0}")]
+    InvalidDae(String),
+
+    #[error("unsupported model file format for '{path}'; expected .off, .stl, or .dae")]
     UnsupportedMeshFormat { path: String },
 
     #[error("I/O error: {0}")]
@@ -71,7 +74,7 @@ impl RenderError {
             Self::OpenScadFailed { exit_code, .. } => {
                 format!("OpenSCAD failed (exit code {exit_code:?}); run :diagnostics")
             }
-            Self::InvalidOff(_) | Self::InvalidStl(_) => {
+            Self::InvalidOff(_) | Self::InvalidStl(_) | Self::InvalidDae(_) => {
                 format!("could not parse model: {self}; run :diagnostics")
             }
             _ => self.to_string(),

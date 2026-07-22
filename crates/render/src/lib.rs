@@ -1,6 +1,7 @@
 //! Mesh generation and renderer-independent model preview primitives.
 
 mod camera;
+mod dae;
 mod error;
 mod exporter;
 mod framebuffer;
@@ -18,7 +19,7 @@ pub use error::{RenderError, Result};
 pub use exporter::write_dae;
 pub use framebuffer::{Framebuffer, PixelSize, RgbaFrame};
 pub use glam::{Mat4, Vec2, Vec3, Vec4};
-pub use importer::{read_mesh_file, MeshFileFormat};
+pub use importer::{read_mesh_file, read_model_file, ModelFileFormat};
 pub use mesh::{Aabb, Mesh};
 pub use off::{parse_off, read_off};
 pub use openscad::{

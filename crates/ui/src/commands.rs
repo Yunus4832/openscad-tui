@@ -40,7 +40,7 @@ pub fn cmd_view(app: &mut App, filename: &str) -> CommandResult<()> {
             path.display()
         )));
     }
-    openscad_render::MeshFileFormat::from_path(&path)
+    openscad_render::ModelFileFormat::from_path(&path)
         .map_err(|error| CommandError::Custom(error.to_string()))?;
     app.model_preview
         .view_file(path)
@@ -716,7 +716,7 @@ pub fn cmd_assembly(app: &mut App, args: &[&str]) -> CommandResult<()> {
                 }),
             };
             let pasted_id = active_assembly_mut(app)?
-                .add_part(copied.source.clone(), copied.name.clone())
+                .add_part(copied.source.clone(), copied.name_base.clone())
                 .map_err(|error| CommandError::Custom(error.to_string()))?
                 .id
                 .clone();
@@ -4450,11 +4450,15 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
         "view",
         Vec::<&str>::new(),
         |app, args| cmd_view(app, args[0]),
-        "Preview an OFF or STL mesh file without importing it into the project",
+        "Preview an OFF, STL, or static DAE model without importing it into the project",
         1,
         Some(1),
-        "view <model.off|model.stl>",
-        vec!["view model.off", "view exported/model.stl"],
+        "view <model.off|model.stl|scene.dae>",
+        vec![
+            "view model.off",
+            "view exported/model.stl",
+            "view assembly.dae",
+        ],
         CommandType::File,
         false,
         true,
@@ -4650,8 +4654,10 @@ mod tests {
         assert!(!pasted.visible);
         assert_eq!(app.selected_assembly_part.as_deref(), Some("arm2"));
 
+        cmd_assembly(&mut app, &["copy"]).unwrap();
         cmd_assembly(&mut app, &["paste", "root"]).unwrap();
         assert_eq!(assembly_part(&app, "arm3").parent, None);
+        assert_eq!(assembly_part(&app, "arm3").name_base, "arm");
     }
 
     #[test]
@@ -5130,15 +5136,34 @@ mod tests {
     }
 
     #[test]
-    fn test_view_rejects_dae_inputs_explicitly() {
+    fn test_view_loads_a_static_dae_scene() {
         let directory = tempfile::tempdir().unwrap();
         let model = directory.path().join("scene.dae");
-        fs::write(&model, "<COLLADA/>").unwrap();
+        fs::write(
+            &model,
+            r##"<COLLADA xmlns="http://www.collada.org/2005/11/COLLADASchema" version="1.4.1">
+                <asset><up_axis>Z_UP</up_axis></asset>
+                <library_geometries><geometry id="g"><mesh>
+                  <source id="p"><float_array id="pa" count="9">0 0 0 1 0 0 0 1 0</float_array>
+                    <technique_common><accessor source="#pa" count="3" stride="3"><param name="X"/><param name="Y"/><param name="Z"/></accessor></technique_common>
+                  </source>
+                  <vertices id="v"><input semantic="POSITION" source="#p"/></vertices>
+                  <triangles count="1"><input semantic="VERTEX" source="#v" offset="0"/><p>0 1 2</p></triangles>
+                </mesh></geometry></library_geometries>
+                <library_visual_scenes><visual_scene id="Scene"><node><instance_geometry url="#g"/></node></visual_scene></library_visual_scenes>
+                <scene><instance_visual_scene url="#Scene"/></scene>
+              </COLLADA>"##,
+        )
+        .unwrap();
         let mut app = App::new();
 
-        let error = cmd_view(&mut app, model.to_str().unwrap()).unwrap_err();
+        cmd_view(&mut app, model.to_str().unwrap()).unwrap();
 
-        assert!(error.to_string().contains("expected .off or .stl"));
+        assert_eq!(app.screen, crate::app::Screen::ModelPreview);
+        assert!(matches!(
+            app.model_preview.status,
+            crate::preview::ModelPreviewStatus::Loading
+        ));
     }
 
     #[test]

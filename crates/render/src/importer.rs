@@ -2,15 +2,16 @@ use std::fs::File;
 use std::io::BufReader;
 use std::path::Path;
 
-use crate::{read_off, Mesh, RenderError, Result, Vec3};
+use crate::{dae::read_dae, read_off, Mesh, RenderError, RenderScene, Result, Vec3};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MeshFileFormat {
+pub enum ModelFileFormat {
     Off,
     Stl,
+    Dae,
 }
 
-impl MeshFileFormat {
+impl ModelFileFormat {
     pub fn from_path(path: &Path) -> Result<Self> {
         match path
             .extension()
@@ -20,6 +21,7 @@ impl MeshFileFormat {
         {
             Some("off") => Ok(Self::Off),
             Some("stl") => Ok(Self::Stl),
+            Some("dae") => Ok(Self::Dae),
             _ => Err(RenderError::UnsupportedMeshFormat {
                 path: path.display().to_string(),
             }),
@@ -29,12 +31,25 @@ impl MeshFileFormat {
 
 pub fn read_mesh_file(path: impl AsRef<Path>) -> Result<Mesh> {
     let path = path.as_ref();
-    match MeshFileFormat::from_path(path)? {
-        MeshFileFormat::Off => {
+    match ModelFileFormat::from_path(path)? {
+        ModelFileFormat::Off => {
             let file = File::open(path).map_err(io_error)?;
             read_off(BufReader::new(file))
         }
-        MeshFileFormat::Stl => read_stl(path),
+        ModelFileFormat::Stl => read_stl(path),
+        ModelFileFormat::Dae => Err(RenderError::InvalidDae(
+            "COLLADA contains a scene; load it through read_model_file".into(),
+        )),
+    }
+}
+
+pub fn read_model_file(path: impl AsRef<Path>) -> Result<RenderScene> {
+    let path = path.as_ref();
+    match ModelFileFormat::from_path(path)? {
+        ModelFileFormat::Off | ModelFileFormat::Stl => {
+            read_mesh_file(path).map(RenderScene::single)
+        }
+        ModelFileFormat::Dae => read_dae(path),
     }
 }
 
@@ -80,19 +95,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn detects_supported_mesh_extensions_case_insensitively() {
+    fn detects_supported_model_extensions_case_insensitively() {
         assert_eq!(
-            MeshFileFormat::from_path(Path::new("part.OFF")),
-            Ok(MeshFileFormat::Off)
+            ModelFileFormat::from_path(Path::new("part.OFF")),
+            Ok(ModelFileFormat::Off)
         );
         assert_eq!(
-            MeshFileFormat::from_path(Path::new("part.StL")),
-            Ok(MeshFileFormat::Stl)
+            ModelFileFormat::from_path(Path::new("part.StL")),
+            Ok(ModelFileFormat::Stl)
         );
-        assert!(matches!(
-            MeshFileFormat::from_path(Path::new("part.dae")),
-            Err(RenderError::UnsupportedMeshFormat { .. })
-        ));
+        assert_eq!(
+            ModelFileFormat::from_path(Path::new("part.DAE")),
+            Ok(ModelFileFormat::Dae)
+        );
     }
 
     #[test]

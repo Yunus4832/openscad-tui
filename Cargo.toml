@@ -1,5 +1,45 @@
+[package]
+name = "openscad-tui"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "A command-driven terminal editor and model previewer for OpenSCAD"
+repository = "https://github.com/Yunus4832/openscad-tui"
+homepage = "https://github.com/Yunus4832/openscad-tui"
+readme = "README.md"
+keywords = ["openscad", "cad", "tui", "terminal"]
+categories = ["command-line-utilities", "graphics"]
+
+[lib]
+name = "openscad_ui"
+path = "crates/ui/src/lib.rs"
+
+[[bin]]
+name = "openscad-tui"
+path = "crates/ui/src/main.rs"
+
+[dependencies]
+ratatui.workspace = true
+crossterm.workspace = true
+serde_json.workspace = true
+serde.workspace = true
+zip.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+clap.workspace = true
+unicode-width.workspace = true
+tui-tree-widget.workspace = true
+dirs.workspace = true
+ratatui-image.workspace = true
+openscad-core = { path = "crates/core" }
+openscad-assembly = { path = "crates/assembly" }
+openscad-library = { path = "crates/library" }
+openscad-render = { path = "crates/render" }
+openscad-terminal = { path = "crates/terminal" }
+
 [workspace]
-members = ["crates/assembly", "crates/core", "crates/library", "crates/render", "crates/terminal", "crates/ui"]
+members = ["crates/assembly", "crates/core", "crates/library", "crates/render", "crates/terminal"]
 resolver = "2"
 
 [workspace.package]
@@ -28,6 +68,7 @@ flate2 = "1"
 jpeg-encoder = "0.7"
 zip = { version = "6.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 stl_io = "0.11"
+roxmltree = "0.21.1"
 
 [profile.dev.package.openscad-terminal]
 opt-level = 2
