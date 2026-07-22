@@ -299,14 +299,14 @@ fn draw_camera_toolbar(f: &mut Frame, app: &mut App, area: Rect) {
         ]
     } else {
         vec![
-            ("P", close_label.to_string(), "preview close".to_string()),
+            ("P", close_label.to_string(), "model close".to_string()),
             ("f", "Fit".to_string(), "camera fit".to_string()),
             (
                 "p",
                 projection.to_string(),
                 "camera projection toggle".to_string(),
             ),
-            ("x", axes.to_string(), "axes toggle".to_string()),
+            ("x", axes.to_string(), "display axes toggle".to_string()),
             ("1", "Front".to_string(), "camera view front".to_string()),
             ("5", "Top".to_string(), "camera view top".to_string()),
             ("7", "Iso".to_string(), "camera view iso".to_string()),
@@ -364,17 +364,17 @@ fn draw_camera_toolbar(f: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn draw_tree(f: &mut Frame, app: &App, area: Rect) {
-    let current_file = app.current_file.as_deref().unwrap_or("Untitled");
+    let project_name = &app.project_name;
     let active_source = app.ast.active_source.as_deref();
     let unsaved_flag = if app.saved { "" } else { "*" };
     let document = active_source
         .map(|source| format!(" [{source}]"))
         .unwrap_or_default();
     let title = if app.selected_nodes.is_empty() {
-        format!(" {current_file}{document}{unsaved_flag} ")
+        format!(" {project_name}{document}{unsaved_flag} ")
     } else {
         format!(
-            " {current_file}{document}{unsaved_flag} ({}) ",
+            " {project_name}{document}{unsaved_flag} ({}) ",
             app.selected_nodes.len()
         )
     };
@@ -1163,7 +1163,7 @@ mod tests {
             .ui_regions
             .camera_buttons
             .iter()
-            .any(|button| button.command == "preview close"));
+            .any(|button| button.command == "model close"));
         assert!(app
             .ui_regions
             .camera_buttons
@@ -1173,7 +1173,7 @@ mod tests {
             .ui_regions
             .camera_buttons
             .iter()
-            .any(|button| button.command == "axes toggle"));
+            .any(|button| button.command == "display axes toggle"));
 
         let buffer = terminal.backend().buffer();
         let row = |y| {

@@ -7,11 +7,10 @@ use crate::app::{
     App, CandidateType, CompletionCandidate, CompletionContext, DefinitionCompletionKind,
     ExpressionCompletionKind, InputMode, PendingModuleAction,
 };
-use crate::command_registry::CommandType;
+use crate::command_registry::{CommandLine, CommandType, CompletionSource};
 use crate::commands;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use openscad_core::{Argument, ModuleNode};
-use openscad_terminal::DisplayProtocol;
 use ratatui::layout::Position;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -277,6 +276,12 @@ fn handle_normal_input(key: KeyEvent, app: &mut App) {
             app.input_buffer.set_content("scale ");
         }
 
+        // n - create a project-owned SCAD source
+        KeyCode::Char('n') => {
+            app.input_mode = InputMode::Command;
+            app.input_buffer.set_content("source new ");
+        }
+
         // Navigation: j (next), k (prev), h (back/collapse), l (forward/expand)
         KeyCode::Char('j') | KeyCode::Down => {
             execute_shortcut(app, "next");
@@ -334,28 +339,28 @@ fn handle_normal_input(key: KeyEvent, app: &mut App) {
             execute_shortcut(app, "delete");
         }
 
-        // w - write (save to JSON)
+        // w - save the current project package
         KeyCode::Char('w') => {
             app.input_mode = InputMode::Command;
-            app.input_buffer.set_content("write ");
+            app.input_buffer.set_content("project save");
         }
 
-        // e - parse and edit an OpenSCAD source file
+        // e - import an OpenSCAD source into the current project
         KeyCode::Char('e') => {
             app.input_mode = InputMode::Command;
-            app.input_buffer.set_content("edit ");
+            app.input_buffer.set_content("source import ");
         }
 
         // o - open a .scadtui project
         KeyCode::Char('o') => {
             app.input_mode = InputMode::Command;
-            app.input_buffer.set_content("open ");
+            app.input_buffer.set_content("project open ");
         }
 
         // L - attach a SCAD source library
         KeyCode::Char('L') => {
             app.input_mode = InputMode::Command;
-            app.input_buffer.set_content("library ");
+            app.input_buffer.set_content("library load ");
         }
 
         // : - enter command mode
@@ -375,9 +380,10 @@ fn handle_normal_input(key: KeyEvent, app: &mut App) {
                 .map(|source| (source.virtual_path.clone(), source.editable));
             match project_source {
                 Some((path, true)) => {
-                    if let Err(error) = commands::cmd_buffer(app, Some(&path)) {
-                        app.set_error(&error.to_string());
-                    }
+                    execute_shortcut(
+                        app,
+                        &format!("source switch {}", quote_command_argument(&path)),
+                    );
                 }
                 Some((path, false)) => app.set_error(&format!("Source '{path}' is read-only")),
                 None => execute_shortcut(app, "toggle"),
@@ -400,10 +406,10 @@ fn handle_normal_input(key: KeyEvent, app: &mut App) {
         }
 
         // P - switch between source and model preview
-        KeyCode::Char('P') => execute_shortcut(app, "preview toggle"),
+        KeyCode::Char('P') => execute_shortcut(app, "model toggle"),
 
         // R - always render the active buffer and show the new model preview
-        KeyCode::Char('R') => execute_shortcut(app, "render"),
+        KeyCode::Char('R') => execute_shortcut(app, "model render"),
 
         _ => {}
     }
@@ -506,8 +512,8 @@ fn prefill_assembly_parent(app: &mut App) {
 
 fn model_key_command(key: KeyEvent) -> Option<&'static str> {
     match key.code {
-        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('P') => Some("preview close"),
-        KeyCode::Char('R') => Some("render"),
+        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('P') => Some("model close"),
+        KeyCode::Char('R') => Some("model render"),
         KeyCode::Char('h') => Some("camera orbit -5 0"),
         KeyCode::Char('l') => Some("camera orbit 5 0"),
         KeyCode::Char('j') => Some("camera orbit 0 -5"),
@@ -520,7 +526,7 @@ fn model_key_command(key: KeyEvent) -> Option<&'static str> {
         KeyCode::Char('-') => Some("camera zoom 1.15"),
         KeyCode::Char('f') => Some("camera fit"),
         KeyCode::Char('p') => Some("camera projection toggle"),
-        KeyCode::Char('x') => Some("axes toggle"),
+        KeyCode::Char('x') => Some("display axes toggle"),
         KeyCode::Char(' ') => Some("camera auto-rotate toggle"),
         KeyCode::Char('1') => Some("camera view front"),
         KeyCode::Char('2') => Some("camera view back"),
@@ -798,16 +804,24 @@ fn execute_command_registry(app: &mut App, cmd: &str, origin: CommandOrigin) -> 
         return true;
     }
 
-    let parts: Vec<&str> = cmd.split_whitespace().collect();
-    let cmd_name = parts[0];
-    let args = &parts[1..];
+    let command_line = CommandLine::parse(cmd);
+    if command_line.unterminated_quote {
+        app.set_error("Unterminated quote in command");
+        return true;
+    }
+    let parts = command_line.values();
+    if parts.is_empty() {
+        return true;
+    }
 
-    // First, check if this is a command that should be handled by the registry
-    if let Some(cmd_def) = app.command_registry.find(cmd_name) {
+    // Resolve the longest registered path, such as `model view` before `model`.
+    if let Some(resolved) = app.command_registry.resolve(&parts) {
+        let cmd_def = resolved.definition;
+        let args = &parts[resolved.consumed_tokens..];
+        let cmd_name = cmd_def.name.clone();
         // Validate arguments
         let handler = cmd_def.handler;
-        let min_args = cmd_def.min_args;
-        let max_args = cmd_def.max_args;
+        let (min_args, max_args) = cmd_def.argument_bounds();
         let change_ast = cmd_def.change_ast;
         let write_to_history = cmd_def.write_to_history;
 
@@ -851,7 +865,7 @@ fn execute_command_registry(app: &mut App, cmd: &str, origin: CommandOrigin) -> 
     // Command not found in registry
     app.set_error(&format!(
         "Unknown command: '{}'. Type 'help' for commands.",
-        cmd_name
+        parts.join(" ")
     ));
     // Add unknown commands typed by the user to history so they can recall and edit them.
     if origin == CommandOrigin::UserInput {
@@ -870,6 +884,17 @@ fn execute_user_command(app: &mut App, cmd: &str) {
 
 fn execute_shortcut(app: &mut App, command: &str) {
     execute_command_registry(app, command, CommandOrigin::Shortcut);
+}
+
+fn quote_command_argument(value: &str) -> String {
+    if value
+        .chars()
+        .any(|character| character.is_whitespace() || matches!(character, '"' | '\\' | '\''))
+    {
+        format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+    } else {
+        value.to_string()
+    }
 }
 
 /// Handle Tab key for autocompletion
@@ -964,98 +989,49 @@ fn analyze_input_context(input: &str, app: &App) -> CompletionContext {
         return CompletionContext::Command;
     }
 
-    // 按空白字符分割输入
-    let parts: Vec<&str> = trimmed.split_whitespace().collect();
+    let command_line = CommandLine::parse(input);
+    let parts = command_line.values();
 
     if parts.is_empty() {
         return CompletionContext::Command;
     }
 
-    // 第一部分是命令
+    let (path_prefix, partial_path) = if command_line.trailing_separator {
+        (parts.as_slice(), "")
+    } else {
+        (&parts[..parts.len() - 1], parts[parts.len() - 1])
+    };
+    let path_candidates = app.command_registry.child_names(path_prefix);
+    if !path_candidates.is_empty() {
+        return CompletionContext::CommandPath {
+            candidates: path_candidates
+                .into_iter()
+                .filter(|candidate| candidate.starts_with(partial_path))
+                .collect(),
+        };
+    }
+
+    let Some(resolved) = app.command_registry.resolve(&parts) else {
+        return CompletionContext::Command;
+    };
+    let cmd_def = resolved.definition;
+    if !cmd_def.arguments.is_empty() {
+        return declarative_argument_context(
+            input,
+            &command_line,
+            resolved.consumed_tokens,
+            &cmd_def.arguments,
+            app,
+        );
+    }
+
+    // Legacy OpenSCAD-aware completion commands remain single-token leaves while their
+    // specialized providers are migrated behind declarative argument specifications.
     let command = parts[0];
 
     // 使用命令注册表查找命令类型
-    if let Some(cmd_def) = app.command_registry.find(command) {
+    if resolved.consumed_tokens == 1 {
         match &cmd_def.cmd_type {
-            CommandType::File => {
-                // 文件命令处理逻辑
-                if parts.len() == 1 {
-                    if input.ends_with(' ') {
-                        CompletionContext::File {
-                            current_path: String::new(),
-                            base_dir: ".".to_string(),
-                            partial_name: String::new(),
-                            ends_with_separator: false,
-                        }
-                    } else {
-                        CompletionContext::Command
-                    }
-                } else {
-                    // 有路径部分
-                    let path_part = parts[1..].join(" ").trim_end().to_string();
-                    let ends_with_separator = path_part.ends_with('/');
-
-                    // 解析路径，分离目录部分和文件名部分
-                    let (base_dir, partial_name) = if path_part.contains('/') {
-                        let last_slash = path_part.rfind('/').unwrap();
-                        let base = &path_part[..last_slash + 1];
-                        let partial = &path_part[last_slash + 1..];
-
-                        // 处理相对路径和波浪号（~）
-                        let normalized_base = if base.starts_with('/') {
-                            // 绝对路径
-                            base.to_string()
-                        } else if let Some(stripped) = base.strip_prefix("~/") {
-                            // 处理波浪号（~）表示 home 目录
-                            if let Ok(home_dir) = std::env::var("HOME") {
-                                format!("{}/{}", home_dir, stripped)
-                            } else {
-                                // 如果无法获取 home 目录，保持原样
-                                base.to_string()
-                            }
-                        } else {
-                            // 相对路径，需要与当前目录结合
-                            if base == "./" || base.is_empty() {
-                                ".".to_string()
-                            } else {
-                                normalize_path(base)
-                            }
-                        };
-
-                        (normalized_base, partial.to_string())
-                    } else {
-                        // 没有分隔符，整个都是文件名部分
-                        if path_part == "~" {
-                            // 如果整个路径是 ~，转换为 home 目录
-                            if let Ok(home_dir) = std::env::var("HOME") {
-                                (home_dir, String::new())
-                            } else {
-                                (".".to_string(), path_part.clone())
-                            }
-                        } else {
-                            (".".to_string(), path_part.clone())
-                        }
-                    };
-
-                    // 检查完整路径是否存在且为文件，如果是且输入以空格结尾，切换回命令上下文
-                    let full_path = Path::new(&path_part);
-                    if input.ends_with(' ')
-                        && !input.ends_with("/ ")
-                        && full_path.exists()
-                        && full_path.is_file()
-                    {
-                        // 用户已指定一个存在的文件并添加了空格，意味着完成文件选择
-                        return CompletionContext::Command;
-                    }
-
-                    CompletionContext::File {
-                        current_path: path_part,
-                        base_dir,
-                        partial_name,
-                        ends_with_separator,
-                    }
-                }
-            }
             CommandType::Module => {
                 // insert 命令的处理逻辑 (insert <module> [params])
                 if parts.len() == 1 {
@@ -1190,63 +1166,132 @@ fn analyze_input_context(input: &str, app: &App) -> CompletionContext {
                     CompletionContext::NodeParamUnset
                 }
             }
-            CommandType::LibraryReference => {
-                if (parts.len() == 1 && input.ends_with(' ')) || parts.len() == 2 {
-                    CompletionContext::Literal {
-                        candidates: loaded_library_names(app),
-                    }
-                } else {
-                    CompletionContext::Command
-                }
-            }
-            CommandType::Preview => {
-                literal_command_context(input, &parts, &["source", "model", "toggle", "close"], &[])
-            }
-            CommandType::Protocol => protocol_command_context(input, &parts),
-            CommandType::Axes => {
-                literal_command_context(input, &parts, &["on", "off", "toggle"], &[])
-            }
             CommandType::Visibility => {
                 literal_command_context(input, &parts, &["show", "hide", "toggle"], &[])
-            }
-            CommandType::Assembly => assembly_command_context(input, &parts, app),
-            CommandType::ProjectSource => project_source_command_context(input, &parts, app),
-            CommandType::New => literal_command_context(input, &parts, &["project", "file"], &[]),
-            CommandType::Export => {
-                if parts.len() == 1 || (parts.len() == 2 && !input.ends_with(' ')) {
-                    literal_command_context(input, &parts, &["source", "tree", "model"], &[])
-                } else {
-                    let kind = parts.get(1).copied().unwrap_or("");
-                    let prefix = format!("{} {kind}", parts[0]);
-                    let path = input.strip_prefix(&prefix).unwrap_or("");
-                    analyze_input_context(&format!("edit{path}"), app)
-                }
-            }
-            CommandType::Camera => {
-                let second_level: &[&str] = match parts.get(1).copied() {
-                    Some("projection") => &["perspective", "orthographic", "toggle"],
-                    Some("view") => &["front", "back", "left", "right", "top", "bottom", "iso"],
-                    Some("auto-rotate") => &["on", "off", "toggle"],
-                    _ => &[],
-                };
-                literal_command_context(
-                    input,
-                    &parts,
-                    &[
-                        "projection",
-                        "view",
-                        "orbit",
-                        "pan",
-                        "zoom",
-                        "fit",
-                        "auto-rotate",
-                    ],
-                    second_level,
-                )
             }
         }
     } else {
         CompletionContext::Command
+    }
+}
+
+fn declarative_argument_context(
+    _input: &str,
+    command_line: &CommandLine,
+    consumed_tokens: usize,
+    arguments: &[crate::command_registry::ArgumentSpec],
+    app: &App,
+) -> CompletionContext {
+    let values = command_line.values();
+    let entered = &values[consumed_tokens..];
+    if entered.is_empty() && !command_line.trailing_separator {
+        return CompletionContext::Command;
+    }
+    let argument_index = if command_line.trailing_separator {
+        entered.len()
+    } else {
+        entered.len().saturating_sub(1)
+    };
+    let Some(argument) = arguments.get(argument_index).or_else(|| {
+        arguments
+            .last()
+            .filter(|argument| argument.variadic && argument_index >= arguments.len())
+    }) else {
+        return CompletionContext::Command;
+    };
+    match &argument.completion {
+        CompletionSource::None => CompletionContext::Command,
+        CompletionSource::Literal(candidates) => CompletionContext::Literal {
+            candidates: candidates.clone(),
+        },
+        CompletionSource::Path { extensions } => {
+            let current_path = entered.get(argument_index).copied().unwrap_or("");
+            file_completion_context(current_path, extensions)
+        }
+        CompletionSource::ProjectSource { editable_only } => CompletionContext::Literal {
+            candidates: app
+                .ast
+                .embedded_sources
+                .iter()
+                .filter(|source| !editable_only || source.editable)
+                .map(|source| source.virtual_path.clone())
+                .collect(),
+        },
+        CompletionSource::LoadedLibrary => CompletionContext::Literal {
+            candidates: loaded_library_names(app),
+        },
+        CompletionSource::LibraryRoot => CompletionContext::Literal {
+            candidates: loaded_library_roots(app),
+        },
+        CompletionSource::Assembly => CompletionContext::Literal {
+            candidates: app
+                .assemblies
+                .iter()
+                .map(|assembly| assembly.name.clone())
+                .collect(),
+        },
+        CompletionSource::AssemblyPart { literals } => CompletionContext::Literal {
+            candidates: literals
+                .iter()
+                .cloned()
+                .chain(
+                    app.active_assembly
+                        .as_deref()
+                        .and_then(|active| {
+                            app.assemblies
+                                .iter()
+                                .find(|assembly| assembly.id == active || assembly.name == active)
+                        })
+                        .into_iter()
+                        .flat_map(|assembly| assembly.parts.iter().map(|part| part.id.clone())),
+                )
+                .collect(),
+        },
+        CompletionSource::CommandPath => {
+            let path_arguments = if command_line.trailing_separator {
+                entered
+            } else {
+                &entered[..entered.len().saturating_sub(1)]
+            };
+            CompletionContext::CommandPath {
+                candidates: app.command_registry.child_names(path_arguments),
+            }
+        }
+    }
+}
+
+fn file_completion_context(current_path: &str, extensions: &[String]) -> CompletionContext {
+    let ends_with_separator = current_path.ends_with('/');
+    let (base_dir, partial_name) = if current_path.contains('/') {
+        let last_slash = current_path.rfind('/').unwrap();
+        let base = &current_path[..last_slash + 1];
+        let partial = &current_path[last_slash + 1..];
+        let normalized_base = if base.starts_with('/') {
+            base.to_string()
+        } else if let Some(stripped) = base.strip_prefix("~/") {
+            std::env::var("HOME")
+                .map(|home_dir| format!("{home_dir}/{stripped}"))
+                .unwrap_or_else(|_| base.to_string())
+        } else if base == "./" || base.is_empty() {
+            ".".to_string()
+        } else {
+            normalize_path(base)
+        };
+        (normalized_base, partial.to_string())
+    } else if current_path == "~" {
+        (
+            std::env::var("HOME").unwrap_or_else(|_| ".".to_string()),
+            String::new(),
+        )
+    } else {
+        (".".to_string(), current_path.to_string())
+    };
+    CompletionContext::File {
+        current_path: current_path.to_string(),
+        base_dir,
+        partial_name,
+        ends_with_separator,
+        extensions: extensions.to_vec(),
     }
 }
 
@@ -1281,6 +1326,15 @@ fn loaded_library_names(app: &App) -> Vec<String> {
         .collect()
 }
 
+fn loaded_library_roots(app: &App) -> Vec<String> {
+    app.ast
+        .embedded_sources
+        .iter()
+        .filter(|source| source.role == openscad_core::EmbeddedSourceRole::Library)
+        .map(|source| source.virtual_path.clone())
+        .collect()
+}
+
 fn literal_command_context(
     input: &str,
     parts: &[&str],
@@ -1304,129 +1358,6 @@ fn literal_command_context(
             .map(|value| (*value).to_string())
             .collect(),
     }
-}
-
-fn protocol_command_context(input: &str, parts: &[&str]) -> CompletionContext {
-    if !((parts.len() == 1 && input.ends_with(' ')) || (parts.len() == 2 && !input.ends_with(' ')))
-    {
-        return CompletionContext::Command;
-    }
-    CompletionContext::Literal {
-        candidates: ["auto", "next"]
-            .into_iter()
-            .chain(DisplayProtocol::NAMES.iter().copied())
-            .map(str::to_string)
-            .collect(),
-    }
-}
-
-fn project_source_command_context(input: &str, parts: &[&str], app: &App) -> CompletionContext {
-    if !((parts.len() == 1 && input.ends_with(' ')) || (parts.len() == 2 && !input.ends_with(' ')))
-    {
-        return CompletionContext::Command;
-    }
-    let mut candidates = match parts.first().copied() {
-        Some("buffer" | "b") => vec!["next".to_string(), "prev".to_string()],
-        _ => Vec::new(),
-    };
-    candidates.extend(
-        app.ast
-            .embedded_sources
-            .iter()
-            .filter(|source| source.editable)
-            .map(|source| source.virtual_path.clone()),
-    );
-    CompletionContext::Literal { candidates }
-}
-
-fn assembly_command_context(input: &str, parts: &[&str], app: &App) -> CompletionContext {
-    const OPERATIONS: &[&str] = &[
-        "new",
-        "open",
-        "list",
-        "add",
-        "select",
-        "copy",
-        "paste",
-        "remove",
-        "parent",
-        "translate",
-        "rotate",
-        "scale",
-        "pivot",
-        "visibility",
-        "render",
-        "export",
-        "close",
-    ];
-    if parts.len() == 1 || (parts.len() == 2 && !input.ends_with(' ')) {
-        return CompletionContext::Literal {
-            candidates: OPERATIONS
-                .iter()
-                .map(|value| (*value).to_string())
-                .collect(),
-        };
-    }
-    let operation = parts.get(1).copied().unwrap_or("");
-    if operation == "export" {
-        let prefix = format!("{} export", parts[0]);
-        let path = input.strip_prefix(&prefix).unwrap_or("");
-        return analyze_input_context(&format!("edit{path}"), app);
-    }
-    let active = app.active_assembly.as_deref().and_then(|id| {
-        app.assemblies
-            .iter()
-            .find(|assembly| assembly.id == id || assembly.name == id)
-    });
-    let part_names = || {
-        active
-            .into_iter()
-            .flat_map(|assembly| assembly.parts.iter().map(|part| part.id.clone()))
-            .collect::<Vec<_>>()
-    };
-    let candidates = match (operation, parts.len(), input.ends_with(' ')) {
-        ("open", 2, true) | ("open", 3, false) => app
-            .assemblies
-            .iter()
-            .map(|assembly| assembly.id.clone())
-            .collect(),
-        ("add", 2, true) | ("add", 3, false) => app
-            .ast
-            .embedded_sources
-            .iter()
-            .filter(|source| source.editable)
-            .map(|source| source.virtual_path.clone())
-            .collect(),
-        ("select", 2, true) | ("select", 3, false) => {
-            let mut values = vec!["next".to_string(), "prev".to_string()];
-            values.extend(part_names());
-            values
-        }
-        ("parent", 2, true) | ("parent", 3, false) | ("parent", 3, true) | ("parent", 4, false) => {
-            let mut values = vec!["root".to_string()];
-            values.extend(part_names());
-            values
-        }
-        ("visibility", 2, true) | ("visibility", 3, false) => {
-            let mut values = vec!["show".into(), "hide".into(), "toggle".into()];
-            values.extend(part_names());
-            values
-        }
-        ("visibility", 3, true) | ("visibility", 4, false) => {
-            vec!["show".into(), "hide".into(), "toggle".into()]
-        }
-        ("paste", 2, true) | ("paste", 3, false) => {
-            let mut values = vec!["root".to_string()];
-            values.extend(part_names());
-            values
-        }
-        ("copy" | "remove" | "translate" | "rotate" | "scale" | "pivot", 2, true)
-        | ("copy" | "remove" | "translate" | "rotate" | "scale" | "pivot", 3, false) => {
-            part_names()
-        }
-        _ => return CompletionContext::Command,
-    };
-    CompletionContext::Literal { candidates }
 }
 
 fn function_definition_parameters(input: &str) -> Vec<String> {
@@ -1947,6 +1878,23 @@ fn generate_completions(input: &str, app: &App) -> (Vec<CompletionCandidate>, Co
             let prefix = input.trim();
             filter_by_prefix(&all_commands, prefix)
         }
+        CompletionContext::CommandPath { candidates } => {
+            let candidates = candidates
+                .iter()
+                .cloned()
+                .map(|value| CompletionCandidate::new(value, CandidateType::Command))
+                .collect::<Vec<_>>();
+            let line = CommandLine::parse(input);
+            let prefix = if line.trailing_separator {
+                ""
+            } else {
+                line.tokens
+                    .last()
+                    .map(|token| token.value.as_str())
+                    .unwrap_or("")
+            };
+            filter_by_prefix(&candidates, prefix)
+        }
         CompletionContext::Module => {
             // 模块补全：获取所有模块，过滤以匹配输入中的模块部分
             let all_modules: Vec<CompletionCandidate> = get_module_list(app)
@@ -2089,13 +2037,15 @@ fn generate_completions(input: &str, app: &App) -> (Vec<CompletionCandidate>, Co
         CompletionContext::File {
             base_dir,
             partial_name,
+            extensions,
             ..
         } => {
             // 文件补全 - 使用基础目录和部分名称
-            let candidates: Vec<CompletionCandidate> = get_file_completions(base_dir, partial_name)
-                .iter()
-                .map(|c| CompletionCandidate::new(c.clone(), CandidateType::Path))
-                .collect();
+            let candidates: Vec<CompletionCandidate> =
+                get_file_completions(base_dir, partial_name, extensions)
+                    .iter()
+                    .map(|c| CompletionCandidate::new(c.clone(), CandidateType::Path))
+                    .collect();
             candidates
         }
         CompletionContext::Literal { candidates } => {
@@ -2104,8 +2054,15 @@ fn generate_completions(input: &str, app: &App) -> (Vec<CompletionCandidate>, Co
                 .cloned()
                 .map(|value| CompletionCandidate::new(value, CandidateType::Command))
                 .collect::<Vec<_>>();
-            let prefix = input.split_whitespace().last().unwrap_or("");
-            let prefix = if input.ends_with(' ') { "" } else { prefix };
+            let line = CommandLine::parse(input);
+            let prefix = if line.trailing_separator {
+                ""
+            } else {
+                line.tokens
+                    .last()
+                    .map(|token| token.value.as_str())
+                    .unwrap_or("")
+            };
             filter_by_prefix(&candidates, prefix)
         }
     };
@@ -2127,6 +2084,7 @@ fn preview_completion(app: &mut App) {
             base_dir: _,
             partial_name: _,
             ends_with_separator: _,
+            ..
         } => {
             if app.input_buffer.content().trim().ends_with("~") {
                 format!(
@@ -2175,6 +2133,52 @@ fn whitespace_token_range(input: &str, token_index: usize) -> Option<(usize, usi
     })
 }
 
+fn file_replacement_range(input: &str, ends_with_separator: bool) -> (usize, usize) {
+    let line = CommandLine::parse(input);
+    if line.trailing_separator {
+        return (input.len(), input.len());
+    }
+    let Some(token) = line.tokens.last() else {
+        return (input.len(), input.len());
+    };
+    let raw = &input[token.range.clone()];
+    let quote = raw
+        .chars()
+        .next()
+        .filter(|character| matches!(character, '"' | '\''));
+    let content_start = token.range.start + quote.map_or(0, char::len_utf8);
+    let closed_quote = quote.is_some_and(|quote| raw.ends_with(quote) && raw.len() > 1);
+    let content_end = token.range.end - if closed_quote { 1 } else { 0 };
+    if ends_with_separator {
+        return (content_end, content_end);
+    }
+    let content = &input[content_start..content_end];
+    let start = content
+        .rfind('/')
+        .map(|slash| content_start + slash + 1)
+        .unwrap_or(content_start);
+    (start, content_end)
+}
+
+fn format_path_candidate(input: &str, replacement_start: usize, candidate: &str) -> String {
+    let already_quoted = CommandLine::parse(input).tokens.into_iter().any(|token| {
+        token.range.start <= replacement_start
+            && replacement_start <= token.range.end
+            && input[token.range]
+                .chars()
+                .next()
+                .is_some_and(|character| matches!(character, '"' | '\''))
+    });
+    if !already_quoted && candidate.chars().any(char::is_whitespace) {
+        format!(
+            "\"{}\"",
+            candidate.replace('\\', "\\\\").replace('"', "\\\"")
+        )
+    } else {
+        candidate.to_string()
+    }
+}
+
 /// 获取输入缓冲区中需要替换的范围（起始索引和结束索引）
 fn get_replacement_range(input: &str, context: &CompletionContext, app: &App) -> (usize, usize) {
     match context {
@@ -2190,6 +2194,17 @@ fn get_replacement_range(input: &str, context: &CompletionContext, app: &App) ->
                 // 在原始输入中找到第一个单词的位置
                 let offset = input.len() - trimmed.len();
                 (offset, offset + first_word.len())
+            }
+        }
+        CompletionContext::CommandPath { .. } => {
+            let line = CommandLine::parse(input);
+            if line.trailing_separator {
+                (input.len(), input.len())
+            } else {
+                line.tokens
+                    .last()
+                    .map(|token| (token.range.start, token.range.end))
+                    .unwrap_or((input.len(), input.len()))
             }
         }
         CompletionContext::Module => {
@@ -2272,46 +2287,17 @@ fn get_replacement_range(input: &str, context: &CompletionContext, app: &App) ->
             base_dir: _,
             partial_name: _,
             ends_with_separator,
-        } => {
-            // 文件补全：替换路径部分的最后部分
-            // 根据上下文决定替换范围
-            // 查找最后一个 / 的位置
-            if let Some(slash_pos) = input.rfind('/') {
-                if *ends_with_separator {
-                    // 如果路径以 / 结尾，从 / 位置之后开始替换
-                    (slash_pos + 1, input.len())
-                } else {
-                    // 查找最后一个空格的位置
-                    if let Some(space_pos) = input.rfind(' ') {
-                        if slash_pos > space_pos {
-                            // 最后一个是 / 在最后的空格之后，从 / 位置之后开始替换
-                            (slash_pos + 1, input.len())
-                        } else {
-                            // 最后一个空格在最后的 / 之后，从空格之后开始替换
-                            (space_pos + 1, input.len())
-                        }
-                    } else {
-                        // 没有空格，从 / 之后开始替换
-                        (slash_pos + 1, input.len())
-                    }
-                }
-            } else {
-                // 没有 /，按原逻辑处理（查找空格）
-                let space_pos = input.rfind(' ');
-                let path_start = if let Some(pos) = space_pos {
-                    pos + 1 // 从空格后开始
-                } else {
-                    0 // 如果没有空格，从开头开始
-                };
-                (path_start, input.len()) // 替换从路径开始到末尾的所有内容
-            }
-        }
+            ..
+        } => file_replacement_range(input, *ends_with_separator),
         CompletionContext::Literal { .. } => {
-            if input.ends_with(' ') {
+            let line = CommandLine::parse(input);
+            if line.trailing_separator {
                 (input.len(), input.len())
             } else {
-                let token_index = input.split_whitespace().count().saturating_sub(1);
-                whitespace_token_range(input, token_index).unwrap_or((input.len(), input.len()))
+                line.tokens
+                    .last()
+                    .map(|token| (token.range.start, token.range.end))
+                    .unwrap_or((input.len(), input.len()))
             }
         }
     }
@@ -2328,8 +2314,13 @@ fn apply_completion(app: &mut App) {
     let (start, end) = app.completion_replacement_range;
 
     // 替换输入缓冲区中的范围
-    app.input_buffer
-        .replace_range(start, end, &candidate.content);
+    let replacement = match &app.completion_context {
+        CompletionContext::File { .. } => {
+            format_path_candidate(app.input_buffer.content(), start, &candidate.content)
+        }
+        _ => candidate.content.clone(),
+    };
+    app.input_buffer.replace_range(start, end, &replacement);
 
     // 根据上下文追加分隔符
     match &app.completion_context {
@@ -2354,6 +2345,7 @@ fn apply_completion(app: &mut App) {
             base_dir: _base_dir,
             partial_name: _partial_name,
             ends_with_separator: _ends_with_separator,
+            ..
         } => {
             // 需要检查实际文件系统来确定是否是目录
             // 构建完整路径来检查文件类型
@@ -2400,7 +2392,7 @@ fn apply_completion(app: &mut App) {
 
 /// Get list of available commands from the command registry
 fn get_command_list(app: &App) -> Vec<String> {
-    app.command_registry.get_all_names()
+    app.command_registry.child_names(&[])
 }
 
 /// Get list of available modules from library
@@ -2410,7 +2402,7 @@ fn get_module_list(app: &App) -> Vec<String> {
 
 /// Get file completions for a given directory and path prefix
 /// Returns entries in the directory that match the prefix (without trailing '/')
-fn get_file_completions(dir_path: &str, prefix: &str) -> Vec<String> {
+fn get_file_completions(dir_path: &str, prefix: &str, extensions: &[String]) -> Vec<String> {
     let mut completions = Vec::new();
 
     // Parse the directory path
@@ -2419,11 +2411,21 @@ fn get_file_completions(dir_path: &str, prefix: &str) -> Vec<String> {
     // Try to read the directory
     if let Ok(entries) = fs::read_dir(dir) {
         for entry in entries.flatten() {
-            if let Ok(_file_type) = entry.file_type() {
+            if let Ok(file_type) = entry.file_type() {
                 // Using underscore to indicate unused
                 if let Ok(file_name) = entry.file_name().into_string() {
                     // Check if it matches the partial name
-                    if file_name.starts_with(prefix) {
+                    let accepted_extension = extensions.is_empty()
+                        || file_type.is_dir()
+                        || Path::new(&file_name)
+                            .extension()
+                            .and_then(|extension| extension.to_str())
+                            .is_some_and(|extension| {
+                                extensions
+                                    .iter()
+                                    .any(|accepted| extension.eq_ignore_ascii_case(accepted))
+                            });
+                    if file_name.starts_with(prefix) && accepted_extension {
                         // Add the file/directory name (without trailing '/')
                         completions.push(file_name);
                     }
@@ -2592,13 +2594,16 @@ mod tests {
     #[test]
     fn test_preview_and_camera_commands_complete_in_stages() {
         let app = App::new();
-        let (preview, _) = generate_completions("preview ", &app);
+        let (model, _) = generate_completions("model ", &app);
+        assert!(model.iter().any(|candidate| candidate.content == "preview"));
+        assert!(model.iter().any(|candidate| candidate.content == "view"));
+        let (preview, _) = generate_completions("model preview ", &app);
         assert_eq!(
             preview
                 .iter()
                 .map(|candidate| candidate.content.as_str())
                 .collect::<Vec<_>>(),
-            vec!["source", "model", "toggle", "close"]
+            vec!["--render"]
         );
 
         let (camera, _) = generate_completions("camera view ", &app);
@@ -2617,7 +2622,7 @@ mod tests {
             .iter()
             .any(|candidate| candidate.content == "toggle"));
 
-        let (protocol, _) = generate_completions("protocol ", &app);
+        let (protocol, _) = generate_completions("display protocol ", &app);
         assert!(protocol
             .iter()
             .any(|candidate| candidate.content == "ascii"));
@@ -2628,7 +2633,7 @@ mod tests {
             .iter()
             .any(|candidate| candidate.content == "braille"));
 
-        let (axes, _) = generate_completions("axes ", &app);
+        let (axes, _) = generate_completions("display axes ", &app);
         assert!(axes.iter().any(|candidate| candidate.content == "toggle"));
 
         let (visibility, _) = generate_completions("visibility ", &app);
@@ -2643,11 +2648,33 @@ mod tests {
         app.set_error("stale error");
         assert!(execute_command_registry(
             &mut app,
-            "axes off",
+            "display axes off",
             CommandOrigin::UserInput
         ));
         assert_eq!(app.message.as_deref(), Some("World axes disabled"));
         assert_eq!(app.message_type, crate::app::MessageType::Info);
+    }
+
+    #[test]
+    fn test_hierarchical_commands_accept_quoted_arguments_and_reject_old_roots() {
+        let mut app = App::new();
+
+        execute_user_command(&mut app, "project rename \"vernier caliper\"");
+        assert_eq!(app.project_name, "vernier caliper");
+        for obsolete in [
+            "new", "write", "open", "edit", "buffer", "library", "use", "include", "render",
+            "preview", "view", "export", "camera", "protocol", "axes", "assembly",
+        ] {
+            assert!(
+                app.command_registry.find(obsolete).is_none(),
+                "obsolete command root should not be registered: {obsolete}"
+            );
+        }
+
+        let input = "model view \"models/my mo";
+        let (_, analysis) = generate_completions(input, &app);
+        assert!(matches!(analysis.context, CompletionContext::File { .. }));
+        assert_eq!(&input[analysis.replacement_range.0..], "my mo");
     }
 
     #[test]
@@ -2684,7 +2711,7 @@ mod tests {
                 function_defines: Vec::new(),
             });
 
-        let (candidates, analysis) = generate_completions("use ge", &app);
+        let (candidates, analysis) = generate_completions("source use ge", &app);
         assert_eq!(
             analysis.context,
             CompletionContext::Literal {
@@ -2699,7 +2726,8 @@ mod tests {
             ["gears.scad"]
         );
 
-        let (include_candidates, include_analysis) = generate_completions("include ge", &app);
+        let (include_candidates, include_analysis) =
+            generate_completions("source include ge", &app);
         assert_eq!(include_analysis.context, analysis.context);
         assert_eq!(
             include_candidates
@@ -2719,26 +2747,25 @@ mod tests {
         let mut app = App::new();
         commands::cmd_edit_scad(&mut app, main.to_str().unwrap()).unwrap();
 
-        let (buffers, _) = generate_completions("buffer ", &app);
-        assert!(buffers.iter().any(|candidate| candidate.content == "next"));
+        let (source_actions, _) = generate_completions("source ", &app);
+        assert!(source_actions
+            .iter()
+            .any(|candidate| candidate.content == "next"));
+        let (buffers, _) = generate_completions("source switch ", &app);
         assert!(buffers
             .iter()
             .any(|candidate| candidate.content == "part.scad"));
     }
 
     #[test]
-    fn test_export_completion_selects_mode_then_file_path() {
+    fn test_resource_export_completion_selects_command_then_file_path() {
         let app = App::new();
-        let (modes, _) = generate_completions("export ", &app);
-        assert_eq!(
-            modes
-                .iter()
-                .map(|candidate| candidate.content.as_str())
-                .collect::<Vec<_>>(),
-            ["source", "tree", "model"]
-        );
+        let (model_actions, _) = generate_completions("model ", &app);
+        assert!(model_actions
+            .iter()
+            .any(|candidate| candidate.content == "export"));
 
-        let (_, analysis) = generate_completions("export source ./", &app);
+        let (_, analysis) = generate_completions("model export ./", &app);
         assert!(matches!(analysis.context, CompletionContext::File { .. }));
     }
 
@@ -3209,13 +3236,13 @@ mod tests {
     }
 
     #[test]
-    fn test_file_shortcuts_use_open_and_edit_semantics() {
+    fn test_file_shortcuts_use_project_and_source_semantics() {
         let mut app = App::new();
         handle_key(
             KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE),
             &mut app,
         );
-        assert_eq!(app.input_buffer.content(), "open ");
+        assert_eq!(app.input_buffer.content(), "project open ");
 
         app.input_mode = InputMode::Normal;
         app.input_buffer.clear();
@@ -3223,7 +3250,16 @@ mod tests {
             KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE),
             &mut app,
         );
-        assert_eq!(app.input_buffer.content(), "edit ");
+        assert_eq!(app.input_buffer.content(), "source import ");
+
+        app.input_mode = InputMode::Normal;
+        app.input_buffer.clear();
+        handle_key(
+            KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE),
+            &mut app,
+        );
+        assert_eq!(app.input_mode, InputMode::Command);
+        assert_eq!(app.input_buffer.content(), "source new ");
     }
 
     #[test]
@@ -3492,7 +3528,7 @@ mod tests {
             .camera_buttons
             .push(crate::app::CameraButtonRegion {
                 area: ratatui::layout::Rect::new(2, 20, 8, 1),
-                command: "preview source".into(),
+                command: "source preview".into(),
             });
 
         handle_mouse(
@@ -3525,11 +3561,11 @@ mod tests {
         );
         assert_eq!(
             model_key_command(KeyEvent::new(KeyCode::Char('R'), KeyModifiers::SHIFT)),
-            Some("render")
+            Some("model render")
         );
         assert_eq!(
             model_key_command(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
-            Some("preview close")
+            Some("model close")
         );
     }
 
@@ -3578,8 +3614,11 @@ mod tests {
                     .any(|button| button.command == command),
                 "toolbar is missing the key command {command}"
             );
-            let command_name = command.split_whitespace().next().unwrap();
-            assert!(app.command_registry.find(command_name).is_some());
+            let command_line = CommandLine::parse(command);
+            assert!(app
+                .command_registry
+                .resolve(&command_line.values())
+                .is_some());
         }
     }
 

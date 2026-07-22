@@ -291,6 +291,10 @@ pub struct MouseDrag {
 pub enum CompletionContext {
     /// Command completion (empty input or command prefix)
     Command,
+    /// Completion of a component in a hierarchical command path.
+    CommandPath {
+        candidates: Vec<String>,
+    },
     /// Module name completion (after "insert " or "i ")
     Module,
     /// Module parameter completion (after module name)
@@ -319,7 +323,7 @@ pub enum CompletionContext {
     Literal {
         candidates: Vec<String>,
     },
-    /// File name completion (for write/edit/library commands)
+    /// File path completion supplied by a declarative command argument.
     File {
         /// Current path being completed
         current_path: String,
@@ -329,6 +333,8 @@ pub enum CompletionContext {
         partial_name: String,
         /// Whether the path ends with a separator (indicating directory)
         ends_with_separator: bool,
+        /// Optional accepted file extensions; directories are always included.
+        extensions: Vec<String>,
     },
 }
 
@@ -345,6 +351,7 @@ pub enum DefinitionCompletionKind {
 }
 
 pub struct App {
+    pub project_name: String,
     pub ast: Arc<AstRoot>,
     pub assemblies: Vec<openscad_assembly::AssemblyDocument>,
     pub active_assembly: Option<String>,
@@ -421,6 +428,7 @@ pub struct App {
 impl App {
     pub fn new() -> Self {
         let mut app = Self {
+            project_name: "untitled".to_string(),
             ast: Arc::new(AstRoot::new_project("main.scad")),
             assemblies: Vec::new(),
             active_assembly: None,

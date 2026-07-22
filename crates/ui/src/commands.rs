@@ -384,7 +384,8 @@ pub fn cmd_preview(app: &mut App, mode: &str) -> CommandResult<()> {
         },
         _ => {
             return Err(CommandError::InvalidCommand(
-                "Usage: preview source|model|toggle|close".to_string(),
+                "Usage: model preview [--render] | model toggle | model close | source preview"
+                    .to_string(),
             ))
         }
     };
@@ -469,7 +470,7 @@ pub fn cmd_protocol(app: &mut App, value: &str) -> CommandResult<()> {
         value => {
             let protocol = value.parse::<DisplayProtocol>().map_err(|_| {
                 CommandError::InvalidCommand(format!(
-                    "Usage: protocol auto|next|{}",
+                    "Usage: display protocol auto|next|{}",
                     DisplayProtocol::NAMES.join("|")
                 ))
             })?;
@@ -491,7 +492,7 @@ pub fn cmd_axes(app: &mut App, value: &str) -> CommandResult<()> {
         "toggle" => !active_preview(app).axes_visible,
         _ => {
             return Err(CommandError::InvalidCommand(
-                "Usage: axes on|off|toggle".to_string(),
+                "Usage: display axes on|off|toggle".to_string(),
             ))
         }
     };
@@ -537,6 +538,13 @@ pub fn cmd_visibility(app: &mut App, value: &str) -> CommandResult<()> {
     }
     app.set_info(&format!("{value} {} module node(s)", target_ids.len()));
     Ok(())
+}
+
+fn dispatch_assembly(app: &mut App, operation: &'static str, args: &[&str]) -> CommandResult<()> {
+    let mut command = Vec::with_capacity(args.len() + 1);
+    command.push(operation);
+    command.extend_from_slice(args);
+    cmd_assembly(app, &command)
 }
 
 pub fn cmd_assembly(app: &mut App, args: &[&str]) -> CommandResult<()> {
@@ -1799,13 +1807,13 @@ pub fn cmd_write(app: &mut App, filename: &str) -> CommandResult<()> {
                 let current_expanded = expand_tilde(current_file);
                 if expanded != current_expanded {
                     return Err(CommandError::Custom(format!(
-                        "File '{}' exists, use w!, write! or save! to force write",
+                        "File '{}' exists; use project save-as <path> --force to replace it",
                         filename
                     )));
                 }
             } else {
                 return Err(CommandError::Custom(format!(
-                    "File '{}' exists, use w!, write! or save! to force write",
+                    "File '{}' exists; use project save-as <path> --force to replace it",
                     filename
                 )));
             }
@@ -1829,6 +1837,7 @@ pub fn cmd_write_force(app: &mut App, filename: &str) -> CommandResult<()> {
 
     let filepath = normalized_project_path(expanded_filepath);
     let document = ProjectDocument {
+        name: app.project_name.clone(),
         sources: (*app.ast).clone(),
         assemblies: app.assemblies.clone(),
         active_assembly: app.active_assembly.clone(),
@@ -1854,7 +1863,7 @@ pub fn cmd_write_force(app: &mut App, filename: &str) -> CommandResult<()> {
 pub fn cmd_load(app: &mut App, filename: &str) -> CommandResult<()> {
     if !app.saved {
         return Err(CommandError::Custom(
-            "File is not saved, use 'open!' to discard changes and open another project"
+            "Project is not saved; use 'project open <path> --force' to discard changes"
                 .to_string(),
         ));
     }
@@ -1876,7 +1885,8 @@ pub fn cmd_load_force(app: &mut App, filename: &str) -> CommandResult<()> {
 
     if !has_extension(&expanded_filename, PROJECT_EXTENSION) {
         return Err(CommandError::Custom(
-            "open requires a .scadtui project; use edit for .scad sources".to_string(),
+            "project open requires a .scadtui package; use source import for .scad files"
+                .to_string(),
         ));
     }
     let project = load_project(&expanded_filename).map_err(|error| {
@@ -1887,6 +1897,7 @@ pub fn cmd_load_force(app: &mut App, filename: &str) -> CommandResult<()> {
     })?;
 
     // Replace AST
+    app.project_name = project.name;
     app.ast = Arc::new(project.sources);
     app.assemblies = project.assemblies;
     app.active_assembly = project.active_assembly;
@@ -1910,12 +1921,19 @@ pub fn cmd_load_force(app: &mut App, filename: &str) -> CommandResult<()> {
     Ok(())
 }
 
-pub fn cmd_new_project(app: &mut App, filename: Option<&str>, force: bool) -> CommandResult<()> {
+pub fn cmd_new_project(app: &mut App, name: Option<&str>, force: bool) -> CommandResult<()> {
     if !force && !app.saved {
         return Err(CommandError::Custom(
-            "Project is not saved; use 'new! project' to discard changes".to_string(),
+            "Project is not saved; use 'project new --force' to discard changes".to_string(),
         ));
     }
+    let name = name.unwrap_or("untitled").trim();
+    if name.is_empty() {
+        return Err(CommandError::Custom(
+            "Project name cannot be empty".to_string(),
+        ));
+    }
+    app.project_name = name.to_string();
     app.ast = Arc::new(openscad_core::AstRoot::new_project("main.scad"));
     app.assemblies.clear();
     app.active_assembly = None;
@@ -1928,12 +1946,27 @@ pub fn cmd_new_project(app: &mut App, filename: Option<&str>, force: bool) -> Co
     app.undo_stack.clear();
     app.redo_stack.clear();
     app.tree_state.borrow_mut().select(Vec::new());
-    app.current_file = filename.map(str::to_string);
+    app.current_file = None;
     app.saved = false;
     app.invalidate_source_previews();
     app.assembly_preview.clear();
     app.init_tree_selection();
-    app.set_info("Created a new project with 'main.scad'");
+    app.set_info(&format!(
+        "Created project '{}' with 'main.scad'",
+        app.project_name
+    ));
+    Ok(())
+}
+
+pub fn cmd_rename_project(app: &mut App, name: &str) -> CommandResult<()> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(CommandError::Custom(
+            "Project name cannot be empty".to_string(),
+        ));
+    }
+    app.project_name = name.to_string();
+    app.set_info(&format!("Renamed project to '{name}'"));
     Ok(())
 }
 
@@ -1969,7 +2002,12 @@ pub fn cmd_new_file(app: &mut App, filename: &str) -> CommandResult<()> {
 }
 
 fn normalize_project_source_path(filename: &str) -> CommandResult<String> {
-    let path = Path::new(filename);
+    let requested = Path::new(filename);
+    let path = if requested.extension().is_none() {
+        requested.with_extension("scad")
+    } else {
+        requested.to_path_buf()
+    };
     if path.is_absolute()
         || path.components().any(|component| {
             !matches!(
@@ -1977,10 +2015,10 @@ fn normalize_project_source_path(filename: &str) -> CommandResult<String> {
                 std::path::Component::Normal(_) | std::path::Component::CurDir
             )
         })
-        || !has_extension(path, "scad")
+        || !has_extension(&path, "scad")
     {
         return Err(CommandError::Custom(
-            "new file requires a safe relative .scad path".to_string(),
+            "source new requires a safe relative name with an optional .scad extension".to_string(),
         ));
     }
     let components = path
@@ -1992,10 +2030,214 @@ fn normalize_project_source_path(filename: &str) -> CommandResult<String> {
         .collect::<Vec<_>>();
     if components.is_empty() {
         return Err(CommandError::Custom(
-            "new file requires a non-empty .scad path".to_string(),
+            "source new requires a non-empty source name".to_string(),
         ));
     }
     Ok(components.join("/"))
+}
+
+pub fn cmd_rename_source(app: &mut App, source: &str, new_name: &str) -> CommandResult<()> {
+    let editable = app
+        .ast
+        .embedded_sources
+        .iter()
+        .filter(|source| source.editable)
+        .map(|source| source.virtual_path.clone())
+        .collect::<Vec<_>>();
+    let old_path = resolve_project_source(&editable, source)?;
+    let requested = Path::new(new_name);
+    let target = if requested.components().count() == 1 {
+        let parent = Path::new(&old_path)
+            .parent()
+            .unwrap_or_else(|| Path::new(""));
+        normalize_project_source_path(&parent.join(requested).to_string_lossy())?
+    } else {
+        normalize_project_source_path(new_name)?
+    };
+    if old_path == target {
+        app.set_info(&format!("Project source is already named '{target}'"));
+        return Ok(());
+    }
+    if app
+        .ast
+        .embedded_sources
+        .iter()
+        .any(|source| source.virtual_path == target)
+    {
+        return Err(CommandError::Custom(format!(
+            "Project source '{target}' already exists"
+        )));
+    }
+
+    app.ast_mut().sync_active_source();
+    let ast = app.ast_mut();
+    let active_before = ast.active_source.clone();
+    let mut directive_updates = Vec::new();
+    for dependency in &mut ast.source_dependencies {
+        let old_from = dependency.from.clone();
+        let old_reference = dependency.reference.clone();
+        let touched = dependency.from == old_path || dependency.to == old_path;
+        if dependency.from == old_path {
+            dependency.from.clone_from(&target);
+        }
+        if dependency.to == old_path {
+            dependency.to.clone_from(&target);
+        }
+        if touched {
+            dependency.reference = relative_virtual_path(&dependency.from, &dependency.to);
+            directive_updates.push((
+                if old_from == old_path {
+                    target.clone()
+                } else {
+                    old_from
+                },
+                dependency.kind,
+                old_reference,
+                dependency.reference.clone(),
+            ));
+        }
+    }
+    let renamed = ast
+        .embedded_sources
+        .iter_mut()
+        .find(|source| source.virtual_path == old_path)
+        .ok_or_else(|| {
+            CommandError::Custom(format!("Project source '{old_path}' was not found"))
+        })?;
+    renamed.virtual_path.clone_from(&target);
+    if ast.entry_source.as_deref() == Some(&old_path) {
+        ast.entry_source = Some(target.clone());
+    }
+    if ast.active_source.as_deref() == Some(&old_path) {
+        ast.active_source = Some(target.clone());
+    }
+    for (from, kind, old_reference, new_reference) in &directive_updates {
+        if let Some(source) = ast
+            .embedded_sources
+            .iter_mut()
+            .find(|source| source.virtual_path == *from)
+        {
+            let references = match kind {
+                openscad_core::SourceDependencyKind::Include => &mut source.includes,
+                openscad_core::SourceDependencyKind::Use => &mut source.uses,
+            };
+            for reference in references
+                .iter_mut()
+                .filter(|reference| **reference == *old_reference)
+            {
+                reference.clone_from(new_reference);
+            }
+            if !source.editable {
+                let directive = match kind {
+                    openscad_core::SourceDependencyKind::Include => "include",
+                    openscad_core::SourceDependencyKind::Use => "use",
+                };
+                source.content = source.content.replace(
+                    &format!("{directive} <{old_reference}>"),
+                    &format!("{directive} <{new_reference}>"),
+                );
+            }
+        }
+        if active_before.as_deref() == Some(from) {
+            let references = match kind {
+                openscad_core::SourceDependencyKind::Include => &mut ast.includes,
+                openscad_core::SourceDependencyKind::Use => &mut ast.uses,
+            };
+            for reference in references
+                .iter_mut()
+                .filter(|reference| **reference == *old_reference)
+            {
+                reference.clone_from(new_reference);
+            }
+        }
+    }
+    for assembly in &mut app.assemblies {
+        for part in &mut assembly.parts {
+            if part.source.virtual_path() == old_path {
+                part.source = openscad_assembly::MeshSourceRef::project_source(&target);
+            }
+        }
+    }
+    reload_project_definitions(app);
+    app.invalidate_source_previews();
+    app.init_tree_selection();
+    app.set_info(&format!(
+        "Renamed project source '{old_path}' to '{target}'"
+    ));
+    Ok(())
+}
+
+pub fn cmd_remove_source(app: &mut App, source: &str) -> CommandResult<()> {
+    let editable = app
+        .ast
+        .embedded_sources
+        .iter()
+        .filter(|source| source.editable)
+        .map(|source| source.virtual_path.clone())
+        .collect::<Vec<_>>();
+    let target = resolve_project_source(&editable, source)?;
+    if editable.len() == 1 {
+        return Err(CommandError::Custom(
+            "A project must retain at least one editable source".to_string(),
+        ));
+    }
+    if let Some(dependency) = app
+        .ast
+        .source_dependencies
+        .iter()
+        .find(|dependency| dependency.to == target)
+    {
+        return Err(CommandError::Custom(format!(
+            "Cannot remove '{target}'; it is referenced by '{}'",
+            dependency.from
+        )));
+    }
+    if let Some((assembly, part)) = app.assemblies.iter().find_map(|assembly| {
+        assembly
+            .parts
+            .iter()
+            .find(|part| part.source.virtual_path() == target)
+            .map(|part| (assembly, part))
+    }) {
+        return Err(CommandError::Custom(format!(
+            "Cannot remove '{target}'; assembly '{}' part '{}' uses it",
+            assembly.name, part.name
+        )));
+    }
+
+    app.ast_mut().sync_active_source();
+    let fallback = editable
+        .iter()
+        .find(|path| **path != target)
+        .cloned()
+        .expect("editable source count was checked");
+    let ast = app.ast_mut();
+    ast.embedded_sources
+        .retain(|source| source.virtual_path != target);
+    ast.source_dependencies
+        .retain(|dependency| dependency.from != target && dependency.to != target);
+    if ast.entry_source.as_deref() == Some(&target) {
+        ast.entry_source = Some(fallback.clone());
+        if let Some(source) = ast
+            .embedded_sources
+            .iter_mut()
+            .find(|source| source.virtual_path == fallback)
+        {
+            source.role = openscad_core::EmbeddedSourceRole::Entry;
+        }
+    }
+    if ast.active_source.as_deref() == Some(&target) {
+        ast.active_source = None;
+        ast.activate_source(&fallback)?;
+    }
+    reload_project_definitions(app);
+    app.selected_nodes.clear();
+    app.undo_stack.clear();
+    app.redo_stack.clear();
+    app.invalidate_source_previews();
+    app.init_tree_selection();
+    app.set_info(&format!("Removed project source '{target}'"));
+    Ok(())
 }
 
 /// Import an OpenSCAD source tree into the current structured project.
@@ -2003,7 +2245,7 @@ pub fn cmd_edit_scad(app: &mut App, filename: &str) -> CommandResult<()> {
     let path = expand_tilde(filename);
     if !has_extension(&path, "scad") {
         return Err(CommandError::Custom(
-            "edit requires a .scad source file".to_string(),
+            "source import requires a .scad source file".to_string(),
         ));
     }
     let target = attach_editable_scad(app.ast_mut(), &path).map_err(CommandError::Custom)?;
@@ -2067,17 +2309,6 @@ fn reachable_source_paths(ast: &openscad_core::AstRoot) -> HashSet<String> {
         );
     }
     reachable
-}
-
-pub fn cmd_export(app: &mut App, kind: &str, destination: &str) -> CommandResult<()> {
-    match kind {
-        "source" => cmd_export_source(app, destination),
-        "tree" => cmd_export_tree(app, destination),
-        "model" => cmd_export_model(app, destination),
-        _ => Err(CommandError::InvalidCommand(
-            "Usage: export source <file.scad> | tree <directory> | model <artifact>".to_string(),
-        )),
-    }
 }
 
 fn cmd_export_source(app: &mut App, filename: &str) -> CommandResult<()> {
@@ -2154,7 +2385,7 @@ fn cmd_export_model(app: &mut App, filename: &str) -> CommandResult<()> {
     let filepath = resolve_export_path(app, filename)?;
     if filepath.extension().is_none() {
         return Err(CommandError::Custom(
-            "export model requires an output extension".to_string(),
+            "model export requires an output extension".to_string(),
         ));
     }
     let (source, project) = active_source_project(app)?;
@@ -2238,7 +2469,7 @@ pub fn cmd_load_library(app: &mut App, filename: &str) -> CommandResult<()> {
     let path = expand_tilde(filename);
     if !has_extension(&path, "scad") {
         return Err(CommandError::Custom(
-            "library requires a .scad source file".to_string(),
+            "library load requires a .scad source file".to_string(),
         ));
     }
     let canonical = path
@@ -2252,14 +2483,16 @@ pub fn cmd_load_library(app: &mut App, filename: &str) -> CommandResult<()> {
         .ast
         .embedded_sources
         .iter()
-        .find(|source| {
-            source.role != openscad_core::EmbeddedSourceRole::Entry
-                && source.original_path.as_deref() == Some(&canonical)
-        })
-        .map(|source| source.virtual_path.clone());
+        .find(|source| source.original_path.as_deref() == Some(&canonical))
+        .map(|source| (source.virtual_path.clone(), source.editable));
+    if let Some((target, true)) = &existing_target {
+        return Err(CommandError::Custom(format!(
+            "'{target}' is already an editable project source; reference it with 'source use' or 'source include'"
+        )));
+    }
     app.push_undo();
     let target = match existing_target {
-        Some(target) => {
+        Some((target, false)) => {
             if let Some(source) = app
                 .ast_mut()
                 .embedded_sources
@@ -2270,17 +2503,99 @@ pub fn cmd_load_library(app: &mut App, filename: &str) -> CommandResult<()> {
             }
             target
         }
+        Some((_, true)) => unreachable!("editable sources were rejected before mutation"),
         None => attach_scad_library(app.ast_mut(), &path).map_err(CommandError::Custom)?,
     };
     reload_project_definitions(app);
     app.invalidate_source_previews();
     app.set_info(&format!(
-        "Loaded SCAD library '{target}'; use 'use {}' to activate it",
+        "Loaded SCAD library '{target}'; use 'source use {}' to activate it",
         Path::new(&target)
             .file_name()
             .and_then(|name| name.to_str())
             .unwrap_or(&target)
     ));
+    Ok(())
+}
+
+pub fn cmd_list_libraries(app: &mut App) -> CommandResult<()> {
+    let libraries = app
+        .ast
+        .embedded_sources
+        .iter()
+        .filter(|source| source.role == openscad_core::EmbeddedSourceRole::Library)
+        .map(|source| source.virtual_path.clone())
+        .collect::<Vec<_>>();
+    let message = if libraries.is_empty() {
+        "No SCAD libraries are loaded".to_string()
+    } else {
+        format!("Loaded libraries: {}", libraries.join(", "))
+    };
+    app.set_info(&message);
+    Ok(())
+}
+
+/// Remove one unreferenced embedded library root and its private dependency tree.
+pub fn cmd_remove_library(app: &mut App, name: &str) -> CommandResult<()> {
+    let matches = app
+        .ast
+        .embedded_sources
+        .iter()
+        .filter(|source| source.role == openscad_core::EmbeddedSourceRole::Library)
+        .filter(|source| library_source_matches(source, name))
+        .map(|source| source.virtual_path.clone())
+        .collect::<Vec<_>>();
+    let root = match matches.as_slice() {
+        [] => {
+            return Err(CommandError::Custom(format!(
+                "Loaded SCAD library '{name}' was not found"
+            )))
+        }
+        [root] => root.clone(),
+        _ => {
+            return Err(CommandError::Custom(format!(
+                "Library name '{name}' is ambiguous; use its embedded path"
+            )))
+        }
+    };
+
+    let mut removed = std::collections::HashSet::from([root.clone()]);
+    loop {
+        let dependencies = app
+            .ast
+            .source_dependencies
+            .iter()
+            .filter(|dependency| removed.contains(&dependency.from))
+            .map(|dependency| dependency.to.clone())
+            .collect::<Vec<_>>();
+        let previous_len = removed.len();
+        removed.extend(dependencies);
+        if removed.len() == previous_len {
+            break;
+        }
+    }
+
+    if let Some(dependency) =
+        app.ast.source_dependencies.iter().find(|dependency| {
+            removed.contains(&dependency.to) && !removed.contains(&dependency.from)
+        })
+    {
+        return Err(CommandError::Custom(format!(
+            "Cannot remove library '{root}': '{}' references it with {:?}",
+            dependency.from, dependency.kind
+        )));
+    }
+
+    app.push_undo();
+    let ast = app.ast_mut();
+    ast.embedded_sources
+        .retain(|source| !removed.contains(&source.virtual_path));
+    ast.source_dependencies.retain(|dependency| {
+        !removed.contains(&dependency.from) && !removed.contains(&dependency.to)
+    });
+    reload_project_definitions(app);
+    app.invalidate_source_previews();
+    app.set_info(&format!("Removed SCAD library '{root}'"));
     Ok(())
 }
 
@@ -2316,7 +2631,7 @@ fn cmd_activate_source(
     let target = match matches.as_slice() {
         [] => {
             return Err(CommandError::Custom(format!(
-                "Project source '{name}' is not loaded; use 'edit' or 'library' first"
+                "Project source '{name}' is not loaded; use 'source import' or 'library load' first"
             )))
         }
         [target] => target.clone(),
@@ -2589,11 +2904,12 @@ fn general_help_doc(app: &App) -> Vec<String> {
         "  x                  remove node and promote its children".to_string(),
         "  c                  change current node (replace)".to_string(),
         "  i                  start insert command".to_string(),
+        "  n                  start source new command".to_string(),
         "  t/r/s              start translate/rotate/scale command".to_string(),
         "  d                  cut current or selected module subtree(s)".to_string(),
         "  P / R              toggle preview / render a fresh model preview".to_string(),
         "  u / Ctrl+R         undo / redo".to_string(),
-        "  w/o/e/L            save / open project / edit SCAD / load library".to_string(),
+        "  w/o/e/L            save / open project / import SCAD / load library".to_string(),
         "  :                  enter command mode".to_string(),
         "  ?                  open this help".to_string(),
         "  q / Ctrl+C         quit".to_string(),
@@ -2616,9 +2932,27 @@ fn general_help_doc(app: &App) -> Vec<String> {
 }
 
 fn command_help_doc(app: &App, command: &str) -> CommandResult<Vec<String>> {
-    let def = app.command_registry.find(command).ok_or_else(|| {
-        CommandError::InvalidCommand(format!("No help found for command: {}", command))
-    })?;
+    let Some(def) = app.command_registry.find(command) else {
+        let prefix = command.split_whitespace().collect::<Vec<_>>();
+        let children = app.command_registry.commands_below(&prefix);
+        if children.is_empty() {
+            return Err(CommandError::InvalidCommand(format!(
+                "No help found for command: {command}"
+            )));
+        }
+        let mut docs = vec![
+            format!("Help: {command}"),
+            String::new(),
+            "Commands:".to_string(),
+        ];
+        docs.extend(
+            children
+                .into_iter()
+                .map(|child| format!("  {:<34} {}", child.usage, child.description)),
+        );
+        docs.extend([String::new(), "Press Esc or q to close help.".to_string()]);
+        return Ok(docs);
+    };
     let aliases = if def.aliases.is_empty() {
         "(none)".to_string()
     } else {
@@ -3401,7 +3735,7 @@ fn delete_node_from_module_definition(
 
 /// Initialize the command registry with all available commands
 pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegistry) {
-    use crate::command_registry::CommandDef;
+    use crate::command_registry::{ArgumentSpec, CommandDef, CompletionSource};
 
     // Navigation commands (no arguments)
     registry.register(CommandDef::new(
@@ -3617,257 +3951,417 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
         true,
     ));
 
-    // File operations
+    // Project and source resource commands
+    registry.register(
+        CommandDef::new(
+            "project new",
+            Vec::<&str>::new(),
+            |app, args| {
+                let force = args.contains(&"--force");
+                let names = args
+                    .iter()
+                    .copied()
+                    .filter(|argument| *argument != "--force")
+                    .collect::<Vec<_>>();
+                match names.as_slice() {
+                    [] => cmd_new_project(app, None, force),
+                    [filename] => cmd_new_project(app, Some(filename), force),
+                    _ => Err(CommandError::InvalidCommand(
+                        "Usage: project new [project] [--force]".to_string(),
+                    )),
+                }
+            },
+            "Create a new structured project",
+            0,
+            Some(2),
+            "project new [project] [--force]",
+            vec!["project new", "project new model.scadtui --force"],
+            CommandType::NoArg,
+            true,
+            true,
+        )
+        .with_arguments(vec![
+            ArgumentSpec::literal("project", false, &["--force"]),
+            ArgumentSpec::literal("force", false, &["--force"]),
+        ]),
+    );
+
+    registry.register(
+        CommandDef::new(
+            "project save",
+            Vec::<&str>::new(),
+            |app, args| match args {
+                [] => cmd_write(app, ""),
+                ["--force"] => cmd_write_force(app, ""),
+                _ => Err(CommandError::InvalidCommand(
+                    "Usage: project save [--force]".to_string(),
+                )),
+            },
+            "Save the current .scadtui project package",
+            0,
+            Some(1),
+            "project save [--force]",
+            vec!["project save", "project save --force"],
+            CommandType::NoArg,
+            false,
+            true,
+        )
+        .with_arguments(vec![ArgumentSpec::literal("force", false, &["--force"])]),
+    );
+
+    registry.register(
+        CommandDef::new(
+            "project rename",
+            Vec::<&str>::new(),
+            |app, args| cmd_rename_project(app, &args.join(" ")),
+            "Change the project name stored in the package",
+            1,
+            None,
+            "project rename <name>",
+            vec!["project rename vernier caliper"],
+            CommandType::NoArg,
+            true,
+            true,
+        )
+        .with_arguments(vec![ArgumentSpec::new(
+            "name",
+            true,
+            CompletionSource::None,
+        )
+        .variadic()]),
+    );
+
+    registry.register(
+        CommandDef::new(
+            "project save-as",
+            Vec::<&str>::new(),
+            |app, args| match args {
+                [filename] => cmd_write(app, filename),
+                [filename, "--force"] => cmd_write_force(app, filename),
+                _ => Err(CommandError::InvalidCommand(
+                    "Usage: project save-as <project.scadtui> [--force]".to_string(),
+                )),
+            },
+            "Save the project package at a new path",
+            1,
+            Some(2),
+            "project save-as <project.scadtui> [--force]",
+            vec!["project save-as model.scadtui"],
+            CommandType::NoArg,
+            false,
+            true,
+        )
+        .with_arguments(vec![
+            ArgumentSpec::path("project", true, &[PROJECT_EXTENSION]),
+            ArgumentSpec::literal("force", false, &["--force"]),
+        ]),
+    );
+
+    registry.register(
+        CommandDef::new(
+            "project open",
+            Vec::<&str>::new(),
+            |app, args| match args {
+                [filename] => cmd_load(app, filename),
+                [filename, "--force"] => cmd_load_force(app, filename),
+                _ => Err(CommandError::InvalidCommand(
+                    "Usage: project open <project.scadtui> [--force]".to_string(),
+                )),
+            },
+            "Open an existing .scadtui project",
+            1,
+            Some(2),
+            "project open <project.scadtui> [--force]",
+            vec!["project open project.scadtui"],
+            CommandType::NoArg,
+            false,
+            true,
+        )
+        .with_arguments(vec![
+            ArgumentSpec::path("project", true, &[PROJECT_EXTENSION]),
+            ArgumentSpec::literal("force", false, &["--force"]),
+        ]),
+    );
+
+    registry.register(
+        CommandDef::new(
+            "project export-sources",
+            Vec::<&str>::new(),
+            |app, args| cmd_export_tree(app, args[0]),
+            "Export the reachable embedded SCAD source tree",
+            1,
+            Some(1),
+            "project export-sources <directory>",
+            vec!["project export-sources ./source-tree"],
+            CommandType::NoArg,
+            false,
+            true,
+        )
+        .with_arguments(vec![ArgumentSpec::path("directory", true, &[])]),
+    );
+
+    registry.register(
+        CommandDef::new(
+            "source new",
+            Vec::<&str>::new(),
+            |app, args| cmd_new_file(app, args[0]),
+            "Create and activate an editable SCAD source",
+            1,
+            Some(1),
+            "source new <name>",
+            vec!["source new head", "source new parts/arm.scad"],
+            CommandType::NoArg,
+            true,
+            true,
+        )
+        .with_arguments(vec![ArgumentSpec::new(
+            "name",
+            true,
+            CompletionSource::None,
+        )]),
+    );
+
+    registry.register(
+        CommandDef::new(
+            "source import",
+            Vec::<&str>::new(),
+            |app, args| cmd_edit_scad(app, args[0]),
+            "Import a SCAD source tree as editable project sources",
+            1,
+            Some(1),
+            "source import <file.scad>",
+            vec!["source import existing.scad"],
+            CommandType::NoArg,
+            false,
+            true,
+        )
+        .with_arguments(vec![ArgumentSpec::path("source", true, &["scad"])]),
+    );
+
     registry.register(CommandDef::new(
-        "new",
+        "source list",
         Vec::<&str>::new(),
-        |app, args| match args {
-            ["project"] => cmd_new_project(app, None, false),
-            ["project", filename] => cmd_new_project(app, Some(filename), false),
-            ["file", filename] => cmd_new_file(app, filename),
-            _ => Err(CommandError::InvalidCommand(
-                "Usage: new project [project] | new file <source.scad>".to_string(),
-            )),
-        },
-        "Create a project or an editable SCAD source buffer",
-        1,
-        Some(2),
-        "new project [project] | new file <source.scad>",
-        vec![
-            "new project",
-            "new project model.scadtui",
-            "new file part.scad",
-        ],
-        CommandType::New,
-        true,
+        |app, _args| cmd_buffer(app, None),
+        "List editable project sources",
+        0,
+        Some(0),
+        "source list",
+        vec!["source list"],
+        CommandType::NoArg,
+        false,
         true,
     ));
 
     registry.register(CommandDef::new(
-        "new!",
+        "source next",
         Vec::<&str>::new(),
-        |app, args| match args {
-            ["project"] => cmd_new_project(app, None, true),
-            ["project", filename] => cmd_new_project(app, Some(filename), true),
-            _ => Err(CommandError::InvalidCommand(
-                "Usage: new! project [project]".to_string(),
-            )),
-        },
-        "Discard changes and create a new project",
-        1,
-        Some(2),
-        "new! project [project]",
-        vec!["new! project", "new! project model.scadtui"],
-        CommandType::New,
-        true,
-        true,
-    ));
-
-    registry.register(CommandDef::new(
-        "write",
-        vec!["save", "w"],
-        |app, args| {
-            if args.len() > 1 {
-                return Err(CommandError::InvalidCommand(
-                    "write command takes at most 1 argument".to_string(),
-                ));
-            }
-            let file_name = if let Some(file) = args.first() {
-                (*file).to_string()
-            } else {
-                // Use current selection (handled in cmd_delete)
-                String::new()
-            };
-            cmd_write(app, &file_name)
-        },
-        "Save the editable .scadtui project",
+        |app, _args| cmd_buffer(app, Some("next")),
+        "Activate the next editable source",
         0,
-        Some(1),
-        "write [filename]",
-        vec!["write model.scadtui", "save project.scadtui"],
-        CommandType::File,
+        Some(0),
+        "source next",
+        vec!["source next"],
+        CommandType::NoArg,
         false,
         true,
     ));
 
     registry.register(CommandDef::new(
-        "write!",
-        vec!["save!", "w!"],
-        |app, args| {
-            if args.len() > 1 {
-                return Err(CommandError::InvalidCommand(
-                    "write! command takes at most 1 argument".to_string(),
-                ));
-            }
-            let file_name = if let Some(file) = args.first() {
-                (*file).to_string()
-            } else {
-                // Use current selection (handled in cmd_delete)
-                String::new()
-            };
-            cmd_write_force(app, &file_name)
-        },
-        "Force save the editable .scadtui project",
+        "source previous",
+        Vec::<&str>::new(),
+        |app, _args| cmd_buffer(app, Some("prev")),
+        "Activate the previous editable source",
         0,
-        Some(1),
-        "write! [filename]",
-        vec!["write! model.scadtui", "save! project.scadtui"],
-        CommandType::File,
+        Some(0),
+        "source previous",
+        vec!["source previous"],
+        CommandType::NoArg,
         false,
         true,
     ));
 
+    registry.register(
+        CommandDef::new(
+            "source switch",
+            Vec::<&str>::new(),
+            |app, args| cmd_buffer(app, Some(args[0])),
+            "Activate an editable project source",
+            1,
+            Some(1),
+            "source switch <source>",
+            vec!["source switch parts/arm.scad"],
+            CommandType::NoArg,
+            false,
+            true,
+        )
+        .with_arguments(vec![ArgumentSpec::new(
+            "source",
+            true,
+            CompletionSource::ProjectSource {
+                editable_only: true,
+            },
+        )]),
+    );
+
+    registry.register(
+        CommandDef::new(
+            "source export",
+            Vec::<&str>::new(),
+            |app, args| cmd_export_source(app, args[0]),
+            "Export the active source as a standalone SCAD file",
+            1,
+            Some(1),
+            "source export <file.scad>",
+            vec!["source export model.scad"],
+            CommandType::NoArg,
+            false,
+            true,
+        )
+        .with_arguments(vec![ArgumentSpec::path("destination", true, &["scad"])]),
+    );
+
+    registry.register(
+        CommandDef::new(
+            "source rename",
+            Vec::<&str>::new(),
+            |app, args| cmd_rename_source(app, args[0], args[1]),
+            "Rename an editable source and update project references",
+            2,
+            Some(2),
+            "source rename <source> <name>",
+            vec!["source rename arm.scad upper-arm"],
+            CommandType::NoArg,
+            true,
+            true,
+        )
+        .with_arguments(vec![
+            ArgumentSpec::new(
+                "source",
+                true,
+                CompletionSource::ProjectSource {
+                    editable_only: true,
+                },
+            ),
+            ArgumentSpec::new("name", true, CompletionSource::None),
+        ]),
+    );
+
+    registry.register(
+        CommandDef::new(
+            "source remove",
+            Vec::<&str>::new(),
+            |app, args| cmd_remove_source(app, args[0]),
+            "Remove an unreferenced editable source",
+            1,
+            Some(1),
+            "source remove <source>",
+            vec!["source remove unused.scad"],
+            CommandType::NoArg,
+            true,
+            true,
+        )
+        .with_arguments(vec![ArgumentSpec::new(
+            "source",
+            true,
+            CompletionSource::ProjectSource {
+                editable_only: true,
+            },
+        )]),
+    );
+
+    registry.register(
+        CommandDef::new(
+            "library load",
+            Vec::<&str>::new(),
+            |app, args| cmd_load_library(app, args[0]),
+            "Load and embed a SCAD library without activating it",
+            1,
+            Some(1),
+            "library load <file.scad>",
+            vec!["library load gears.scad"],
+            CommandType::NoArg,
+            true,
+            true,
+        )
+        .with_arguments(vec![ArgumentSpec::path("library", true, &["scad"])]),
+    );
+
     registry.register(CommandDef::new(
-        "open",
-        vec!["o"],
-        |app, args| {
-            if args.len() != 1 {
-                return Err(CommandError::InvalidCommand(
-                    "Usage: open <project.scadtui>".to_string(),
-                ));
-            }
-            cmd_load(app, args[0])
-        },
-        "Open an existing .scadtui project",
-        1,
-        Some(1),
-        "open <project.scadtui>",
-        vec!["open project.scadtui"],
-        CommandType::File,
+        "library list",
+        Vec::<&str>::new(),
+        |app, _args| cmd_list_libraries(app),
+        "List embedded SCAD library roots",
+        0,
+        Some(0),
+        "library list",
+        vec!["library list"],
+        CommandType::NoArg,
         false,
         true,
     ));
 
-    registry.register(CommandDef::new(
-        "open!",
-        vec!["o!"],
-        |app, args| {
-            if args.len() != 1 {
-                return Err(CommandError::InvalidCommand(
-                    "Usage: open! <project.scadtui>".to_string(),
-                ));
-            }
-            cmd_load_force(app, args[0])
-        },
-        "Open a .scadtui project and discard unsaved changes",
-        1,
-        Some(1),
-        "open! <project.scadtui>",
-        vec!["open! project.scadtui"],
-        CommandType::File,
-        false,
-        true,
-    ));
+    registry.register(
+        CommandDef::new(
+            "library remove",
+            Vec::<&str>::new(),
+            |app, args| cmd_remove_library(app, args[0]),
+            "Remove an unreferenced embedded SCAD library",
+            1,
+            Some(1),
+            "library remove <library>",
+            vec!["library remove libraries/gears/gears.scad"],
+            CommandType::NoArg,
+            true,
+            true,
+        )
+        .with_arguments(vec![ArgumentSpec::new(
+            "library",
+            true,
+            CompletionSource::LibraryRoot,
+        )]),
+    );
 
-    registry.register(CommandDef::new(
-        "edit",
-        vec!["e"],
-        |app, args| {
-            if args.len() != 1 {
-                return Err(CommandError::InvalidCommand(
-                    "Usage: edit <file.scad>".to_string(),
-                ));
-            }
-            cmd_edit_scad(app, args[0])
-        },
-        "Import an OpenSCAD source tree as editable project buffers",
-        1,
-        Some(1),
-        "edit <file.scad>",
-        vec!["edit existing.scad"],
-        CommandType::File,
-        false,
-        true,
-    ));
+    registry.register(
+        CommandDef::new(
+            "source use",
+            Vec::<&str>::new(),
+            |app, args| cmd_use_library(app, args[0]),
+            "Use a loaded SCAD library in the active source",
+            1,
+            Some(1),
+            "source use <library>",
+            vec!["source use gears.scad"],
+            CommandType::NoArg,
+            true,
+            true,
+        )
+        .with_arguments(vec![ArgumentSpec::new(
+            "library",
+            true,
+            CompletionSource::LoadedLibrary,
+        )]),
+    );
 
-    registry.register(CommandDef::new(
-        "export",
-        vec![] as Vec<String>,
-        |app, args| {
-            if args.len() != 2 {
-                return Err(CommandError::InvalidCommand(
-                    "Usage: export source <file.scad> | tree <directory> | model <artifact>"
-                        .to_string(),
-                ));
-            }
-            cmd_export(app, args[0], args[1])
-        },
-        "Export the active source, its source tree, or a rendered model",
-        2,
-        Some(2),
-        "export source <file.scad> | tree <directory> | model <artifact>",
-        vec![
-            "export source model.scad",
-            "export tree ./source-tree",
-            "export model model.stl",
-        ],
-        CommandType::Export,
-        false,
-        true,
-    ));
-
-    registry.register(CommandDef::new(
-        "library",
-        vec![] as Vec<String>,
-        |app, args| {
-            if args.len() != 1 {
-                return Err(CommandError::InvalidCommand(
-                    "library command requires a filename".to_string(),
-                ));
-            }
-            cmd_load_library(app, args[0])
-        },
-        "Load and embed a SCAD source library without activating it",
-        1,
-        Some(1),
-        "library <file.scad>",
-        vec!["library gears.scad"],
-        CommandType::File,
-        true,
-        true,
-    ));
-
-    registry.register(CommandDef::new(
-        "use",
-        vec![] as Vec<String>,
-        |app, args| {
-            if args.len() != 1 {
-                return Err(CommandError::InvalidCommand(
-                    "use command requires a loaded library name".to_string(),
-                ));
-            }
-            cmd_use_library(app, args[0])
-        },
-        "Activate a loaded SCAD library in the current entry source",
-        1,
-        Some(1),
-        "use <library>",
-        vec!["use gears.scad"],
-        CommandType::LibraryReference,
-        true,
-        true,
-    ));
-
-    registry.register(CommandDef::new(
-        "include",
-        vec![] as Vec<String>,
-        |app, args| {
-            if args.len() != 1 {
-                return Err(CommandError::InvalidCommand(
-                    "include command requires a loaded library name".to_string(),
-                ));
-            }
-            cmd_include_library(app, args[0])
-        },
-        "Include a loaded SCAD library in the current entry source",
-        1,
-        Some(1),
-        "include <library>",
-        vec!["include gears.scad"],
-        CommandType::LibraryReference,
-        true,
-        true,
-    ));
+    registry.register(
+        CommandDef::new(
+            "source include",
+            Vec::<&str>::new(),
+            |app, args| cmd_include_library(app, args[0]),
+            "Include a loaded SCAD library in the active source",
+            1,
+            Some(1),
+            "source include <library>",
+            vec!["source include gears.scad"],
+            CommandType::NoArg,
+            true,
+            true,
+        )
+        .with_arguments(vec![ArgumentSpec::new(
+            "library",
+            true,
+            CompletionSource::LoadedLibrary,
+        )]),
+    );
 
     // System commands
     registry.register(CommandDef::new(
@@ -3933,27 +4427,30 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
         true,
     ));
 
-    registry.register(CommandDef::new(
-        "help",
-        vec!["?"],
-        |app, args| {
-            if args.len() > 1 {
-                return Err(CommandError::InvalidCommand(
-                    "help command takes at most 1 argument".to_string(),
-                ));
-            }
-
-            cmd_help(app, args.first().copied())
-        },
-        "Show help",
-        0,
-        Some(1),
-        "help [command]",
-        vec!["help", "help write", "?"],
-        CommandType::NoArg,
-        false,
-        true,
-    ));
+    registry.register(
+        CommandDef::new(
+            "help",
+            vec!["?"],
+            |app, args| {
+                let command = (!args.is_empty()).then(|| args.join(" "));
+                cmd_help(app, command.as_deref())
+            },
+            "Show help",
+            0,
+            None,
+            "help [command path]",
+            vec!["help", "help model", "help model view", "?"],
+            CommandType::NoArg,
+            false,
+            true,
+        )
+        .with_arguments(vec![ArgumentSpec::new(
+            "command",
+            false,
+            CompletionSource::CommandPath,
+        )
+        .variadic()]),
+    );
 
     registry.register(CommandDef::new(
         "version",
@@ -4433,116 +4930,328 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
     ));
 
     registry.register(CommandDef::new(
-        "render",
+        "model render",
         Vec::<&str>::new(),
         |app, _args| cmd_render(app),
         "Render the active SCAD source buffer",
         0,
         Some(0),
-        "render",
-        vec!["render"],
+        "model render",
+        vec!["model render"],
+        CommandType::NoArg,
+        false,
+        true,
+    ));
+
+    registry.register(
+        CommandDef::new(
+            "model view",
+            Vec::<&str>::new(),
+            |app, args| cmd_view(app, args[0]),
+            "Preview a standalone OFF, STL, or static DAE model",
+            1,
+            Some(1),
+            "model view <model.off|model.stl|scene.dae>",
+            vec![
+                "model view model.off",
+                "model view exported/model.stl",
+                "model view assembly.dae",
+            ],
+            CommandType::NoArg,
+            false,
+            true,
+        )
+        .with_arguments(vec![ArgumentSpec::path(
+            "model",
+            true,
+            &["off", "stl", "dae"],
+        )]),
+    );
+
+    registry.register(
+        CommandDef::new(
+            "model export",
+            Vec::<&str>::new(),
+            |app, args| cmd_export_model(app, args[0]),
+            "Export the active source as a flat model",
+            1,
+            Some(1),
+            "model export <artifact>",
+            vec!["model export model.stl", "model export model.dae"],
+            CommandType::NoArg,
+            false,
+            true,
+        )
+        .with_arguments(vec![ArgumentSpec::path("artifact", true, &[])]),
+    );
+
+    registry.register(
+        CommandDef::new(
+            "model preview",
+            Vec::<&str>::new(),
+            |app, args| match args {
+                [] => cmd_preview(app, "model"),
+                ["--render"] => cmd_render(app),
+                _ => Err(CommandError::InvalidCommand(
+                    "Usage: model preview [--render]".to_string(),
+                )),
+            },
+            "Show the current model preview, rendering it when necessary",
+            0,
+            Some(1),
+            "model preview [--render]",
+            vec!["model preview", "model preview --render"],
+            CommandType::NoArg,
+            false,
+            true,
+        )
+        .with_arguments(vec![ArgumentSpec::literal("render", false, &["--render"])]),
+    );
+
+    registry.register(CommandDef::new(
+        "model close",
+        Vec::<&str>::new(),
+        |app, _args| cmd_preview(app, "close"),
+        "Close the model preview",
+        0,
+        Some(0),
+        "model close",
+        vec!["model close"],
         CommandType::NoArg,
         false,
         true,
     ));
 
     registry.register(CommandDef::new(
-        "view",
+        "model toggle",
         Vec::<&str>::new(),
-        |app, args| cmd_view(app, args[0]),
-        "Preview an OFF, STL, or static DAE model without importing it into the project",
-        1,
-        Some(1),
-        "view <model.off|model.stl|scene.dae>",
-        vec![
-            "view model.off",
-            "view exported/model.stl",
-            "view assembly.dae",
-        ],
-        CommandType::File,
-        false,
-        true,
-    ));
-
-    registry.register(CommandDef::new(
-        "buffer",
-        vec!["b"],
-        |app, args| cmd_buffer(app, args.first().copied()),
-        "List or switch editable SCAD source buffers in the current project",
+        |app, _args| cmd_preview(app, "toggle"),
+        "Toggle between the source editor and model preview",
         0,
-        Some(1),
-        "buffer [next|prev|source]",
-        vec!["buffer", "buffer next", "buffer vernier_cursor.scad"],
-        CommandType::ProjectSource,
+        Some(0),
+        "model toggle",
+        vec!["model toggle"],
+        CommandType::NoArg,
         false,
         true,
     ));
 
     registry.register(CommandDef::new(
-        "preview",
+        "source preview",
         Vec::<&str>::new(),
-        |app, args| cmd_preview(app, args[0]),
-        "Show source or model preview; model renders once when no preview exists",
-        1,
-        Some(1),
-        "preview source|model|toggle|close",
-        vec![
-            "preview source",
-            "preview model",
-            "preview toggle",
-            "preview close",
-        ],
-        CommandType::Preview,
+        |app, _args| cmd_preview(app, "source"),
+        "Return to the source editor",
+        0,
+        Some(0),
+        "source preview",
+        vec!["source preview"],
+        CommandType::NoArg,
         false,
         true,
     ));
 
+    registry.register(
+        CommandDef::new(
+            "camera projection",
+            Vec::<&str>::new(),
+            |app, args| {
+                let values = ["projection", args[0]];
+                cmd_camera(app, &values)
+            },
+            "Change or toggle the preview projection",
+            1,
+            Some(1),
+            "camera projection <perspective|orthographic|toggle>",
+            vec!["camera projection toggle"],
+            CommandType::NoArg,
+            false,
+            true,
+        )
+        .with_arguments(vec![ArgumentSpec::literal(
+            "projection",
+            true,
+            &["perspective", "orthographic", "toggle"],
+        )]),
+    );
+
+    registry.register(
+        CommandDef::new(
+            "camera view",
+            Vec::<&str>::new(),
+            |app, args| {
+                let values = ["view", args[0]];
+                cmd_camera(app, &values)
+            },
+            "Move the camera to a standard view",
+            1,
+            Some(1),
+            "camera view <front|back|left|right|top|bottom|iso>",
+            vec!["camera view iso"],
+            CommandType::NoArg,
+            false,
+            true,
+        )
+        .with_arguments(vec![ArgumentSpec::literal(
+            "view",
+            true,
+            &["front", "back", "left", "right", "top", "bottom", "iso"],
+        )]),
+    );
+
+    registry.register(
+        CommandDef::new(
+            "camera orbit",
+            Vec::<&str>::new(),
+            |app, args| {
+                let values = ["orbit", args[0], args[1]];
+                cmd_camera(app, &values)
+            },
+            "Orbit the camera by yaw and pitch degrees",
+            2,
+            Some(2),
+            "camera orbit <yaw> <pitch>",
+            vec!["camera orbit 10 -5"],
+            CommandType::NoArg,
+            false,
+            true,
+        )
+        .with_arguments(vec![
+            ArgumentSpec::new("yaw", true, CompletionSource::None),
+            ArgumentSpec::new("pitch", true, CompletionSource::None),
+        ]),
+    );
+
+    registry.register(
+        CommandDef::new(
+            "camera pan",
+            Vec::<&str>::new(),
+            |app, args| {
+                let values = ["pan", args[0], args[1]];
+                cmd_camera(app, &values)
+            },
+            "Pan the camera in the view plane",
+            2,
+            Some(2),
+            "camera pan <horizontal> <vertical>",
+            vec!["camera pan 0.05 0"],
+            CommandType::NoArg,
+            false,
+            true,
+        )
+        .with_arguments(vec![
+            ArgumentSpec::new("horizontal", true, CompletionSource::None),
+            ArgumentSpec::new("vertical", true, CompletionSource::None),
+        ]),
+    );
+
+    registry.register(
+        CommandDef::new(
+            "camera zoom",
+            Vec::<&str>::new(),
+            |app, args| {
+                let values = ["zoom", args[0]];
+                cmd_camera(app, &values)
+            },
+            "Zoom the active preview",
+            1,
+            Some(1),
+            "camera zoom <factor>",
+            vec!["camera zoom 0.8"],
+            CommandType::NoArg,
+            false,
+            true,
+        )
+        .with_arguments(vec![ArgumentSpec::new(
+            "factor",
+            true,
+            CompletionSource::None,
+        )]),
+    );
+
     registry.register(CommandDef::new(
-        "camera",
+        "camera fit",
         Vec::<&str>::new(),
-        cmd_camera,
-        "Change model preview projection and camera",
-        1,
-        Some(3),
-        "camera <projection|view|orbit|pan|zoom|fit|auto-rotate> ...",
-        vec![
-            "camera view iso",
-            "camera orbit 10 -5",
-            "camera zoom 0.8",
-            "camera auto-rotate toggle",
-        ],
-        CommandType::Camera,
+        |app, _args| cmd_camera(app, &["fit"]),
+        "Fit the active model in the preview",
+        0,
+        Some(0),
+        "camera fit",
+        vec!["camera fit"],
+        CommandType::NoArg,
         false,
         true,
     ));
 
-    registry.register(CommandDef::new(
-        "protocol",
-        Vec::<&str>::new(),
-        |app, args| cmd_protocol(app, args[0]),
-        "Switch the terminal preview protocol without regenerating the model",
-        1,
-        Some(1),
-        "protocol <auto|next|kitty|sixel|iterm2|halfblocks|braille|ascii>",
-        vec!["protocol next", "protocol braille", "protocol auto"],
-        CommandType::Protocol,
-        false,
-        true,
-    ));
+    registry.register(
+        CommandDef::new(
+            "camera auto-rotate",
+            Vec::<&str>::new(),
+            |app, args| {
+                let values = ["auto-rotate", args[0]];
+                cmd_camera(app, &values)
+            },
+            "Enable, disable, or toggle automatic rotation",
+            1,
+            Some(1),
+            "camera auto-rotate <on|off|toggle>",
+            vec!["camera auto-rotate toggle"],
+            CommandType::NoArg,
+            false,
+            true,
+        )
+        .with_arguments(vec![ArgumentSpec::literal(
+            "state",
+            true,
+            &["on", "off", "toggle"],
+        )]),
+    );
 
-    registry.register(CommandDef::new(
-        "axes",
-        Vec::<&str>::new(),
-        |app, args| cmd_axes(app, args[0]),
-        "Show or hide depth-aware world axes without regenerating the model",
-        1,
-        Some(1),
-        "axes <on|off|toggle>",
-        vec!["axes toggle", "axes on", "axes off"],
-        CommandType::Axes,
-        false,
-        true,
-    ));
+    let protocol_values = ["auto", "next"]
+        .into_iter()
+        .chain(DisplayProtocol::NAMES.iter().copied())
+        .map(str::to_string)
+        .collect();
+    registry.register(
+        CommandDef::new(
+            "display protocol",
+            Vec::<&str>::new(),
+            |app, args| cmd_protocol(app, args[0]),
+            "Switch the terminal preview protocol without regenerating the model",
+            1,
+            Some(1),
+            "display protocol <protocol>",
+            vec!["display protocol next", "display protocol braille"],
+            CommandType::NoArg,
+            false,
+            true,
+        )
+        .with_arguments(vec![ArgumentSpec::new(
+            "protocol",
+            true,
+            CompletionSource::Literal(protocol_values),
+        )]),
+    );
+
+    registry.register(
+        CommandDef::new(
+            "display axes",
+            Vec::<&str>::new(),
+            |app, args| cmd_axes(app, args[0]),
+            "Show or hide depth-aware world axes without regenerating the model",
+            1,
+            Some(1),
+            "display axes <on|off|toggle>",
+            vec!["display axes toggle", "display axes off"],
+            CommandType::NoArg,
+            false,
+            true,
+        )
+        .with_arguments(vec![ArgumentSpec::literal(
+            "state",
+            true,
+            &["on", "off", "toggle"],
+        )]),
+    );
 
     registry.register(CommandDef::new(
         "visibility",
@@ -4558,41 +5267,258 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
         true,
     ));
 
-    registry.register(CommandDef::new(
-        "assembly",
-        vec!["asm"],
-        cmd_assembly,
-        "Create, transform, preview, and export rigid multi-part assemblies",
-        1,
-        None,
-        "assembly <operation> [arguments]",
-        vec![
-            "assembly new robot",
-            "assembly add body.scad body",
-            "assembly translate body 10 0 0",
-            "assembly copy body",
-            "assembly paste root",
-            "assembly render",
-            "assembly export robot.dae",
-        ],
-        CommandType::Assembly,
-        false,
-        true,
-    ));
-
-    registry.register(CommandDef::new(
-        "diagnostics",
-        vec!["diag"],
-        |app, args| cmd_diagnostics(app, args.first().copied()),
-        "Show the full latest render error or save it to a file",
+    let mut register_assembly = |action: &str,
+                                 handler: crate::command_registry::CommandHandler,
+                                 description: &str,
+                                 min_args: usize,
+                                 max_args: Option<usize>,
+                                 usage: &str,
+                                 arguments: Vec<ArgumentSpec>| {
+        registry.register(
+            CommandDef::new(
+                format!("assembly {action}"),
+                Vec::<String>::new(),
+                handler,
+                description,
+                min_args,
+                max_args,
+                usage,
+                vec![usage],
+                CommandType::NoArg,
+                false,
+                true,
+            )
+            .with_arguments(arguments),
+        );
+    };
+    register_assembly(
+        "new",
+        |app, args| dispatch_assembly(app, "new", args),
+        "Create and open a rigid multi-part assembly",
         0,
         Some(1),
-        "diagnostics [file]",
-        vec!["diagnostics", "diagnostics ~/openscad-error.log"],
-        CommandType::File,
-        false,
-        true,
-    ));
+        "assembly new [name]",
+        vec![ArgumentSpec::new("name", false, CompletionSource::None)],
+    );
+    register_assembly(
+        "open",
+        |app, args| dispatch_assembly(app, "open", args),
+        "Open an existing assembly screen",
+        0,
+        Some(1),
+        "assembly open [assembly]",
+        vec![ArgumentSpec::new(
+            "assembly",
+            false,
+            CompletionSource::Assembly,
+        )],
+    );
+    register_assembly(
+        "list",
+        |app, args| dispatch_assembly(app, "list", args),
+        "List project assemblies",
+        0,
+        Some(0),
+        "assembly list",
+        Vec::new(),
+    );
+    register_assembly(
+        "add",
+        |app, args| dispatch_assembly(app, "add", args),
+        "Add an editable project source as an assembly part",
+        1,
+        Some(2),
+        "assembly add <source> [name]",
+        vec![
+            ArgumentSpec::new(
+                "source",
+                true,
+                CompletionSource::ProjectSource {
+                    editable_only: true,
+                },
+            ),
+            ArgumentSpec::new("name", false, CompletionSource::None),
+        ],
+    );
+    register_assembly(
+        "select",
+        |app, args| dispatch_assembly(app, "select", args),
+        "Select an assembly part",
+        1,
+        Some(1),
+        "assembly select <part|next|prev>",
+        vec![ArgumentSpec::new(
+            "part",
+            true,
+            CompletionSource::AssemblyPart {
+                literals: vec!["next".into(), "prev".into()],
+            },
+        )],
+    );
+    register_assembly(
+        "copy",
+        |app, args| dispatch_assembly(app, "copy", args),
+        "Copy an assembly part",
+        0,
+        Some(1),
+        "assembly copy [part]",
+        vec![ArgumentSpec::new(
+            "part",
+            false,
+            CompletionSource::AssemblyPart {
+                literals: Vec::new(),
+            },
+        )],
+    );
+    register_assembly(
+        "paste",
+        |app, args| dispatch_assembly(app, "paste", args),
+        "Paste an assembly part under an optional parent",
+        0,
+        Some(1),
+        "assembly paste [parent|root]",
+        vec![ArgumentSpec::new(
+            "parent",
+            false,
+            CompletionSource::AssemblyPart {
+                literals: vec!["root".into()],
+            },
+        )],
+    );
+    register_assembly(
+        "remove",
+        |app, args| dispatch_assembly(app, "remove", args),
+        "Remove an assembly part",
+        0,
+        Some(1),
+        "assembly remove [part]",
+        vec![ArgumentSpec::new(
+            "part",
+            false,
+            CompletionSource::AssemblyPart {
+                literals: Vec::new(),
+            },
+        )],
+    );
+    register_assembly(
+        "parent",
+        |app, args| dispatch_assembly(app, "parent", args),
+        "Change an assembly part parent",
+        1,
+        Some(2),
+        "assembly parent [part] <parent|root>",
+        vec![
+            ArgumentSpec::new(
+                "part-or-parent",
+                true,
+                CompletionSource::AssemblyPart {
+                    literals: vec!["root".into()],
+                },
+            ),
+            ArgumentSpec::new(
+                "parent",
+                false,
+                CompletionSource::AssemblyPart {
+                    literals: vec!["root".into()],
+                },
+            ),
+        ],
+    );
+    for (action, description) in [
+        ("translate", "Translate an assembly part"),
+        ("rotate", "Rotate an assembly part"),
+        ("scale", "Scale an assembly part"),
+        ("pivot", "Set an assembly part pivot"),
+    ] {
+        let handler: crate::command_registry::CommandHandler = match action {
+            "translate" => |app, args| dispatch_assembly(app, "translate", args),
+            "rotate" => |app, args| dispatch_assembly(app, "rotate", args),
+            "scale" => |app, args| dispatch_assembly(app, "scale", args),
+            "pivot" => |app, args| dispatch_assembly(app, "pivot", args),
+            _ => unreachable!(),
+        };
+        register_assembly(
+            action,
+            handler,
+            description,
+            3,
+            Some(4),
+            &format!("assembly {action} [part] <x> <y> <z>"),
+            vec![
+                ArgumentSpec::new(
+                    "part-or-x",
+                    true,
+                    CompletionSource::AssemblyPart {
+                        literals: Vec::new(),
+                    },
+                ),
+                ArgumentSpec::new("x-or-y", true, CompletionSource::None),
+                ArgumentSpec::new("y-or-z", true, CompletionSource::None),
+                ArgumentSpec::new("z", false, CompletionSource::None),
+            ],
+        );
+    }
+    register_assembly(
+        "visibility",
+        |app, args| dispatch_assembly(app, "visibility", args),
+        "Show, hide, or toggle an assembly part",
+        1,
+        Some(2),
+        "assembly visibility [part] <show|hide|toggle>",
+        vec![
+            ArgumentSpec::new(
+                "part-or-action",
+                true,
+                CompletionSource::AssemblyPart {
+                    literals: vec!["show".into(), "hide".into(), "toggle".into()],
+                },
+            ),
+            ArgumentSpec::literal("action", false, &["show", "hide", "toggle"]),
+        ],
+    );
+    register_assembly(
+        "render",
+        |app, args| dispatch_assembly(app, "render", args),
+        "Render the active assembly",
+        0,
+        Some(0),
+        "assembly render",
+        Vec::new(),
+    );
+    register_assembly(
+        "export",
+        |app, args| dispatch_assembly(app, "export", args),
+        "Export the active assembly as hierarchical DAE",
+        1,
+        Some(1),
+        "assembly export <file.dae>",
+        vec![ArgumentSpec::path("destination", true, &["dae"])],
+    );
+    register_assembly(
+        "close",
+        |app, args| dispatch_assembly(app, "close", args),
+        "Close the assembly screen",
+        0,
+        Some(0),
+        "assembly close",
+        Vec::new(),
+    );
+    registry.register(
+        CommandDef::new(
+            "diagnostics",
+            vec!["diag"],
+            |app, args| cmd_diagnostics(app, args.first().copied()),
+            "Show the full latest render error or save it to a file",
+            0,
+            Some(1),
+            "diagnostics [file]",
+            vec!["diagnostics", "diagnostics ~/openscad-error.log"],
+            CommandType::NoArg,
+            false,
+            true,
+        )
+        .with_arguments(vec![ArgumentSpec::path("file", false, &[])]),
+    );
 }
 
 #[cfg(test)]
@@ -4625,8 +5551,8 @@ mod tests {
         assert!(!assembly.part("arm").unwrap().visible);
         assert!(!app.saved);
         assert_eq!(app.screen, Screen::Assembly);
-        assert!(app.command_registry.find("assembly").is_some());
-        assert!(app.command_registry.find("asm").is_some());
+        assert!(app.command_registry.is_namespace(&["assembly"]));
+        assert!(app.command_registry.find("assembly add").is_some());
 
         let error = cmd_assembly(&mut app, &["scale", "arm", "0", "1", "1"])
             .expect_err("zero scale must be rejected");
@@ -4819,6 +5745,43 @@ mod tests {
     }
 
     #[test]
+    fn test_library_remove_deletes_private_tree_but_rejects_active_references() {
+        let directory = tempfile::tempdir().unwrap();
+        let library_directory = directory.path().join("library");
+        fs::create_dir(&library_directory).unwrap();
+        let library_path = library_directory.join("parts.scad");
+        fs::write(
+            &library_path,
+            "include <helper.scad>; module part() { helper(); }",
+        )
+        .unwrap();
+        fs::write(
+            library_directory.join("helper.scad"),
+            "module helper() { cube(1); }",
+        )
+        .unwrap();
+        let mut app = App::new();
+
+        cmd_load_library(&mut app, library_path.to_str().unwrap()).unwrap();
+        let root = app
+            .ast
+            .embedded_sources
+            .iter()
+            .find(|source| source.role == openscad_core::EmbeddedSourceRole::Library)
+            .unwrap()
+            .virtual_path
+            .clone();
+        cmd_remove_library(&mut app, &root).unwrap();
+        assert_eq!(app.ast.embedded_sources.len(), 1);
+        assert!(app.ast.source_dependencies.is_empty());
+
+        cmd_load_library(&mut app, library_path.to_str().unwrap()).unwrap();
+        cmd_use_library(&mut app, "parts.scad").unwrap();
+        let error = cmd_remove_library(&mut app, "parts.scad").unwrap_err();
+        assert!(error.to_string().contains("references it"));
+    }
+
+    #[test]
     fn test_include_activates_loaded_library_with_include_semantics() {
         let directory = tempfile::tempdir().unwrap();
         let library_path = directory.path().join("scene.scad");
@@ -4862,10 +5825,30 @@ mod tests {
     }
 
     #[test]
+    fn test_library_load_does_not_reclassify_an_editable_source() {
+        let directory = tempfile::tempdir().unwrap();
+        let source_path = directory.path().join("part.scad");
+        fs::write(&source_path, "module part() { cube(1); }").unwrap();
+        let mut app = App::new();
+
+        cmd_edit_scad(&mut app, source_path.to_str().unwrap()).unwrap();
+        let error = cmd_load_library(&mut app, source_path.to_str().unwrap()).unwrap_err();
+
+        assert!(error.to_string().contains("editable project source"));
+        assert_eq!(app.ast.embedded_sources.len(), 1);
+        assert!(app.ast.embedded_sources[0].editable);
+        assert_eq!(
+            app.ast.embedded_sources[0].role,
+            openscad_core::EmbeddedSourceRole::Entry
+        );
+    }
+
+    #[test]
     fn test_new_project_and_new_file_create_materialized_buffers() {
         let mut app = App::new();
-        cmd_new_project(&mut app, Some("fixture.scadtui"), true).unwrap();
-        assert_eq!(app.current_file.as_deref(), Some("fixture.scadtui"));
+        cmd_new_project(&mut app, Some("fixture"), true).unwrap();
+        assert_eq!(app.project_name, "fixture");
+        assert_eq!(app.current_file, None);
         assert_eq!(app.ast.active_source.as_deref(), Some("main.scad"));
         assert!(!app.saved);
 
@@ -4878,6 +5861,69 @@ mod tests {
             .any(|source| source.virtual_path == "parts/bracket.scad" && source.editable));
         assert!(cmd_new_file(&mut app, "../escape.scad").is_err());
         assert!(cmd_new_file(&mut app, "parts/bracket.scad").is_err());
+
+        cmd_new_file(&mut app, "head").unwrap();
+        assert_eq!(app.ast.active_source.as_deref(), Some("head.scad"));
+    }
+
+    #[test]
+    fn test_project_name_round_trips_and_source_rename_updates_references() {
+        let directory = tempfile::tempdir().unwrap();
+        let project_path = directory.path().join("renamed.scadtui");
+        let mut app = App::new();
+        cmd_rename_project(&mut app, "vernier caliper").unwrap();
+        cmd_new_file(&mut app, "parts/arm").unwrap();
+        cmd_buffer(&mut app, Some("main.scad")).unwrap();
+        cmd_use_library(&mut app, "parts/arm.scad").unwrap();
+        cmd_assembly(&mut app, &["new", "fixture"]).unwrap();
+        cmd_assembly(&mut app, &["add", "parts/arm.scad", "arm"]).unwrap();
+
+        cmd_rename_source(&mut app, "parts/arm.scad", "upper-arm").unwrap();
+
+        assert!(app
+            .ast
+            .embedded_sources
+            .iter()
+            .any(|source| source.virtual_path == "parts/upper-arm.scad"));
+        assert!(app.ast.source_dependencies.iter().any(|dependency| {
+            dependency.from == "main.scad"
+                && dependency.to == "parts/upper-arm.scad"
+                && dependency.reference == "parts/upper-arm.scad"
+        }));
+        assert_eq!(app.ast.uses, ["parts/upper-arm.scad"]);
+        assert_eq!(
+            app.assemblies[0].parts[0].source.virtual_path(),
+            "parts/upper-arm.scad"
+        );
+
+        cmd_write_force(&mut app, project_path.to_str().unwrap()).unwrap();
+        let mut restored = App::new();
+        cmd_load_force(&mut restored, project_path.to_str().unwrap()).unwrap();
+        assert_eq!(restored.project_name, "vernier caliper");
+        assert_eq!(
+            restored.assemblies[0].parts[0].source.virtual_path(),
+            "parts/upper-arm.scad"
+        );
+    }
+
+    #[test]
+    fn test_source_remove_rejects_references_and_removes_an_unreferenced_source() {
+        let mut app = App::new();
+        cmd_new_file(&mut app, "used").unwrap();
+        cmd_buffer(&mut app, Some("main.scad")).unwrap();
+        cmd_use_library(&mut app, "used.scad").unwrap();
+        assert!(cmd_remove_source(&mut app, "used.scad")
+            .unwrap_err()
+            .to_string()
+            .contains("referenced"));
+
+        cmd_new_file(&mut app, "unused").unwrap();
+        cmd_remove_source(&mut app, "unused.scad").unwrap();
+        assert!(!app
+            .ast
+            .embedded_sources
+            .iter()
+            .any(|source| source.virtual_path == "unused.scad"));
     }
 
     #[test]
@@ -4979,7 +6025,7 @@ mod tests {
         ));
         let output = directory.path().join("active");
 
-        cmd_export(&mut app, "source", output.to_str().unwrap()).unwrap();
+        cmd_export_source(&mut app, output.to_str().unwrap()).unwrap();
 
         let source = fs::read_to_string(output.with_extension("scad")).unwrap();
         assert!(source.contains("sphere("));
@@ -5007,7 +6053,7 @@ mod tests {
             resolve_export_path(&app, "model.stl").unwrap(),
             directory.path().join("model.stl")
         );
-        cmd_export(&mut app, "source", "snapshot").unwrap();
+        cmd_export_source(&mut app, "snapshot").unwrap();
 
         assert!(fs::read_to_string(directory.path().join("snapshot.scad"))
             .unwrap()
@@ -5038,7 +6084,7 @@ mod tests {
         .unwrap();
         let output = directory.path().join("exported");
 
-        cmd_export(&mut app, "tree", output.to_str().unwrap()).unwrap();
+        cmd_export_tree(&mut app, output.to_str().unwrap()).unwrap();
 
         assert!(fs::read_to_string(output.join("main.scad"))
             .unwrap()
@@ -5051,9 +6097,9 @@ mod tests {
     #[test]
     fn test_render_is_a_zero_argument_active_buffer_command() {
         let app = App::new();
-        let render = app.command_registry.find("render").unwrap();
+        let render = app.command_registry.find("model render").unwrap();
         assert_eq!(render.max_args, Some(0));
-        assert_eq!(render.usage, "render");
+        assert_eq!(render.usage, "model render");
         assert!(app.command_registry.find("render-target").is_none());
     }
 
@@ -5252,20 +6298,19 @@ mod tests {
     }
 
     #[test]
-    fn test_cmd_help_shows_details_for_alias() {
+    fn test_cmd_help_shows_namespace_and_leaf_details() {
         let mut app = App::new();
 
-        cmd_help(&mut app, Some("w")).expect("alias help should succeed");
+        cmd_help(&mut app, Some("model")).expect("namespace help should succeed");
+        assert!(app.help_doc.iter().any(|line| line.contains("model view")));
 
-        assert!(app.help_doc.iter().any(|line| line == "Help: write"));
+        cmd_help(&mut app, Some("model view")).expect("leaf help should succeed");
+
+        assert!(app.help_doc.iter().any(|line| line == "Help: model view"));
         assert!(app
             .help_doc
             .iter()
-            .any(|line| line == "Usage: write [filename]"));
-        assert!(app
-            .help_doc
-            .iter()
-            .any(|line| line.contains("Aliases: save, w")));
+            .any(|line| line.starts_with("Usage: model view")));
     }
 
     #[test]

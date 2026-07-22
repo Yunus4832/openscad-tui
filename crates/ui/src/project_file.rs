@@ -10,10 +10,11 @@ use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
 pub const PROJECT_EXTENSION: &str = "scadtui";
 const FORMAT_NAME: &str = "openscad-tui-project";
-const FORMAT_VERSION: u32 = 2;
+const FORMAT_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectDocument {
+    pub name: String,
     pub sources: AstRoot,
     #[serde(default)]
     pub assemblies: Vec<AssemblyDocument>,
@@ -22,8 +23,9 @@ pub struct ProjectDocument {
 }
 
 impl ProjectDocument {
-    pub fn new(sources: AstRoot) -> Self {
+    pub fn new(name: impl Into<String>, sources: AstRoot) -> Self {
         Self {
+            name: name.into(),
             sources,
             assemblies: Vec::new(),
             active_assembly: None,
@@ -132,6 +134,9 @@ pub fn load_project(path: &Path) -> Result<ProjectDocument, String> {
 }
 
 fn validate_document(project: &ProjectDocument) -> Result<(), String> {
+    if project.name.trim().is_empty() {
+        return Err("Project name cannot be empty".to_string());
+    }
     let editable_sources = project
         .sources
         .embedded_sources
@@ -214,7 +219,7 @@ mod tests {
             Vec::new(),
         ));
         sources.sync_active_source();
-        let mut project = ProjectDocument::new(sources);
+        let mut project = ProjectDocument::new("fixture", sources);
         let mut assembly = AssemblyDocument::new("fixture");
         assembly
             .add_part(
@@ -229,6 +234,7 @@ mod tests {
         save_project(&path, &project).unwrap();
         save_project(&path, &project).unwrap();
         let restored = load_project(&path).unwrap();
+        assert_eq!(restored.name, "fixture");
         assert_eq!(restored.sources.active_source.as_deref(), Some("main.scad"));
         assert!(restored
             .sources
@@ -257,7 +263,7 @@ mod tests {
 
     #[test]
     fn project_validation_rejects_missing_assembly_sources_and_active_ids() {
-        let mut project = ProjectDocument::new(AstRoot::new_project("main.scad"));
+        let mut project = ProjectDocument::new("broken", AstRoot::new_project("main.scad"));
         let mut assembly = AssemblyDocument::new("broken");
         assembly
             .add_part(
@@ -279,7 +285,7 @@ mod tests {
 
     #[test]
     fn project_validation_rejects_duplicate_assembly_part_names() {
-        let mut project = ProjectDocument::new(AstRoot::new_project("main.scad"));
+        let mut project = ProjectDocument::new("invalid", AstRoot::new_project("main.scad"));
         let mut assembly = AssemblyDocument::new("invalid names");
         let source = openscad_assembly::MeshSourceRef::project_source("main.scad");
         assembly.add_part(source.clone(), "arm").unwrap();
