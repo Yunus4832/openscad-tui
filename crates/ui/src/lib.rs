@@ -4,6 +4,7 @@ pub mod app;
 pub mod command_registry;
 pub mod commands;
 pub mod input;
+pub mod keymap;
 pub mod preview;
 pub mod project_file;
 pub mod project_import;

@@ -240,83 +240,7 @@ fn draw_editor_screen(f: &mut Frame, app: &mut App) {
 }
 
 fn draw_camera_toolbar(f: &mut Frame, app: &mut App, area: Rect) {
-    let close_label = match app.screen {
-        Screen::Assembly => "Source",
-        Screen::Editor | Screen::ModelPreview => match app.preview_close_action {
-            crate::app::PreviewCloseAction::Source => "Source",
-            crate::app::PreviewCloseAction::Quit => "Quit",
-        },
-    };
-    let preview = match app.screen {
-        Screen::Assembly => &app.assembly_preview,
-        Screen::Editor | Screen::ModelPreview => &app.model_preview,
-    };
-    let projection = match preview.camera.projection {
-        openscad_render::Projection::Perspective { .. } => "Ortho",
-        openscad_render::Projection::Orthographic { .. } => "Persp",
-    };
-    let auto = if preview.auto_rotate { "Stop" } else { "Auto" };
-    let axes = if preview.axes_visible {
-        "Axes-"
-    } else {
-        "Axes+"
-    };
-    let buttons = if app.screen == Screen::Assembly {
-        let selected_visible = app.active_assembly.as_deref().and_then(|active| {
-            let selected = app.selected_assembly_part.as_deref()?;
-            app.assemblies
-                .iter()
-                .find(|assembly| assembly.id == active || assembly.name == active)?
-                .part(selected)
-                .map(|part| part.visible)
-        });
-        let visibility_label = match selected_visible {
-            Some(true) => "Hide",
-            Some(false) => "Show",
-            None => "Select",
-        };
-        let visibility = if selected_visible.is_some() {
-            "assembly visibility toggle".to_string()
-        } else {
-            "assembly select next".to_string()
-        };
-        vec![
-            ("P", "Source".to_string(), "assembly close".to_string()),
-            ("R", "Render".to_string(), "assembly render".to_string()),
-            ("v", visibility_label.to_string(), visibility),
-            ("y", "Copy".to_string(), "assembly copy".to_string()),
-            ("p", "Paste".to_string(), "assembly paste".to_string()),
-            (
-                "Space",
-                auto.to_string(),
-                "camera auto-rotate toggle".to_string(),
-            ),
-            (
-                "Proj",
-                projection.to_string(),
-                "camera projection toggle".to_string(),
-            ),
-        ]
-    } else {
-        vec![
-            ("P", close_label.to_string(), "model close".to_string()),
-            ("f", "Fit".to_string(), "camera fit".to_string()),
-            (
-                "p",
-                projection.to_string(),
-                "camera projection toggle".to_string(),
-            ),
-            ("x", axes.to_string(), "display axes toggle".to_string()),
-            ("1", "Front".to_string(), "camera view front".to_string()),
-            ("5", "Top".to_string(), "camera view top".to_string()),
-            ("7", "Iso".to_string(), "camera view iso".to_string()),
-            (
-                "Space",
-                auto.to_string(),
-                "camera auto-rotate toggle".to_string(),
-            ),
-        ]
-    };
+    let buttons = crate::keymap::toolbar_buttons(app);
     let block = Block::default()
         .title(if app.screen == Screen::Assembly {
             " Assembly Controls "
@@ -328,15 +252,15 @@ fn draw_camera_toolbar(f: &mut Frame, app: &mut App, area: Rect) {
     let inner = block.inner(area);
     let mut spans = Vec::new();
     let mut x = inner.x;
-    for (shortcut, label, command) in buttons {
-        let text = format!("[{shortcut} {label}]");
+    for button in buttons {
+        let text = format!("[{}]", button.label);
         let width = text.chars().count() as u16;
         if x.saturating_add(width) > inner.right() {
             break;
         }
         app.ui_regions.camera_buttons.push(CameraButtonRegion {
-            area: Rect::new(x, inner.y, width, 1),
-            command,
+            area: Rect::new(x, inner.y.saturating_add(1), width, 1),
+            command: button.command,
         });
         spans.push(Span::styled(
             text,
@@ -349,15 +273,11 @@ fn draw_camera_toolbar(f: &mut Frame, app: &mut App, area: Rect) {
         x = x.saturating_add(width + 1);
     }
     let shortcut_help = Line::styled(
-        if app.screen == Screen::Assembly {
-            "j/k Select  a Add  t/r/s Transform  o Pivot  g Parent  v Hide  y/p Copy/Paste  Space Auto"
-        } else {
-            "h/j/k/l Orbit  Arrows Pan  +/- Zoom  x Axes  1..7 Views  Esc/q Source  : Command"
-        },
+        crate::keymap::screen_shortcut_help(app),
         Style::default().fg(Color::DarkGray),
     );
     f.render_widget(
-        Paragraph::new(vec![Line::from(spans), shortcut_help]),
+        Paragraph::new(vec![shortcut_help, Line::from(spans)]),
         inner,
     );
     f.render_widget(block, area);
@@ -385,7 +305,7 @@ fn draw_tree(f: &mut Frame, app: &App, area: Rect) {
         .style(Style::default().fg(Color::Cyan));
 
     // Build tree items from AST (includes all sections)
-    let tree_items = build_ast_tree_items(&app.ast, &app.selected_nodes);
+    let tree_items = build_ast_tree_items(app);
 
     // Create tree widget
     match Tree::new(&tree_items) {
@@ -413,10 +333,9 @@ fn draw_tree(f: &mut Frame, app: &App, area: Rect) {
 }
 
 /// Build TreeItems from entire AST (all sections)
-fn build_ast_tree_items(
-    ast: &openscad_core::AstRoot,
-    selected: &[String],
-) -> Vec<TreeItem<'static, String>> {
+fn build_ast_tree_items(app: &App) -> Vec<TreeItem<'static, String>> {
+    let ast = &app.ast;
+    let selected = &app.selected_nodes;
     let mut items = Vec::new();
 
     if ast.embedded_sources.iter().any(|source| source.editable) {
@@ -467,6 +386,36 @@ fn build_ast_tree_items(
                 source_children,
             )
             .expect("Failed to create TreeItem"),
+        );
+    }
+
+    if !app.assemblies.is_empty() {
+        let active = app.active_assembly.as_deref();
+        let assembly_children = app
+            .assemblies
+            .iter()
+            .enumerate()
+            .map(|(index, assembly)| {
+                let marker = if active == Some(assembly.id.as_str()) {
+                    "* "
+                } else {
+                    "  "
+                };
+                TreeItem::new(
+                    format!("__assembly_{index}"),
+                    format!("{marker}{} ({} parts)", assembly.name, assembly.parts.len()),
+                    vec![],
+                )
+                .expect("Failed to create assembly TreeItem")
+            })
+            .collect();
+        items.push(
+            TreeItem::new(
+                "__assemblies".to_string(),
+                "[Assemblies]".to_string(),
+                assembly_children,
+            )
+            .expect("Failed to create assemblies TreeItem"),
         );
     }
 
@@ -1142,6 +1091,26 @@ mod tests {
     }
 
     #[test]
+    fn test_source_tree_lists_project_assemblies() {
+        let mut app = App::new();
+        app.assemblies
+            .push(openscad_assembly::AssemblyDocument::new("robot"));
+        app.tree_state
+            .borrow_mut()
+            .open(vec!["__assemblies".to_string()]);
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let screen = (0..buffer.area.height)
+            .flat_map(|y| (0..buffer.area.width).map(move |x| buffer[(x, y)].symbol()))
+            .collect::<String>();
+        assert!(screen.contains("Assemblies"));
+        assert!(screen.contains("robot (0 parts)"));
+    }
+
+    #[test]
     fn test_replace_parameter_mode_shows_input_buffer() {
         assert!(shows_input_buffer(InputMode::ModuleEnterParams));
         assert!(shows_input_buffer(InputMode::Command));
@@ -1181,18 +1150,19 @@ mod tests {
                 .map(|x| buffer[(x, y)].symbol())
                 .collect::<String>()
         };
-        let buttons = row(27);
-        assert!(buttons.contains("[P Source]"));
-        assert!(buttons.contains("[f Fit]"));
-        assert!(buttons.contains("[p Ortho]"));
-        assert!(buttons.contains("[x Axes-]"));
-        assert!(buttons.contains("[Space Auto]"));
-        let shortcuts = row(28);
+        let shortcuts = row(27);
         assert!(shortcuts.contains("h/j/k/l Orbit"));
         assert!(shortcuts.contains("Arrows Pan"));
         assert!(shortcuts.contains("+/- Zoom"));
         assert!(shortcuts.contains("1..7 Views"));
-        assert!(shortcuts.contains("Esc/q Source"));
+        assert!(shortcuts.contains("Esc/q Close"));
+        let buttons = row(28);
+        assert!(buttons.contains("[Source]"));
+        assert!(buttons.contains("[Fit]"));
+        assert!(buttons.contains("[Ortho]"));
+        assert!(buttons.contains("[Axes-]"));
+        assert!(buttons.contains("[Auto]"));
+        assert!(!buttons.contains("[P Source]"));
     }
 
     #[test]

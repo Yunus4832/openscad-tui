@@ -13,6 +13,13 @@ use tui_tree_widget::TreeState;
 
 use crate::command_registry::{CommandRegistry, CommandType};
 
+#[derive(Debug, Clone)]
+pub struct ProjectSourceClipboard {
+    pub source: openscad_core::EmbeddedSourceFile,
+    pub dependencies: Vec<openscad_core::SourceDependency>,
+    pub cut: bool,
+}
+
 /// Input buffer with cursor position management
 #[derive(Debug, Clone)]
 pub struct InputBuffer {
@@ -374,6 +381,8 @@ pub struct App {
     pub redo_stack: VecDeque<Arc<AstRoot>>,
     /// Application-local clipboard for copied or cut module subtrees.
     pub node_clipboard: Vec<openscad_core::ModuleNode>,
+    /// Application-local clipboard for one editable project source.
+    pub source_clipboard: Option<ProjectSourceClipboard>,
 
     // UI state - Tree navigation (using RefCell for interior mutability)
     pub tree_state: RefCell<TreeState<String>>,
@@ -446,6 +455,7 @@ impl App {
             undo_stack: VecDeque::with_capacity(100),
             redo_stack: VecDeque::with_capacity(100),
             node_clipboard: Vec::new(),
+            source_clipboard: None,
             tree_state: RefCell::new(TreeState::default()),
             ui_regions: UiRegions::default(),
             mouse_drag: None,
@@ -582,6 +592,7 @@ impl App {
                 .embedded_sources
                 .iter()
                 .any(|source| source.editable),
+            "__assemblies" => !self.assemblies.is_empty(),
             "__includes" => !self.ast.includes.is_empty(),
             "__uses" => !self.ast.uses.is_empty(),
             "__globals" => !self.ast.global_variables.is_empty(),
@@ -597,6 +608,13 @@ impl App {
                     .embedded_sources
                     .get(idx)
                     .is_some_and(|source| source.editable)
+            }
+            s if s.starts_with("__assembly_") => {
+                let idx = s
+                    .trim_start_matches("__assembly_")
+                    .parse::<usize>()
+                    .unwrap_or(usize::MAX);
+                idx < self.assemblies.len()
             }
             s if s.starts_with("__include_") => {
                 let idx: usize = s
@@ -686,6 +704,14 @@ impl App {
                     .is_some_and(|source| source.editable)
                 {
                     return Some(vec!["__project_sources".to_string(), target_id.to_string()]);
+                }
+                return None;
+            }
+
+            if let Some(index) = target_id.strip_prefix("__assembly_") {
+                let index = index.parse::<usize>().ok()?;
+                if index < self.assemblies.len() {
+                    return Some(vec!["__assemblies".to_string(), target_id.to_string()]);
                 }
                 return None;
             }
@@ -933,6 +959,7 @@ impl App {
     fn get_section_display_name(&self, node_id: &str) -> String {
         match node_id {
             "__project_sources" => "[Project Sources]".to_string(),
+            "__assemblies" => "[Assemblies]".to_string(),
             "__includes" => "[Includes]".to_string(),
             "__uses" => "[Uses]".to_string(),
             "__globals" => "[Global Variables]".to_string(),
@@ -948,6 +975,16 @@ impl App {
                     .embedded_sources
                     .get(idx)
                     .map(|source| source.virtual_path.clone())
+                    .unwrap_or_else(|| s.to_string())
+            }
+            s if s.starts_with("__assembly_") => {
+                let idx = s
+                    .trim_start_matches("__assembly_")
+                    .parse::<usize>()
+                    .unwrap_or(usize::MAX);
+                self.assemblies
+                    .get(idx)
+                    .map(|assembly| assembly.name.clone())
                     .unwrap_or_else(|| s.to_string())
             }
             s if s.starts_with("__include_") => {

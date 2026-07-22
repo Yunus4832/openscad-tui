@@ -1836,8 +1836,17 @@ pub fn cmd_write_force(app: &mut App, filename: &str) -> CommandResult<()> {
     };
 
     let filepath = normalized_project_path(expanded_filepath);
+    let project_name = if app.project_name == "untitled" {
+        filepath
+            .file_stem()
+            .and_then(|name| name.to_str())
+            .unwrap_or("untitled")
+            .to_string()
+    } else {
+        app.project_name.clone()
+    };
     let document = ProjectDocument {
-        name: app.project_name.clone(),
+        name: project_name.clone(),
         sources: (*app.ast).clone(),
         assemblies: app.assemblies.clone(),
         active_assembly: app.active_assembly.clone(),
@@ -1854,6 +1863,7 @@ pub fn cmd_write_force(app: &mut App, filename: &str) -> CommandResult<()> {
     if !filename.is_empty() || app.current_file.is_none() {
         app.current_file = Some(filepath.to_string_lossy().into_owned());
     }
+    app.project_name = project_name;
     app.mark_saved();
 
     Ok(())
@@ -1897,13 +1907,22 @@ pub fn cmd_load_force(app: &mut App, filename: &str) -> CommandResult<()> {
     })?;
 
     // Replace AST
-    app.project_name = project.name;
+    app.project_name = if project.name == "untitled" {
+        expanded_filename
+            .file_stem()
+            .and_then(|name| name.to_str())
+            .unwrap_or("untitled")
+            .to_string()
+    } else {
+        project.name
+    };
     app.ast = Arc::new(project.sources);
     app.assemblies = project.assemblies;
     app.active_assembly = project.active_assembly;
     app.selected_assembly_part = None;
     app.assembly_scroll_offset = 0;
     app.assembly_clipboard = None;
+    app.source_clipboard = None;
     app.invalidate_source_previews();
     app.assembly_preview.clear();
 
@@ -1915,8 +1934,10 @@ pub fn cmd_load_force(app: &mut App, filename: &str) -> CommandResult<()> {
     app.undo_stack.clear();
     app.redo_stack.clear();
     app.tree_state.borrow_mut().select(Vec::new());
-    app.current_file = Some(filename.to_string());
+    app.current_file = Some(expanded_filename.to_string_lossy().into_owned());
     app.mark_saved();
+    app.init_tree_selection();
+    app.set_info(&format!("Opened project '{}'", app.project_name));
 
     Ok(())
 }
@@ -1940,6 +1961,7 @@ pub fn cmd_new_project(app: &mut App, name: Option<&str>, force: bool) -> Comman
     app.selected_assembly_part = None;
     app.assembly_scroll_offset = 0;
     app.assembly_clipboard = None;
+    app.source_clipboard = None;
     app.library.reload_custom_modules_from_ast(&[]);
     app.library.reload_custom_functions_from_ast(&[]);
     app.selected_nodes.clear();
@@ -2164,6 +2186,176 @@ pub fn cmd_rename_source(app: &mut App, source: &str, new_name: &str) -> Command
     app.set_info(&format!(
         "Renamed project source '{old_path}' to '{target}'"
     ));
+    Ok(())
+}
+
+fn snapshot_project_source(
+    app: &mut App,
+    source: &str,
+    cut: bool,
+) -> CommandResult<crate::app::ProjectSourceClipboard> {
+    app.ast_mut().sync_active_source();
+    let editable = app
+        .ast
+        .embedded_sources
+        .iter()
+        .filter(|source| source.editable)
+        .map(|source| source.virtual_path.clone())
+        .collect::<Vec<_>>();
+    let target = resolve_project_source(&editable, source)?;
+    let source = app
+        .ast
+        .embedded_sources
+        .iter()
+        .find(|source| source.virtual_path == target)
+        .expect("resolved editable source must exist")
+        .clone();
+    let dependencies = app
+        .ast
+        .source_dependencies
+        .iter()
+        .filter(|dependency| dependency.from == target)
+        .cloned()
+        .collect();
+    Ok(crate::app::ProjectSourceClipboard {
+        source,
+        dependencies,
+        cut,
+    })
+}
+
+pub fn cmd_copy_source(app: &mut App, source: &str) -> CommandResult<()> {
+    let clipboard = snapshot_project_source(app, source, false)?;
+    let name = clipboard.source.virtual_path.clone();
+    app.source_clipboard = Some(clipboard);
+    app.set_info(&format!("Copied project source '{name}'"));
+    Ok(())
+}
+
+pub fn cmd_cut_source(app: &mut App, source: &str) -> CommandResult<()> {
+    let clipboard = snapshot_project_source(app, source, true)?;
+    let name = clipboard.source.virtual_path.clone();
+    cmd_remove_source(app, &name)?;
+    app.source_clipboard = Some(clipboard);
+    app.set_info(&format!("Cut project source '{name}'"));
+    Ok(())
+}
+
+fn next_source_copy_path(original: &str, occupied: &[String]) -> String {
+    let path = Path::new(original);
+    let parent = path.parent().unwrap_or_else(|| Path::new(""));
+    let stem = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("source");
+    let base = stem.trim_end_matches(|character: char| character.is_ascii_digit());
+    let base = if base.is_empty() { "source" } else { base };
+    let suffix = stem[base.len().min(stem.len())..]
+        .parse::<usize>()
+        .ok()
+        .map_or(2, |suffix| suffix.saturating_add(1).max(2));
+    let extension = path.extension().and_then(|extension| extension.to_str());
+
+    (suffix..)
+        .map(|suffix| {
+            let filename = match extension {
+                Some(extension) => format!("{base}{suffix}.{extension}"),
+                None => format!("{base}{suffix}"),
+            };
+            parent.join(filename).to_string_lossy().into_owned()
+        })
+        .find(|candidate| !occupied.contains(candidate))
+        .expect("a unique source path is always available")
+}
+
+pub fn cmd_paste_source(app: &mut App, new_name: Option<&str>) -> CommandResult<()> {
+    let clipboard = app
+        .source_clipboard
+        .clone()
+        .ok_or_else(|| CommandError::Custom("Project source clipboard is empty".to_string()))?;
+    let old_path = clipboard.source.virtual_path.clone();
+    let occupied = app
+        .ast
+        .embedded_sources
+        .iter()
+        .map(|source| source.virtual_path.clone())
+        .collect::<Vec<_>>();
+    let target = match new_name {
+        Some(name) => {
+            let requested = Path::new(name);
+            if requested.components().count() == 1 {
+                normalize_project_source_path(
+                    &Path::new(&old_path)
+                        .parent()
+                        .unwrap_or_else(|| Path::new(""))
+                        .join(requested)
+                        .to_string_lossy(),
+                )?
+            } else {
+                normalize_project_source_path(name)?
+            }
+        }
+        None if clipboard.cut && !occupied.contains(&old_path) => old_path.clone(),
+        None => next_source_copy_path(&old_path, &occupied),
+    };
+    if occupied.contains(&target) {
+        return Err(CommandError::Custom(format!(
+            "Project source '{target}' already exists"
+        )));
+    }
+
+    app.ast_mut().sync_active_source();
+    let mut pasted = clipboard.source;
+    pasted.virtual_path.clone_from(&target);
+    pasted.original_path = None;
+    pasted.role = openscad_core::EmbeddedSourceRole::Dependency;
+    pasted.editable = true;
+    let mut dependencies = clipboard.dependencies;
+    for dependency in &mut dependencies {
+        let old_reference = dependency.reference.clone();
+        dependency.from.clone_from(&target);
+        if dependency.to == old_path {
+            dependency.to.clone_from(&target);
+        }
+        dependency.reference = relative_virtual_path(&dependency.from, &dependency.to);
+        let references = match dependency.kind {
+            openscad_core::SourceDependencyKind::Include => &mut pasted.includes,
+            openscad_core::SourceDependencyKind::Use => &mut pasted.uses,
+        };
+        for reference in references
+            .iter_mut()
+            .filter(|reference| **reference == old_reference)
+        {
+            reference.clone_from(&dependency.reference);
+        }
+    }
+
+    let ast = app.ast_mut();
+    ast.embedded_sources.push(pasted);
+    ast.source_dependencies.extend(dependencies);
+    ast.activate_source(&target)?;
+    reload_project_definitions(app);
+    app.selected_nodes.clear();
+    app.undo_stack.clear();
+    app.redo_stack.clear();
+    app.invalidate_source_previews();
+    if let Some(clipboard) = &mut app.source_clipboard {
+        clipboard.cut = false;
+    }
+    if let Some(index) = app
+        .ast
+        .embedded_sources
+        .iter()
+        .position(|source| source.virtual_path == target)
+    {
+        let mut tree = app.tree_state.borrow_mut();
+        tree.open(vec!["__project_sources".to_string()]);
+        tree.select(vec![
+            "__project_sources".to_string(),
+            format!("__project_source_{index}"),
+        ]);
+    }
+    app.set_info(&format!("Pasted project source as '{target}'"));
     Ok(())
 }
 
@@ -2898,15 +3090,15 @@ fn general_help_doc(app: &App) -> Vec<String> {
         "".to_string(),
         "Normal mode keys:".to_string(),
         "  j/k/h/l or arrows  navigate and expand/collapse the tree".to_string(),
-        "  Enter              toggle node expansion".to_string(),
+        "  Enter              toggle a node, or open a selected source/assembly".to_string(),
         "  v                  select/deselect current node".to_string(),
-        "  y / p              yank / paste module subtree(s)".to_string(),
+        "  y / p              copy / paste the selected module or project source".to_string(),
         "  x                  remove node and promote its children".to_string(),
         "  c                  change current node (replace)".to_string(),
         "  i                  start insert command".to_string(),
         "  n                  start source new command".to_string(),
-        "  t/r/s              start translate/rotate/scale command".to_string(),
-        "  d                  cut current or selected module subtree(s)".to_string(),
+        "  t/r/s              transform modules; r renames a selected project source".to_string(),
+        "  d                  cut selected module subtree(s) or project source".to_string(),
         "  P / R              toggle preview / render a fresh model preview".to_string(),
         "  u / Ctrl+R         undo / redo".to_string(),
         "  w/o/e/L            save / open project / import SCAD / load library".to_string(),
@@ -3517,11 +3709,6 @@ fn run_insert_command(app: &mut App, args: &[&str], before: bool) -> CommandResu
         .library
         .get_module(module_name)
         .ok_or_else(|| CommandError::InvalidCommand(format!("Unknown module: {module_name}")))?;
-    if module_def.accepts_children && app.selected_nodes.is_empty() {
-        return Err(CommandError::InvalidCommand(format!(
-            "'{module_name}' requires child modules. Select modules with 'v' first"
-        )));
-    }
     if before && !module_def.accepts_children {
         ensure_insert_before_target(app)?;
     }
@@ -3993,20 +4180,29 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
             |app, args| match args {
                 [] => cmd_write(app, ""),
                 ["--force"] => cmd_write_force(app, ""),
+                [filename] => cmd_write(app, filename),
+                [filename, "--force"] => cmd_write_force(app, filename),
                 _ => Err(CommandError::InvalidCommand(
-                    "Usage: project save [--force]".to_string(),
+                    "Usage: project save [project.scadtui] [--force]".to_string(),
                 )),
             },
             "Save the current .scadtui project package",
             0,
-            Some(1),
-            "project save [--force]",
-            vec!["project save", "project save --force"],
+            Some(2),
+            "project save [project.scadtui] [--force]",
+            vec![
+                "project save",
+                "project save model.scadtui",
+                "project save --force",
+            ],
             CommandType::NoArg,
             false,
             true,
         )
-        .with_arguments(vec![ArgumentSpec::literal("force", false, &["--force"])]),
+        .with_arguments(vec![
+            ArgumentSpec::path("project", false, &[PROJECT_EXTENSION]),
+            ArgumentSpec::literal("force", false, &["--force"]),
+        ]),
     );
 
     registry.register(
@@ -4266,6 +4462,73 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
             CompletionSource::ProjectSource {
                 editable_only: true,
             },
+        )]),
+    );
+
+    registry.register(
+        CommandDef::new(
+            "source copy",
+            Vec::<&str>::new(),
+            |app, args| cmd_copy_source(app, args[0]),
+            "Copy an editable source into the project source clipboard",
+            1,
+            Some(1),
+            "source copy <source>",
+            vec!["source copy parts/arm.scad"],
+            CommandType::NoArg,
+            false,
+            true,
+        )
+        .with_arguments(vec![ArgumentSpec::new(
+            "source",
+            true,
+            CompletionSource::ProjectSource {
+                editable_only: true,
+            },
+        )]),
+    );
+
+    registry.register(
+        CommandDef::new(
+            "source cut",
+            Vec::<&str>::new(),
+            |app, args| cmd_cut_source(app, args[0]),
+            "Cut an unreferenced editable source into the project source clipboard",
+            1,
+            Some(1),
+            "source cut <source>",
+            vec!["source cut parts/arm.scad"],
+            CommandType::NoArg,
+            true,
+            true,
+        )
+        .with_arguments(vec![ArgumentSpec::new(
+            "source",
+            true,
+            CompletionSource::ProjectSource {
+                editable_only: true,
+            },
+        )]),
+    );
+
+    registry.register(
+        CommandDef::new(
+            "source paste",
+            Vec::<&str>::new(),
+            |app, args| cmd_paste_source(app, args.first().copied()),
+            "Paste the project source clipboard, optionally under a new name",
+            0,
+            Some(1),
+            "source paste [name]",
+            vec!["source paste", "source paste copied-arm"],
+            CommandType::NoArg,
+            true,
+            true,
+        )
+        .with_arguments(vec![ArgumentSpec::new(
+            "name",
+            false,
+            CompletionSource::None,
         )]),
     );
 
@@ -5867,6 +6130,69 @@ mod tests {
     }
 
     #[test]
+    fn test_first_project_save_accepts_a_path_and_derives_the_project_name() {
+        let directory = tempfile::tempdir().unwrap();
+        let path_without_extension = directory.path().join("vernier");
+        let expected_path = directory.path().join("vernier.scadtui");
+        let mut app = App::new();
+
+        cmd_write(&mut app, path_without_extension.to_str().unwrap()).unwrap();
+
+        assert_eq!(app.project_name, "vernier");
+        assert_eq!(
+            app.current_file.as_deref(),
+            Some(expected_path.to_str().unwrap())
+        );
+        let mut restored = App::new();
+        cmd_load_force(&mut restored, expected_path.to_str().unwrap()).unwrap();
+        assert_eq!(restored.project_name, "vernier");
+    }
+
+    #[test]
+    fn test_source_clipboard_copy_cut_and_paste_use_stable_numeric_names() {
+        let mut app = App::new();
+        cmd_new_file(&mut app, "arm").unwrap();
+
+        cmd_copy_source(&mut app, "arm.scad").unwrap();
+        cmd_paste_source(&mut app, None).unwrap();
+        assert_eq!(app.ast.active_source.as_deref(), Some("arm2.scad"));
+
+        cmd_copy_source(&mut app, "arm2.scad").unwrap();
+        cmd_paste_source(&mut app, None).unwrap();
+        assert_eq!(app.ast.active_source.as_deref(), Some("arm3.scad"));
+
+        cmd_cut_source(&mut app, "arm3.scad").unwrap();
+        assert!(!app
+            .ast
+            .embedded_sources
+            .iter()
+            .any(|source| source.virtual_path == "arm3.scad"));
+        cmd_paste_source(&mut app, None).unwrap();
+        assert_eq!(app.ast.active_source.as_deref(), Some("arm3.scad"));
+    }
+
+    #[test]
+    fn test_source_paste_rewrites_outgoing_dependency_references() {
+        let mut app = App::new();
+        cmd_new_file(&mut app, "shared/helper").unwrap();
+        cmd_new_file(&mut app, "parts/arm").unwrap();
+        cmd_use_library(&mut app, "shared/helper.scad").unwrap();
+
+        cmd_copy_source(&mut app, "parts/arm.scad").unwrap();
+        cmd_paste_source(&mut app, Some("copies/deep/arm-copy")).unwrap();
+
+        let dependency = app
+            .ast
+            .source_dependencies
+            .iter()
+            .find(|dependency| dependency.from == "copies/deep/arm-copy.scad")
+            .unwrap();
+        assert_eq!(dependency.to, "shared/helper.scad");
+        assert_eq!(dependency.reference, "../../shared/helper.scad");
+        assert_eq!(app.ast.uses, ["../../shared/helper.scad"]);
+    }
+
+    #[test]
     fn test_project_name_round_trips_and_source_rename_updates_references() {
         let directory = tempfile::tempdir().unwrap();
         let project_path = directory.path().join("renamed.scadtui");
@@ -7099,6 +7425,26 @@ mod tests {
             revolved_app.ast.find_node_by_id(&rotate).unwrap().name,
             "rotate_extrude"
         );
+    }
+
+    #[test]
+    fn test_container_insert_uses_the_current_node_without_explicit_selection() {
+        let mut app = App::new();
+        let polygon = cmd_insert(
+            &mut app,
+            "polygon",
+            None,
+            Some("points=[[0,0],[10,0],[0,10]]"),
+        )
+        .unwrap();
+        assert!(app.selected_nodes.is_empty());
+        assert_eq!(app.tree_state.borrow().selected().last(), Some(&polygon));
+
+        run_insert_command(&mut app, &["linear_extrude", "height=5"], false).unwrap();
+
+        assert_eq!(app.ast.modules.len(), 1);
+        assert_eq!(app.ast.modules[0].name, "linear_extrude");
+        assert_eq!(app.ast.modules[0].children[0].name, "polygon");
     }
 
     #[test]

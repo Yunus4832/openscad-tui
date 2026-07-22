@@ -20,11 +20,7 @@ pub fn handle_key(key: KeyEvent, app: &mut App) {
         InputMode::Command => handle_command_input(key, app),
         InputMode::ModuleEnterParams => handle_module_params_input(key, app),
         InputMode::Help => handle_help_input(key, app),
-        InputMode::Normal => match app.screen {
-            crate::app::Screen::Editor => handle_normal_input(key, app),
-            crate::app::Screen::ModelPreview => handle_model_key(key, app),
-            crate::app::Screen::Assembly => handle_assembly_key(key, app),
-        },
+        InputMode::Normal => handle_keymap_input(key, app),
     }
 }
 
@@ -238,305 +234,18 @@ fn mouse_orbit_delta(delta_x: i32, delta_y: i32) -> (f32, f32) {
 }
 
 /// Normal mode: Quick keybindings
-fn handle_normal_input(key: KeyEvent, app: &mut App) {
-    match key.code {
-        // i - insert module (mapped to :insert command)
-        KeyCode::Char('i') => {
+fn handle_keymap_input(key: KeyEvent, app: &mut App) {
+    match crate::keymap::resolve_key_action(key, app) {
+        Some(crate::keymap::KeyAction::Execute(command)) => execute_shortcut(app, &command),
+        Some(crate::keymap::KeyAction::BeginCommand(command)) => {
             app.input_mode = InputMode::Command;
-            app.input_buffer.set_content("insert ");
+            app.input_buffer.set_content(&command);
+            app.completion_active = false;
+            app.completion_candidates.clear();
+            app.clear_error();
         }
-
-        // I - insert a module before the current node
-        KeyCode::Char('I') => {
-            app.input_mode = InputMode::Command;
-            app.input_buffer.set_content("insert-before ");
-        }
-
-        // a - edit arguments on selected nodes or the current node
-        KeyCode::Char('a') => {
-            app.input_mode = InputMode::Command;
-            app.input_buffer.set_content("set ");
-        }
-
-        // A - remove an explicitly set argument
-        KeyCode::Char('A') => {
-            app.input_mode = InputMode::Command;
-            app.input_buffer.set_content("unset ");
-        }
-
-        // t - translate
-        KeyCode::Char('t') => {
-            app.input_mode = InputMode::Command;
-            app.input_buffer.set_content("translate ");
-        }
-
-        // s - scale
-        KeyCode::Char('s') => {
-            app.input_mode = InputMode::Command;
-            app.input_buffer.set_content("scale ");
-        }
-
-        // n - create a project-owned SCAD source
-        KeyCode::Char('n') => {
-            app.input_mode = InputMode::Command;
-            app.input_buffer.set_content("source new ");
-        }
-
-        // Navigation: j (next), k (prev), h (back/collapse), l (forward/expand)
-        KeyCode::Char('j') | KeyCode::Down => {
-            execute_shortcut(app, "next");
-        }
-        KeyCode::Char('k') | KeyCode::Up => {
-            execute_shortcut(app, "prev");
-        }
-        KeyCode::Char('h') | KeyCode::Left => {
-            execute_shortcut(app, "collapse");
-        }
-        KeyCode::Char('l') | KeyCode::Right => {
-            execute_shortcut(app, "expand");
-        }
-
-        // v - select/toggle node
-        KeyCode::Char('v') => {
-            execute_shortcut(app, "select");
-        }
-
-        KeyCode::Char(' ') => {
-            execute_shortcut(app, "visibility toggle");
-        }
-
-        // Vim-style structural editing
-        KeyCode::Char('y') => {
-            execute_shortcut(app, "yank");
-        }
-        KeyCode::Char('p') => {
-            execute_shortcut(app, "paste");
-        }
-        KeyCode::Char('x') => {
-            execute_shortcut(app, "remove");
-        }
-        KeyCode::Char('c') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.input_mode = InputMode::Command;
-            app.input_buffer.set_content("replace ");
-        }
-
-        // u - undo
-        KeyCode::Char('u') => {
-            execute_shortcut(app, "undo");
-        }
-
-        // r - rotate (Ctrl+r for redo)
-        KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            execute_shortcut(app, "redo");
-        }
-        KeyCode::Char('r') => {
-            app.input_mode = InputMode::Command;
-            app.input_buffer.set_content("rotate ");
-        }
-
-        // d - delete node
-        KeyCode::Char('d') => {
-            execute_shortcut(app, "delete");
-        }
-
-        // w - save the current project package
-        KeyCode::Char('w') => {
-            app.input_mode = InputMode::Command;
-            app.input_buffer.set_content("project save");
-        }
-
-        // e - import an OpenSCAD source into the current project
-        KeyCode::Char('e') => {
-            app.input_mode = InputMode::Command;
-            app.input_buffer.set_content("source import ");
-        }
-
-        // o - open a .scadtui project
-        KeyCode::Char('o') => {
-            app.input_mode = InputMode::Command;
-            app.input_buffer.set_content("project open ");
-        }
-
-        // L - attach a SCAD source library
-        KeyCode::Char('L') => {
-            app.input_mode = InputMode::Command;
-            app.input_buffer.set_content("library load ");
-        }
-
-        // : - enter command mode
-        KeyCode::Char(':') => {
-            app.input_mode = InputMode::Command;
-            app.input_buffer.clear();
-        }
-
-        // Enter - toggle expand/collapse node
-        KeyCode::Enter => {
-            let selected = app.tree_state.borrow().selected().last().cloned();
-            let project_source = selected
-                .as_deref()
-                .and_then(|id| id.strip_prefix("__project_source_"))
-                .and_then(|index| index.parse::<usize>().ok())
-                .and_then(|index| app.ast.embedded_sources.get(index))
-                .map(|source| (source.virtual_path.clone(), source.editable));
-            match project_source {
-                Some((path, true)) => {
-                    execute_shortcut(
-                        app,
-                        &format!("source switch {}", quote_command_argument(&path)),
-                    );
-                }
-                Some((path, false)) => app.set_error(&format!("Source '{path}' is read-only")),
-                None => execute_shortcut(app, "toggle"),
-            }
-        }
-
-        // q - quit
-        KeyCode::Char('q') => {
-            execute_shortcut(app, "quit");
-        }
-
-        // Ctrl+C to quit
-        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            execute_shortcut(app, "quit");
-        }
-
-        // ? - show help
-        KeyCode::Char('?') => {
-            execute_shortcut(app, "help");
-        }
-
-        // P - switch between source and model preview
-        KeyCode::Char('P') => execute_shortcut(app, "model toggle"),
-
-        // R - always render the active buffer and show the new model preview
-        KeyCode::Char('R') => execute_shortcut(app, "model render"),
-
-        _ => {}
-    }
-}
-
-fn handle_model_key(key: KeyEvent, app: &mut App) {
-    if key.code == KeyCode::Char(':') {
-        app.input_mode = InputMode::Command;
-        app.input_buffer.clear();
-        app.clear_error();
-        return;
-    }
-    if let Some(command) = model_key_command(key) {
-        execute_shortcut(app, command);
-    }
-}
-
-fn handle_assembly_key(key: KeyEvent, app: &mut App) {
-    match key.code {
-        KeyCode::Char(':') => begin_assembly_command(app, ""),
-        KeyCode::Char('n') => begin_assembly_command(app, "assembly new "),
-        KeyCode::Char('a') => begin_assembly_command(app, "assembly add "),
-        KeyCode::Char('t') => prefill_assembly_transform(app, "translate"),
-        KeyCode::Char('r') => prefill_assembly_transform(app, "rotate"),
-        KeyCode::Char('s') => prefill_assembly_transform(app, "scale"),
-        KeyCode::Char('o') => prefill_assembly_transform(app, "pivot"),
-        KeyCode::Char('g') => prefill_assembly_parent(app),
-        KeyCode::Char('e') => begin_assembly_command(app, "assembly export "),
-        _ => {}
-    }
-    if app.input_mode == InputMode::Command {
-        return;
-    }
-    let command: Option<String> = match key.code {
-        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('P') => Some("assembly close".into()),
-        KeyCode::Char('j') => Some("assembly select next".into()),
-        KeyCode::Char('k') => Some("assembly select prev".into()),
-        KeyCode::Char('R') => Some("assembly render".into()),
-        KeyCode::Char('v') => Some("assembly visibility toggle".into()),
-        KeyCode::Char('y') => Some("assembly copy".into()),
-        KeyCode::Char('p') => Some("assembly paste".into()),
-        KeyCode::Char('d') => Some("assembly remove".into()),
-        _ => model_key_command(key).map(str::to_string),
-    };
-    if let Some(command) = command {
-        execute_shortcut(app, &command);
-    }
-}
-
-fn begin_assembly_command(app: &mut App, command: &str) {
-    app.input_mode = InputMode::Command;
-    app.input_buffer.set_content(command);
-    app.completion_active = false;
-    app.completion_candidates.clear();
-    app.clear_error();
-}
-
-fn selected_assembly_part(app: &App) -> Option<&openscad_assembly::PartInstance> {
-    let active = app.active_assembly.as_deref()?;
-    let selected = app.selected_assembly_part.as_deref()?;
-    app.assemblies
-        .iter()
-        .find(|assembly| assembly.id == active || assembly.name == active)?
-        .part(selected)
-}
-
-fn format_assembly_values(values: [f32; 3]) -> String {
-    format!("{} {} {}", values[0], values[1], values[2])
-}
-
-fn prefill_assembly_transform(app: &mut App, operation: &str) {
-    let Some(part) = selected_assembly_part(app) else {
-        app.set_error("No assembly part is selected");
-        return;
-    };
-    let values = match operation {
-        "translate" => part.transform.translation,
-        "rotate" => part.transform.rotation_degrees,
-        "scale" => part.transform.scale,
-        "pivot" => part.transform.pivot,
-        _ => unreachable!(),
-    };
-    let command = format!(
-        "assembly {operation} {} {}",
-        part.id,
-        format_assembly_values(values)
-    );
-    begin_assembly_command(app, &command);
-}
-
-fn prefill_assembly_parent(app: &mut App) {
-    let Some(part) = selected_assembly_part(app) else {
-        app.set_error("No assembly part is selected");
-        return;
-    };
-    let parent = part.parent.as_deref().unwrap_or("root");
-    let command = format!("assembly parent {} {parent}", part.id);
-    begin_assembly_command(app, &command);
-}
-
-fn model_key_command(key: KeyEvent) -> Option<&'static str> {
-    match key.code {
-        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('P') => Some("model close"),
-        KeyCode::Char('R') => Some("model render"),
-        KeyCode::Char('h') => Some("camera orbit -5 0"),
-        KeyCode::Char('l') => Some("camera orbit 5 0"),
-        KeyCode::Char('j') => Some("camera orbit 0 -5"),
-        KeyCode::Char('k') => Some("camera orbit 0 5"),
-        KeyCode::Left => Some("camera pan -0.05 0"),
-        KeyCode::Right => Some("camera pan 0.05 0"),
-        KeyCode::Up => Some("camera pan 0 0.05"),
-        KeyCode::Down => Some("camera pan 0 -0.05"),
-        KeyCode::Char('+') | KeyCode::Char('=') => Some("camera zoom 0.85"),
-        KeyCode::Char('-') => Some("camera zoom 1.15"),
-        KeyCode::Char('f') => Some("camera fit"),
-        KeyCode::Char('p') => Some("camera projection toggle"),
-        KeyCode::Char('x') => Some("display axes toggle"),
-        KeyCode::Char(' ') => Some("camera auto-rotate toggle"),
-        KeyCode::Char('1') => Some("camera view front"),
-        KeyCode::Char('2') => Some("camera view back"),
-        KeyCode::Char('3') => Some("camera view left"),
-        KeyCode::Char('4') => Some("camera view right"),
-        KeyCode::Char('5') => Some("camera view top"),
-        KeyCode::Char('6') => Some("camera view bottom"),
-        KeyCode::Char('7') => Some("camera view iso"),
-        KeyCode::Char('?') => Some("help"),
-        _ => None,
+        Some(crate::keymap::KeyAction::Error(message)) => app.set_error(&message),
+        None => {}
     }
 }
 
@@ -884,17 +593,6 @@ fn execute_user_command(app: &mut App, cmd: &str) {
 
 fn execute_shortcut(app: &mut App, command: &str) {
     execute_command_registry(app, command, CommandOrigin::Shortcut);
-}
-
-fn quote_command_argument(value: &str) -> String {
-    if value
-        .chars()
-        .any(|character| character.is_whitespace() || matches!(character, '"' | '\\' | '\''))
-    {
-        format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
-    } else {
-        value.to_string()
-    }
 }
 
 /// Handle Tab key for autocompletion
@@ -2816,6 +2514,51 @@ mod tests {
     }
 
     #[test]
+    fn test_project_source_keys_use_source_commands_and_assembly_enter_opens_screen() {
+        let mut app = App::new();
+        commands::cmd_new_file(&mut app, "arm").unwrap();
+        let arm_index = app
+            .ast
+            .embedded_sources
+            .iter()
+            .position(|source| source.virtual_path == "arm.scad")
+            .unwrap();
+        app.tree_state.borrow_mut().select(vec![
+            "__project_sources".into(),
+            format!("__project_source_{arm_index}"),
+        ]);
+
+        handle_key(
+            KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE),
+            &mut app,
+        );
+        assert_eq!(app.input_mode, InputMode::Command);
+        assert_eq!(app.input_buffer.content(), "source rename arm.scad ");
+
+        app.input_mode = InputMode::Normal;
+        handle_key(
+            KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE),
+            &mut app,
+        );
+        assert_eq!(
+            app.source_clipboard
+                .as_ref()
+                .map(|clipboard| clipboard.source.virtual_path.as_str()),
+            Some("arm.scad")
+        );
+
+        let assembly = openscad_assembly::AssemblyDocument::new("robot");
+        let assembly_id = assembly.id.clone();
+        app.assemblies.push(assembly);
+        app.tree_state
+            .borrow_mut()
+            .select(vec!["__assemblies".into(), "__assembly_0".into()]);
+        handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &mut app);
+        assert_eq!(app.active_assembly.as_deref(), Some(assembly_id.as_str()));
+        assert_eq!(app.screen, crate::app::Screen::Assembly);
+    }
+
+    #[test]
     fn test_set_completion_uses_node_and_module_scope_parameters() {
         let mut app = App::new();
         let cube_id = commands::cmd_insert(&mut app, "cube", None, Some("size=10")).unwrap();
@@ -3543,29 +3286,35 @@ mod tests {
 
     #[test]
     fn test_model_keys_map_to_registered_commands() {
+        let mut app = App::new();
+        app.enter_model_screen();
+        let command = |key| match crate::keymap::resolve_key_action(key, &app) {
+            Some(crate::keymap::KeyAction::Execute(command)) => Some(command),
+            _ => None,
+        };
         assert_eq!(
-            model_key_command(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE)),
-            Some("camera orbit -5 0")
+            command(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE)),
+            Some("camera orbit -5 0".to_string())
         );
         assert_eq!(
-            model_key_command(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE)),
-            Some("camera projection toggle")
+            command(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE)),
+            Some("camera projection toggle".to_string())
         );
         assert_eq!(
-            model_key_command(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE)),
-            Some("camera auto-rotate toggle")
+            command(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE)),
+            Some("camera auto-rotate toggle".to_string())
         );
         assert_eq!(
-            model_key_command(KeyEvent::new(KeyCode::Char('7'), KeyModifiers::NONE)),
-            Some("camera view iso")
+            command(KeyEvent::new(KeyCode::Char('7'), KeyModifiers::NONE)),
+            Some("camera view iso".to_string())
         );
         assert_eq!(
-            model_key_command(KeyEvent::new(KeyCode::Char('R'), KeyModifiers::SHIFT)),
-            Some("model render")
+            command(KeyEvent::new(KeyCode::Char('R'), KeyModifiers::SHIFT)),
+            Some("model render".to_string())
         );
         assert_eq!(
-            model_key_command(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
-            Some("model close")
+            command(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            Some("model close".to_string())
         );
     }
 
@@ -3606,7 +3355,11 @@ mod tests {
             KeyCode::Char(' '),
         ];
         for key in keys {
-            let command = model_key_command(KeyEvent::new(key, KeyModifiers::NONE)).unwrap();
+            let Some(crate::keymap::KeyAction::Execute(command)) =
+                crate::keymap::resolve_key_action(KeyEvent::new(key, KeyModifiers::NONE), &app)
+            else {
+                panic!("key {key:?} has no executable binding");
+            };
             assert!(
                 app.ui_regions
                     .camera_buttons
@@ -3614,7 +3367,7 @@ mod tests {
                     .any(|button| button.command == command),
                 "toolbar is missing the key command {command}"
             );
-            let command_line = CommandLine::parse(command);
+            let command_line = CommandLine::parse(&command);
             assert!(app
                 .command_registry
                 .resolve(&command_line.values())
