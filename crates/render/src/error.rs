@@ -36,6 +36,9 @@ pub enum RenderError {
     #[error("invalid COLLADA data: {0}")]
     InvalidDae(String),
 
+    #[error("glTF export failed: {0}")]
+    GltfExport(String),
+
     #[error("unsupported model file format for '{path}'; expected .off, .stl, or .dae")]
     UnsupportedMeshFormat { path: String },
 

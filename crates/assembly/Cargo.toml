@@ -12,4 +12,5 @@ glam.workspace = true
 openscad-render = { path = "../render" }
 
 [dev-dependencies]
+serde_json.workspace = true
 tempfile.workspace = true

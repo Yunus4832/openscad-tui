@@ -10,7 +10,7 @@ use openscad_render::{Mesh, RenderInstance, RenderScene};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-pub use exporter::write_dae;
+pub use exporter::write_gltf;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]

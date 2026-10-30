@@ -550,7 +550,7 @@ fn dispatch_assembly(app: &mut App, operation: &'static str, args: &[&str]) -> C
 pub fn cmd_assembly(app: &mut App, args: &[&str]) -> CommandResult<()> {
     let usage = || {
         CommandError::InvalidCommand(
-            "Usage: assembly new [name] | open [name] | list | add <project-source> [name] | select <part|next|prev|toggle|clear> | copy [part] | paste [parent|root] | remove [part] | parent [part] <parent|root> | translate|rotate|scale|pivot [part] <x> <y> <z> | visibility [part] <show|hide|toggle> | undo | redo | render | export <file.dae> | close".into(),
+            "Usage: assembly new [name] | open [name] | list | add <project-source> [name] | select <part|next|prev|toggle|clear> | copy [part] | paste [parent|root] | remove [part] | parent [part] <parent|root> | translate|rotate|scale|pivot [part] <x> <y> <z> | visibility [part] <show|hide|toggle> | undo | redo | render | export <file.glb|file.gltf> | close".into(),
         )
     };
     let history = args
@@ -876,9 +876,18 @@ pub fn cmd_assembly(app: &mut App, args: &[&str]) -> CommandResult<()> {
             app.enter_assembly_screen();
         }
         ["export", destination] => {
-            let path = ensure_extension(resolve_export_path(app, destination)?, "dae");
+            let mut path = resolve_export_path(app, destination)?;
+            if path.extension().is_none() {
+                path.set_extension("glb");
+            }
+            reject_dae_export(&path)?;
+            if !has_extension(&path, "glb") && !has_extension(&path, "gltf") {
+                return Err(CommandError::Custom(
+                    "Assembly export requires .glb or .gltf".into(),
+                ));
+            }
             let (resolved, elapsed) = compile_assembly(app)?;
-            openscad_assembly::write_dae(&path, &resolved)
+            openscad_assembly::write_gltf(&path, &resolved)
                 .map_err(|error| CommandError::Custom(error.to_string()))?;
             app.set_info(&format!(
                 "Exported assembly to '{}' in {:.2}s",
@@ -2671,24 +2680,32 @@ fn cmd_export_tree(app: &mut App, directory: &str) -> CommandResult<()> {
     Ok(())
 }
 
-fn cmd_export_model(app: &mut App, filename: &str) -> CommandResult<()> {
-    let filepath = resolve_export_path(app, filename)?;
-    if filepath.extension().is_none() {
+fn reject_dae_export(path: &Path) -> CommandResult<()> {
+    if has_extension(path, "dae") {
         return Err(CommandError::Custom(
-            "model export requires an output extension".to_string(),
+            "DAE export has been removed; use .glb or .gltf (with automatic UVs)".into(),
         ));
     }
+    Ok(())
+}
+
+fn cmd_export_model(app: &mut App, filename: &str) -> CommandResult<()> {
+    let mut filepath = resolve_export_path(app, filename)?;
+    if filepath.extension().is_none() {
+        filepath.set_extension("glb");
+    }
+    reject_dae_export(&filepath)?;
     let (source, project) = active_source_project(app)?;
     let mut generator = openscad_render::OpenScadGenerator::new("openscad");
     if let Some(project) = project {
         generator = generator.with_project(project);
     }
     let started = std::time::Instant::now();
-    if has_extension(&filepath, "dae") {
+    if has_extension(&filepath, "glb") || has_extension(&filepath, "gltf") {
         let generated = generator
             .generate(&source)
             .map_err(|error| CommandError::Custom(error.to_string()))?;
-        openscad_render::write_dae(&filepath, &generated.mesh)
+        openscad_render::write_gltf(&filepath, &generated.mesh)
             .map_err(|error| CommandError::Custom(error.to_string()))?;
     } else {
         generator
@@ -5338,7 +5355,7 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
             1,
             Some(1),
             "model export <artifact>",
-            vec!["model export model.stl", "model export model.dae"],
+            vec!["model export model.stl", "model export model.glb"],
             CommandType::NoArg,
             false,
             true,
@@ -5872,11 +5889,11 @@ pub fn init_command_registry(registry: &mut crate::command_registry::CommandRegi
     register_assembly(
         "export",
         |app, args| dispatch_assembly(app, "export", args),
-        "Export the active assembly as hierarchical DAE",
+        "Export the active assembly as hierarchical glTF/GLB with UVs",
         1,
         Some(1),
-        "assembly export <file.dae>",
-        vec![ArgumentSpec::path("destination", true, &["dae"])],
+        "assembly export <file.glb|file.gltf>",
+        vec![ArgumentSpec::path("destination", true, &["glb", "gltf"])],
     );
     register_assembly(
         "close",
@@ -6003,6 +6020,22 @@ mod tests {
     }
 
     #[test]
+    fn test_removed_dae_and_unsupported_assembly_export_fail_before_compilation() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = App::new();
+        let dae = directory.path().join("removed.DAE");
+        let error = cmd_export_model(&mut app, dae.to_str().unwrap()).unwrap_err();
+        assert!(error.to_string().contains("DAE export has been removed"));
+        let error = cmd_assembly(&mut app, &["export", dae.to_str().unwrap()]).unwrap_err();
+        assert!(error.to_string().contains("DAE export has been removed"));
+        assert!(!dae.exists());
+        let stl = directory.path().join("unsupported.stl");
+        let error = cmd_assembly(&mut app, &["export", stl.to_str().unwrap()]).unwrap_err();
+        assert!(error.to_string().contains(".glb or .gltf"));
+        assert!(!stl.with_extension("glb").exists());
+    }
+
+    #[test]
     fn test_assembly_export_compiles_multiple_sources_and_reuses_mesh_cache() {
         if std::process::Command::new("openscad")
             .arg("--version")
@@ -6027,13 +6060,14 @@ mod tests {
         cmd_assembly(&mut app, &["new", "robot"]).unwrap();
         cmd_assembly(&mut app, &["add", "main.scad", "body"]).unwrap();
         cmd_assembly(&mut app, &["add", "parts/head.scad", "head"]).unwrap();
-        let destination = directory.path().join("robot.dae");
+        let destination = directory.path().join("robot.gltf");
 
         cmd_assembly(&mut app, &["export", destination.to_str().unwrap()]).unwrap();
 
-        let xml = fs::read_to_string(&destination).unwrap();
-        assert_eq!(xml.matches("<geometry id=").count(), 2);
-        assert_eq!(xml.matches("<node id=").count(), 2);
+        let json: serde_json::Value =
+            serde_json::from_slice(&fs::read(&destination).unwrap()).unwrap();
+        assert_eq!(json["meshes"].as_array().unwrap().len(), 2);
+        assert_eq!(json["nodes"].as_array().unwrap().len(), 3);
         let body_source = openscad_assembly::MeshSourceRef::project_source("main.scad");
         let cached = Arc::clone(&app.assembly_mesh_cache[&body_source].1);
         cmd_assembly(&mut app, &["translate", "body", "5", "0", "0"]).unwrap();
@@ -6042,6 +6076,21 @@ mod tests {
             &cached,
             &app.assembly_mesh_cache[&body_source].1
         ));
+        let default_path = directory.path().join("assembly-default");
+        cmd_assembly(&mut app, &["export", default_path.to_str().unwrap()]).unwrap();
+        let glb = fs::read(default_path.with_extension("glb")).unwrap();
+        assert_eq!(&glb[..4], b"glTF");
+
+        let single = directory.path().join("single.GLTF");
+        cmd_export_model(&mut app, single.to_str().unwrap()).unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&fs::read(single).unwrap()).unwrap();
+        assert!(json["meshes"][0]["primitives"][0]["attributes"]["TEXCOORD_0"].is_number());
+        let default_path = directory.path().join("model-default");
+        cmd_export_model(&mut app, default_path.to_str().unwrap()).unwrap();
+        assert_eq!(
+            &fs::read(default_path.with_extension("glb")).unwrap()[..4],
+            b"glTF"
+        );
     }
 
     fn assembly_part<'a>(app: &'a App, name: &str) -> &'a openscad_assembly::PartInstance {

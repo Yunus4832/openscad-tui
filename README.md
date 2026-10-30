@@ -24,7 +24,7 @@ Vim 风格按键和命令修改 OpenSCAD AST，可在终端中查看模型树、
 - 在函数调用与列表嵌套表达式中继续补全
 - 调用 OpenSCAD 生成 OFF 网格，并通过 CPU 光栅化显示交互式模型预览
 - 将多个可编辑项目源编译为共享 mesh，在独立 Assembly Screen 中分层装配、变换和预览
-- 将装配以保留零件层级与几何实例的白膜 COLLADA `.dae` 场景导出
+- 将模型与装配导出为带自动 UV 的 glTF 2.0 / GLB，保留装配层级与几何实例
 - 切换透视/正交投影、标准视角、相机环绕/平移/缩放和自动旋转
 
 核心表达式支持布尔值、整数、浮点数、字符串、`undef`、标识符、列表、范围、
@@ -32,8 +32,11 @@ Vim 风格按键和命令修改 OpenSCAD AST，可在终端中查看模型树、
 
 ## 安装
 
-需要 Rust 2021 edition 兼容工具链。当前版本尚未发布到 crates.io，从已经拉取的源码目录
-安装时在仓库根目录执行：
+需要 Rust 2021 edition 兼容工具链，以及用于构建自动 UV 展开库 xatlas 的 C++11 编译器和
+libclang（bindgen 在构建时生成绑定）。例如 Debian/Ubuntu 可先执行
+`sudo apt install build-essential clang libclang-dev`；其他平台需提供对应的 C++ 工具链与
+libclang，必要时用 `LIBCLANG_PATH` 指定其动态库目录。运行已构建的程序不需要 clang。
+当前版本尚未发布到 crates.io，从已经拉取的源码目录安装时在仓库根目录执行：
 
 ```bash
 cargo install --path . --locked
@@ -290,7 +293,7 @@ source include gears.scad
 model render
 model preview --render
 model export model.stl
-model export model.dae
+model export model.glb
 model view model.off
 model view model.stl
 assembly new robot
@@ -298,7 +301,7 @@ assembly add vernier_body.scad body
 assembly add vernier_cursor.scad cursor
 assembly translate cursor 20 0 0
 assembly render
-assembly export vernier.dae
+assembly export vernier.glb
 wq
 ```
 
@@ -336,8 +339,9 @@ wq
   `project open/new ... --force` 可以明确丢弃未保存状态。
 - `source export <file.scad>` 只导出当前 buffer；`project export-sources <directory>` 导出当前 buffer
   及其可达依赖组成的完整 SCAD 源码树；`model export <artifact>` 按目标后缀生成模型产物。
-  `.stl`、`.3mf` 等格式仍由 OpenSCAD 原生导出；`.dae` 会先生成统一三角网格，再输出
-  静态 COLLADA 1.4.1 几何。DAE 导出不包含骨骼、动画、材质、相机或通用场景语义。
+  `.stl`、`.3mf` 等格式仍由 OpenSCAD 原生导出；`.glb` / `.gltf` 会先生成统一三角网格，
+  再输出带平面法线、自动 UV 和白色非金属材质的静态 glTF 2.0 模型；省略后缀默认 `.glb`。
+  DAE 导出已移除，指定 `.dae` 会提示改用 `.glb` / `.gltf`；现有 DAE 导入预览保留。
   相对导出路径以当前 `.scadtui` 项目包所在目录为基准；没有项目文件时才使用启动程序时
   的工作目录。
 - `assembly` 管理与源码 AST 分离的刚性零件装配。`assembly add` 只接受项目中的可编辑
@@ -373,7 +377,7 @@ wq
 - 装配：`assembly new|open|list|add|select|copy|paste|remove|parent|translate|rotate|scale|pivot|visibility|undo|redo|render|export|close`
 - 系统：`help`、`version`、`diagnostics [file]`、`quit`、`quit!`、`wq`
 
-## 零件装配与 DAE 导出
+## 零件装配与 glTF/GLB 导出
 
 装配是 `.scadtui` 项目中的独立数据模型。源码 buffer 只负责产生不可变 mesh；装配保存
 mesh 来源、零件实例、父子层级、局部 TRS、pivot 和可见性。它不会把变换写回 OpenSCAD AST。
@@ -394,13 +398,14 @@ assembly visibility right_arm toggle
 assembly copy right_arm
 assembly paste root
 assembly render
-assembly export exports/robot.dae
+assembly export exports/robot.glb
 ```
 
 `assembly open [name]` 切换装配，`assembly list` 列出项目中的装配，`assembly select`、
 `assembly remove` 和 `assembly parent <part> root` 分别选择、移除和解除父级。命令参数支持
-项目 source 与零件 ID 的补全。相对导出路径仍以 `.scadtui` 所在目录为基准；省略 `.dae`
-后缀会自动补齐。`parent`、四种变换和 `visibility` 都可以省略零件 ID，默认作用于当前
+项目 source 与零件 ID 的补全。相对导出路径仍以 `.scadtui` 所在目录为基准；省略后缀会
+自动补齐 `.glb`，也可显式指定 `.gltf`。其他后缀不受支持。
+`parent`、四种变换和 `visibility` 都可以省略零件 ID，默认作用于当前
 选中的零件；显式 ID 形式继续保留，便于脚本和 CLI 使用。重复添加或粘贴同名零件时，
 显示名与 ID 会依次变为 `arm`、`arm2`、`arm3`。`assembly copy [part]` 复制一个零件实例，
 `assembly paste [parent|root]` 保留其 source、变换、可见性以及默认父级，并产生新的唯一名字。
@@ -431,12 +436,24 @@ Hide、Copy、Paste 等结构操作保留快捷键与命令，但不再占用按
 命令执行。复制实例会继承最初的命名基底，
 例如再次复制 `arm2` 会继续得到 `arm3`，不会生成 `arm22`。
 
-装配导出的 COLLADA 1.4.1 是刻意受限的白膜交换格式：包含具名且唯一的零件节点、
-去重后的三角几何、法线、局部矩阵和 geometry instances。装配不会额外注入根节点；所有
-未设置 parent 的零件会直接成为 visual scene 的顶层节点，根层级完全由装配数据决定。相同
-source 的多个零件节点会共享一份 geometry，这是 DAE 的实例化语义；零件名属于 node，
-geometry 名代表共享 mesh 数据。不包含材质/贴图、UV、动画、骨骼、蒙皮、
-灯光或相机。需要这些内容时，应把 DAE 继续交给 Blender 或游戏资产管线处理。
+装配导出使用 glTF 2.0：包含零件显示名、去重后的三角几何、平面法线、`TEXCOORD_0`、
+局部矩阵和父子层级。同一 source 的多个零件共享一份 mesh 和 UV；隐藏零件保留节点及其
+变换，但不引用几何，因此不会破坏可见子零件的层级。导出增加一个坐标转换根节点，
+将 OpenSCAD 常用的毫米、Z 向上转换为 glTF 的米、Y 向上；原有零件局部变换保留。
+
+推荐使用 `.glb`，将 JSON 与几何缓冲打包为单个二进制文件。`.gltf` 使用可读 JSON，
+几何缓冲通过 base64 data URI 内嵌，同样无需携带额外 `.bin` 文件。
+
+UV 由 xatlas 在导出时按唯一 mesh 自动分岛、展开并打包到一个 0–1 图集中；目标分辨率
+为 1024，分岛 padding 为 4 像素，实际图集尺寸由打包器决定。硬边与 UV 接缝处会拆分
+顶点，实时预览网格和项目包结构不变。生成失败会报错，不会静默输出缺失 UV 的模型。
+模型包含白色非金属粗糙材质，不生成贴图、动画、骨骼、蒙皮、灯光或相机。
+可继续交给 Blender 或游戏资产管线绘制/烘焙贴图。
+
+注意：不同 mesh 使用各自独立的 UV 图集，装配整体不保证共用一张无重叠贴图；同一 mesh
+的实例共享 UV，不适合直接给每个实例烘焙不同外观。参数修改引起拓扑变化时，UV 布局
+可能改变，已有手绘贴图不保证继续对齐。当前内置独立模型预览仍支持 OFF/STL/DAE，
+尚不读取 glTF/GLB；可用外部工具打开导出结果。
 
 ## 模型预览
 
@@ -545,7 +562,7 @@ replace sphere
 openscad-tui/
 ├── crates/
 │   ├── core/       # AST、表达式解析和 OpenSCAD 代码生成
-│   ├── assembly/   # 刚性零件装配模型、层级解析和多节点 DAE 导出
+│   ├── assembly/   # 刚性零件装配模型、层级解析和多节点 glTF/GLB 导出
 │   ├── library/    # 内置/外部模块与函数元数据
 │   ├── render/     # Mesh/RenderScene、相机、CPU 光栅化和异步渲染服务
 │   ├── terminal/   # 双缓冲终端编码、协议后端和 Ratatui 展示适配
@@ -576,7 +593,8 @@ cargo check --workspace
   OpenSCAD 内置库或安装库找到的依赖仍保持外部引用
 - STL、OFF、DXF、SVG、PNG 等由 `import` / `surface` 引用的非 SCAD 资源尚未嵌入项目
 - Assembly 当前只支持刚性白膜零件、父子层级、TRS/pivot 和可见性；不提供顶点编辑、
-  UV/材质、骨骼、蒙皮、动画或物理。静态 DAE 可以独立预览，但不会导入 Assembly 数据模型
+  手动 UV/材质编辑、骨骼、蒙皮、动画或物理。glTF/GLB 导出自动生成 UV。
+  静态 DAE 可以独立预览，但不会导入 Assembly 数据模型
 - 不是自由文本源码编辑器，主要通过 AST 树和命令编辑
 - 函数参数默认值、语义类型检查和高级补全仍有限
 - README 描述的是当前代码状态；项目可从源码或 Git 安装，但尚未发布稳定安装包或 crates.io 版本

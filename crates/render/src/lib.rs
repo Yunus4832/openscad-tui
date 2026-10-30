@@ -16,7 +16,7 @@ mod service;
 
 pub use camera::{Camera, Projection, StandardView};
 pub use error::{RenderError, Result};
-pub use exporter::write_dae;
+pub use exporter::{write_gltf, write_gltf_scene, ExportNode};
 pub use framebuffer::{Framebuffer, PixelSize, RgbaFrame};
 pub use glam::{Mat4, Vec2, Vec3, Vec4};
 pub use importer::{read_mesh_file, read_model_file, ModelFileFormat};
